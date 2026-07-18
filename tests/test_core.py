@@ -8,6 +8,7 @@ import nero.agents as agents
 from nero.navigation.controller import VelocityController
 from nero.perception.object_detector import ObjectDetection, ObjectDetector
 from nero.robot import RobotInterface
+from nero.interaction import announce_and_confirm, deduce_target_distance
 
 
 def test_lazy_agent_exports_are_callable():
@@ -71,6 +72,8 @@ def test_hardware_agent_clis_use_k1_sensors_implicitly(monkeypatch):
     assert not hasattr(orb_args, "camera")
     assert not hasattr(orb_args, "depth_camera")
     assert not hasattr(orb_args, "robot_serial")
+    assert not hasattr(orb_args, "object")
+    assert not hasattr(orb_args, "target_distance")
 
     monkeypatch.setattr(sys, "argv", ["nero-mapping"])
     mapping_args = mapping_agent.parse_args()
@@ -83,3 +86,29 @@ def test_hardware_agent_clis_use_k1_sensors_implicitly(monkeypatch):
     assert not hasattr(map_nav_args, "camera")
     assert not hasattr(map_nav_args, "depth_camera")
     assert not hasattr(map_nav_args, "robot_serial")
+
+
+def test_detection_announcement_requires_explicit_confirmation():
+    spoken = []
+    speaker = SimpleNamespace(speak=spoken.append)
+
+    assert announce_and_confirm(speaker, "chair", lambda _: "yes")
+    assert not announce_and_confirm(speaker, "bottle", lambda _: "no")
+    assert spoken == [
+        "chair detected. Should I follow it?",
+        "bottle detected. Should I follow it?",
+    ]
+
+
+def test_target_distance_is_deduced_internally():
+    assert deduce_target_distance("chair", 4.0) == 2.0
+    assert deduce_target_distance("bottle", 4.0) == 1.2
+    assert deduce_target_distance("unknown", 1.0) == 0.8
+
+
+def test_robot_speak_uses_booster_speaker_service():
+    spoken = []
+    robot = RobotInterface.__new__(RobotInterface)
+    robot._robot = SimpleNamespace(speaker=SimpleNamespace(synthesize=spoken.append))
+    robot.speak("chair detected")
+    assert spoken == ["chair detected"]

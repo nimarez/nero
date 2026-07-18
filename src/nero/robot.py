@@ -176,6 +176,25 @@ class RobotInterface:
     def get_camera_info(self) -> CameraInfo:
         return self._robot.get_camera_info()
 
+    def speak(self, text: str) -> None:
+        """Speak text through the K1 audio service."""
+        services = [
+            getattr(self._robot, "speaker", None),
+            getattr(self._robot, "audio", None),
+            self._robot,
+        ]
+        for service in services:
+            if service is None:
+                continue
+            for method_name in ("synthesize", "speak", "say", "text_to_speech"):
+                method = getattr(service, method_name, None)
+                if callable(method):
+                    method(text)
+                    return
+        raise RuntimeError(
+            "The connected Booster runtime does not expose a speaker API"
+        )
+
     def set_velocity(self, vx: float, vy: float, vyaw: float) -> None:
         """Set robot velocity.
 

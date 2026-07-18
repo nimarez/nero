@@ -28,6 +28,7 @@ from nero.simulation.environment import SimEnvironment
 from nero.simulation.sim_camera import CameraMode
 from nero.utils.visualization import Visualization
 from nero.navigation.policy import NavigationPolicy, PolicyState
+from nero.interaction import announce_and_confirm, deduce_target_distance
 
 logger = logging.getLogger(__name__)
 
@@ -55,70 +56,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def announce_object(speaker, object_name: str, distance: float) -> bool:
-    """Announce detected object via speaker and await user confirmation.
-
-    Args:
-        speaker: Speech synthesis interface (or mock for sim)
-        object_name: Name of detected object
-        distance: Distance to object in meters
-
-    Returns:
-        True if user confirms, False otherwise
-    """
-    message = f"I see a {object_name} at {distance:.1f} meters. Should I go to it?"
-    logger.info(f"Announcing: {message}")
-
-    # In sim mode, just log and prompt
-    if speaker is None:
-        print(f"\n>>> {message}")
-        response = input("Confirm (y/n): ").strip().lower()
-        return response in ("y", "yes")
-
-    # Real robot: use speaker
-    try:
-        speaker.synthesize(message)
-        # Wait for user response via voice or button
-        return True  # Placeholder - would need voice input or button press
-    except Exception as e:
-        logger.error(f"Speaker announcement failed: {e}")
-        return False
-
-
-def deduce_target_distance(object_name: str, distance: float) -> float:
-    """Deduce appropriate target distance based on object type and current distance.
-
-    The robot determines how close to get based on:
-    - Object type (furniture vs small objects)
-    - Current distance to object
-    - Safety margins
-
-    Args:
-        object_name: Name of the object
-        distance: Current distance to object
-
-    Returns:
-        Target distance in meters
-    """
-    # Furniture - stop further away
-    furniture = {"table", "desk", "couch", "sofa", "bed", "chair", "cabinet", "shelf"}
-    # Small objects - get closer
-    small_objects = {"bottle", "cup", "phone", "keys", "book", "lamp", "plant"}
-
-    obj_lower = object_name.lower()
-
-    if obj_lower in furniture:
-        return max(1.0, distance * 0.5)  # Stop at 1m or half current distance
-    elif obj_lower in small_objects:
-        return max(0.5, distance * 0.3)  # Get closer for small objects
-    else:
-        return max(0.8, distance * 0.4)  # Default
-
-
 class SimSpeaker:
     """Mock speaker for simulation."""
 
-    def synthesize(self, text: str) -> None:
+    def speak(self, text: str) -> None:
         """Mock speech synthesis - just print."""
         print(f"\n[SPEAKER] {text}")
 
@@ -177,8 +118,7 @@ def main():
 
     # State tracking
     confirmed_object = None
-    target_distance = None
-    announced_objects = set()  # Track what we've already announced
+    announced_arrival = False
     announce_cooldown = 5.0  # seconds between re-announcing same object
     last_announce_time = {}
 
@@ -196,34 +136,31 @@ def main():
             # Detect objects in real-time
             detections = sim.get_detections()
 
-            # Check for new objects to announce
-            current_time = time.time()
-            for detection in detections:
-                obj_name = detection.label.lower()
-                if obj_name in announced_objects:
-                    # Check cooldown
+            # Announce candidates only while no target is active.
+            if confirmed_object is None:
+                current_time = time.time()
+                for detection in detections:
+                    obj_name = detection.label.lower()
                     if (
                         current_time - last_announce_time.get(obj_name, 0)
                         < announce_cooldown
                     ):
                         continue
-
-                # Announce and await confirmation
-                should_follow = announce_object(speaker, obj_name, detection.distance)
-
-                if should_follow:
-                    confirmed_object = obj_name
-                    target_distance = deduce_target_distance(
-                        obj_name, detection.distance
-                    )
-                    logger.info(
-                        f"Confirmed target: {confirmed_object} at {target_distance:.2f}m"
-                    )
-                    policy.set_target(confirmed_object)
-                    policy._goal.target_distance = target_distance
-                    announced_objects.add(obj_name)
                     last_announce_time[obj_name] = current_time
-                    break  # Only handle one object at a time
+
+                    should_follow = announce_and_confirm(speaker, obj_name)
+                    if should_follow:
+                        confirmed_object = obj_name
+                        target_distance = deduce_target_distance(
+                            obj_name, detection.distance
+                        )
+                        logger.info(
+                            f"Confirmed target: {confirmed_object} at "
+                            f"{target_distance:.2f}m"
+                        )
+                        policy.set_target(confirmed_object)
+                        policy._goal.target_distance = target_distance
+                        break
 
             # Get current policy state
             status = policy.status
@@ -244,7 +181,7 @@ def main():
                         shutdown_event = True
                     elif key == ord("d"):
                         sim.setup_demo_scene()
-                        announced_objects.clear()
+                        last_announce_time.clear()
                         logger.info("Demo scene reloaded")
                 continue
 
@@ -291,17 +228,19 @@ def main():
                     # Reset and look for new object
                     policy.reset()
                     confirmed_object = None
-                    target_distance = None
-                    announced_objects.clear()
+                    announced_arrival = False
+                    last_announce_time.clear()
                     logger.info("Reset - ready for new target")
                 elif key == ord("d"):
                     sim.setup_demo_scene()
-                    announced_objects.clear()
+                    last_announce_time.clear()
                     logger.info("Demo scene reloaded")
 
             # Check for completion
-            if status.state == PolicyState.ARRIVED:
+            if status.state == PolicyState.ARRIVED and not announced_arrival:
                 logger.info(f"Arrived at {confirmed_object}")
+                speaker.speak(f"Arrived at {confirmed_object}.")
+                announced_arrival = True
                 if not args.no_display:
                     logger.info(
                         "Press 'r' to reset and find another object, 'q' to quit"
@@ -319,7 +258,6 @@ def main():
         # Cleanup
         logger.info("Shutting down...")
         policy.stop()
-        sim.stop()
         if not args.no_display:
             cv2.destroyAllWindows()
         logger.info("Shutdown complete")

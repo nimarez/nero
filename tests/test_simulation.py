@@ -88,3 +88,11 @@ def test_sim_policy_loses_missing_target_without_crashing():
     assert status.state == PolicyState.LOST
     assert "Lost object" in status.message
     policy.stop()
+
+
+def test_reset_resumes_live_scanning_while_policy_is_running():
+    sim = SimEnvironment(camera_width=80, camera_height=60)
+    policy = NavigationPolicy(sim_env=sim)
+    policy.start()
+    assert policy.reset().state == PolicyState.SHOWING_CAMERA
+    policy.stop()

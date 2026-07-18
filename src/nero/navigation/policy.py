@@ -597,7 +597,7 @@ class NavigationPolicy:
 
     def reset(self) -> PolicyStatus:
         """Reset the policy to initial state."""
-        self._state = PolicyState.IDLE
+        self._state = PolicyState.SHOWING_CAMERA if self._running else PolicyState.IDLE
         self._goal = None
         self._object_not_found_count = 0
         self._last_detection = None
