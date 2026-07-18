@@ -146,7 +146,7 @@ Camera1.p2: {_yaml_real(d[3])}
 Camera1.k3: {_yaml_real(d[4])}
 Camera.width: {self.width}
 Camera.height: {self.height}
-Camera.fps: {_yaml_real(self.camera_fps)}
+Camera.fps: {int(round(self.camera_fps))}
 Camera.RGB: {1 if self.camera_rgb else 0}
 Stereo.ThDepth: 40.0
 Stereo.b: 0.07732

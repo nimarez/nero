@@ -65,7 +65,7 @@ def test_calibration_round_trip_and_orb_settings(tmp_path):
     assert 'File.version: "1.0"' in text
     assert "Camera1.cx: 160.0" in text
     assert "RGBD.DepthMapFactor: 1000.0" in text
-    assert "Camera.fps: 27.5" in text
+    assert "Camera.fps: 28" in text
     assert "IMU.Frequency: 200.0" in text
     assert "IMU.T_b_c1: !!opencv-matrix" in text
     assert "IMU.InsertKFsWhenLost: 0" in text
