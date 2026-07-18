@@ -15,7 +15,11 @@ fi
 temporary="${model_path}.download"
 trap 'rm -f "${temporary}"' EXIT
 curl --fail --location --retry 3 --output "${temporary}" "${model_url}"
-actual_sha256="$(shasum -a 256 "${temporary}" | awk '{print $1}')"
+if command -v sha256sum >/dev/null 2>&1; then
+  actual_sha256="$(sha256sum "${temporary}" | awk '{print $1}')"
+else
+  actual_sha256="$(shasum -a 256 "${temporary}" | awk '{print $1}')"
+fi
 if [[ "${actual_sha256}" != "${model_sha256}" ]]; then
   echo "Object model checksum mismatch: ${actual_sha256}" >&2
   exit 1
