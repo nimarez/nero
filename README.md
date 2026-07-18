@@ -76,12 +76,14 @@ Studio, switch it to WALK mode, and use its Linux robot terminal:
 ```bash
 ./scripts/setup_booster_studio.sh
 uv run nero-setup-orbslam
-uv run nero-booster-studio
+./scripts/run_booster_studio.sh
 ```
 
 The setup script creates uv's `.venv` with system-site-package access because
 ROS 2 and Booster's SDK are part of the virtual K1 image rather than packages in
 PyPI. Nero's own dependency graph remains locked and installed by `uv sync`.
+The run wrapper sources Studio's ROS 2 environment, then executes
+`uv run nero-booster-studio`; pass normal Nero flags to the wrapper.
 
 The Booster Studio command runs the same object detection, spoken announcement,
 human confirmation, `IMU_RGBD` SLAM, obstacle processing, navigation, and safety
