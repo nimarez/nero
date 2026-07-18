@@ -6,6 +6,7 @@ import logging
 import os
 import queue
 import re
+import threading
 from typing import Any, Callable, Protocol
 
 logger = logging.getLogger(__name__)
@@ -193,6 +194,57 @@ def request_navigation_target(
             return object_name
     finally:
         command_source.stop_listening()
+
+
+class NavigationTargetListener:
+    """Acquire a human direction without blocking sensing or visualization."""
+
+    def __init__(
+        self,
+        speaker: Speaker,
+        command_source: CommandSource,
+        *,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> None:
+        self._speaker = speaker
+        self._command_source = command_source
+        self._cancelled = cancelled
+        self._results: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(
+            target=self._listen,
+            name="nero-navigation-command",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _listen(self) -> None:
+        try:
+            target = request_navigation_target(
+                self._speaker,
+                self._command_source,
+                cancelled=self._cancelled,
+            )
+            self._results.put(("target", target))
+        except BaseException as exc:
+            self._results.put(("error", exc))
+
+    def poll(self) -> str | None:
+        """Return a completed target, or ``None`` while input is pending."""
+        try:
+            kind, value = self._results.get_nowait()
+        except queue.Empty:
+            return None
+        if kind == "error":
+            raise value
+        return str(value)
+
+    def close(self) -> None:
+        self._command_source.close()
 
 
 def safe_stand_off_distance(object_name: str) -> float:

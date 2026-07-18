@@ -19,8 +19,8 @@ import cv2
 from nero.robot import RobotInterface
 from nero.interaction import (
     K1VoiceCommandSource,
+    NavigationTargetListener,
     TerminalCommandSource,
-    request_navigation_target,
 )
 from nero.utils.visualization import Visualization
 from nero.navigation.policy import NavigationPolicy, PolicyState
@@ -89,24 +89,27 @@ def run_agent(
     target_object = None
     announced_arrival = False
     commands = command_source or TerminalCommandSource()
+    target_listener = NavigationTargetListener(
+        robot, commands, cancelled=lambda: shutdown_event
+    )
+    target_listener.start()
 
     try:
         while not shutdown_event:
             loop_start = time.time()
 
-            # Perception is target-driven: wait for a direction before running
-            # the detector or issuing any navigation command.
+            # Human input is acquired in the background. Sensing, SLAM, safety,
+            # and visualization remain live while no target has been requested.
             if target_object is None:
                 try:
-                    target_object = request_navigation_target(
-                        robot, commands, cancelled=lambda: shutdown_event
-                    )
+                    target_object = target_listener.poll()
                 except (EOFError, KeyboardInterrupt, InterruptedError):
                     shutdown_event = True
                     break
-                policy.set_target(target_object)
-                announced_arrival = False
-                logger.info("Accepted navigation target: %s", target_object)
+                if target_object is not None:
+                    policy.set_target(target_object)
+                    announced_arrival = False
+                    logger.info("Accepted navigation target: %s", target_object)
 
             # Read the K1's built-in RGB-D stream.
             try:
@@ -172,6 +175,7 @@ def run_agent(
                     policy.reset()
                     target_object = None
                     announced_arrival = False
+                    target_listener.start()
                     logger.info("Reset - ready for new target")
 
             # Check for completion
@@ -200,7 +204,7 @@ def run_agent(
         logger.info("Shutting down...")
         policy.stop()
         robot.stop()
-        commands.close()
+        target_listener.close()
         if telemetry is not None:
             telemetry.close()
         if not args.no_display:

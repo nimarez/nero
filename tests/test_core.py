@@ -1,5 +1,7 @@
 import math
 import sys
+import threading
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -10,6 +12,7 @@ from nero.perception.object_detector import COCO80, ObjectDetection, ObjectDetec
 from nero.robot import RobotInterface
 from nero.interaction import (
     K1VoiceCommandSource,
+    NavigationTargetListener,
     parse_go_to_command,
     request_navigation_target,
     safe_stand_off_distance,
@@ -226,6 +229,28 @@ def test_direction_parser_combines_split_asr_chunks():
     )
 
     assert request_navigation_target(speaker, commands) == "coffee table"
+
+
+def test_navigation_target_listener_does_not_block_sensor_loop():
+    released = threading.Event()
+    commands = SimpleNamespace(
+        start_listening=lambda: None,
+        read_command=lambda _: released.wait(timeout=1.0) and "go to the chair",
+        stop_listening=lambda: None,
+        close=lambda: None,
+    )
+    listener = NavigationTargetListener(
+        SimpleNamespace(speak=lambda _: None), commands
+    )
+    listener.start()
+    assert listener.poll() is None
+    released.set()
+    for _ in range(100):
+        target = listener.poll()
+        if target is not None:
+            break
+        time.sleep(0.001)
+    assert target == "chair"
 
 
 def test_k1_voice_source_uses_official_lui_asr(monkeypatch):
