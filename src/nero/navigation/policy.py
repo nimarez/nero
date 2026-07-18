@@ -148,6 +148,7 @@ class NavigationPolicy:
         self._max_object_not_found = 10  # frames before giving up
         self._navigation_timeout = 120.0  # seconds (longer for sim)
         self._last_detection: Optional[ObjectDetection] = None
+        self._last_detection_revision: int | None = None
         if object_track_timeout <= 0:
             raise ValueError("object_track_timeout must be positive")
         if not 0 < object_position_filter <= 1:
@@ -207,6 +208,10 @@ class NavigationPolicy:
             return self._status
 
         logger.info(f"Target object set: {object_name}")
+        set_detector_target = getattr(self.object_detector, "set_target", None)
+        if callable(set_detector_target):
+            set_detector_target(object_name)
+        self._last_detection_revision = None
         self._goal = NavigationGoal(
             object_name=object_name,
             stand_off_distance=safe_stand_off_distance(object_name),
@@ -450,6 +455,13 @@ class NavigationPolicy:
         detections = self._matching_target_detections(
             self.object_detector.detect(rgb, depth, camera_info)
         )
+        revision = getattr(self.object_detector, "result_revision", None)
+        if revision is not None and revision == self._last_detection_revision:
+            return self._update_status(
+                detections=detections,
+                message=f"Searching for '{self._goal.object_name}'...",
+            )
+        self._last_detection_revision = revision
         target = self.object_detector.find_object(detections, self._goal.object_name)
 
         if target is not None and target.position_3d is not None:
@@ -523,9 +535,17 @@ class NavigationPolicy:
         detections = self._matching_target_detections(
             self.object_detector.detect(rgb, depth, camera_info)
         )
+        revision = getattr(self.object_detector, "result_revision", None)
+        new_detection_result = (
+            revision is None or revision != self._last_detection_revision
+        )
+        if new_detection_result:
+            self._last_detection_revision = revision
         target = self.object_detector.find_object(detections, self._goal.object_name)
 
         observed_now = (
+            new_detection_result
+            and
             target is not None
             and target.position_3d is not None
             and slam_pose.tracking_status == "OK"
@@ -589,6 +609,10 @@ class NavigationPolicy:
 
         if self.slam:
             self.slam.shutdown()
+
+        close_detector = getattr(self.object_detector, "close", None)
+        if callable(close_detector):
+            close_detector()
         if self.sim_env:
             self.sim_env.stop()
 
@@ -642,6 +666,7 @@ class NavigationPolicy:
         self._goal = None
         self._object_not_found_count = 0
         self._last_detection = None
+        self._last_detection_revision = None
         self._stop_robot()
         return self._update_status(message="Reset complete")
 

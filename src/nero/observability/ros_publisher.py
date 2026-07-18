@@ -63,14 +63,6 @@ class RosObservabilityPublisher:
         )
         from std_msgs.msg import String
 
-        try:
-            from vision_msgs.msg import Detection2DArray
-        except ImportError:
-            Detection2DArray = None
-            logger.warning(
-                "vision_msgs is unavailable; detection telemetry is disabled"
-            )
-
         if not rclpy.ok():
             rclpy.init(args=None)
         self._rclpy = rclpy
@@ -93,8 +85,6 @@ class RosObservabilityPublisher:
             "PointField": PointField,
             "String": String,
         }
-        if Detection2DArray is not None:
-            self._types["Detection2DArray"] = Detection2DArray
         sensor_qos = rclpy.qos.qos_profile_sensor_data
         self._publishers = {
             "rgb": self._node.create_publisher(Image, self._topics.rgb, sensor_qos),
@@ -124,11 +114,10 @@ class RosObservabilityPublisher:
             "reference_map": self._node.create_publisher(
                 PointCloud2, self._topics.reference_map, sensor_qos
             ),
+            "detections": self._node.create_publisher(
+                String, self._topics.detections, sensor_qos
+            ),
         }
-        if Detection2DArray is not None:
-            self._publishers["detections"] = self._node.create_publisher(
-                Detection2DArray, self._topics.detections, sensor_qos
-            )
         self._path = Path()
         self._path.header.frame_id = map_frame
         self._reference_path = Path()
@@ -331,39 +320,30 @@ class RosObservabilityPublisher:
         self._publishers["tracking"].publish(message)
 
     def publish_detections(self, detections: list[Any], timestamp: float) -> None:
-        if "Detection2DArray" not in self._types:
-            return
-        message = self._types["Detection2DArray"]()
-        self._header(message, timestamp, self._camera_frame)
-        try:
-            from vision_msgs.msg import Detection2D, ObjectHypothesisWithPose
-        except ImportError:
-            return
+        message = self._types["String"]()
+        items = []
         for detection in detections:
-            item = Detection2D()
-            self._header(item, timestamp, self._camera_frame)
-            x0, y0, x1, y1 = detection.bbox
-            center = item.bbox.center
-            center_position = getattr(center, "position", center)
-            center_position.x = (x0 + x1) / 2.0
-            center_position.y = (y0 + y1) / 2.0
-            item.bbox.size_x = float(x1 - x0)
-            item.bbox.size_y = float(y1 - y0)
-            result = ObjectHypothesisWithPose()
-            result.hypothesis.class_id = str(detection.label)
-            result.hypothesis.score = float(detection.confidence)
-            if (
-                detection.position_3d is not None
-                and getattr(detection, "coordinate_frame", "camera") == "camera"
-            ):
-                position = np.asarray(detection.position_3d, dtype=float)
-                (
-                    result.pose.pose.position.x,
-                    result.pose.pose.position.y,
-                    result.pose.pose.position.z,
-                ) = position
-            item.results.append(result)
-            message.detections.append(item)
+            position = getattr(detection, "position_3d", None)
+            items.append(
+                {
+                    "label": str(detection.label),
+                    "confidence": float(detection.confidence),
+                    "bbox": [int(value) for value in detection.bbox],
+                    "position_3d": (
+                        np.asarray(position, dtype=float).tolist()
+                        if position is not None
+                        else None
+                    ),
+                    "distance": float(getattr(detection, "distance", 0.0)),
+                    "coordinate_frame": str(
+                        getattr(detection, "coordinate_frame", "camera")
+                    ),
+                }
+            )
+        message.data = json.dumps(
+            {"timestamp": float(timestamp), "detections": items},
+            separators=(",", ":"),
+        )
         self._publishers["detections"].publish(message)
 
     def publish_point_cloud(

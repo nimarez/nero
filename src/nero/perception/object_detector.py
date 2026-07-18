@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -77,9 +79,16 @@ class ObjectDetector:
         self.depth_threshold_min = depth_threshold_min
         self.depth_threshold_max = depth_threshold_max
         self._net = None
+        self._world_model = None
+        self._target_name: str | None = None
+        self._executor: ThreadPoolExecutor | None = None
+        self._future: Future[list[ObjectDetection]] | None = None
+        self._latest_detections: list[ObjectDetection] = []
+        self._result_revision = 0
+        self._result_lock = threading.Lock()
         self.model_path = Path(
             model_path
-            or os.getenv("NERO_OBJECT_MODEL", "config/yolov8n.onnx")
+            or os.getenv("NERO_OBJECT_MODEL", "config/yolov8s-worldv2.pt")
         )
         self._initialized = False
 
@@ -91,6 +100,24 @@ class ObjectDetector:
                 self.model_path,
             )
             return False
+        if self.model_path.suffix.lower() == ".pt":
+            try:
+                import torch
+                from ultralytics import YOLOWorld
+
+                torch.set_num_threads(max(1, int(os.getenv("NERO_YOLO_THREADS", "4"))))
+                self._world_model = YOLOWorld(str(self.model_path))
+                # Load/cache the CLIP text tower before a human gives a command.
+                self._world_model.set_classes(["object"])
+            except (ImportError, RuntimeError, OSError, ValueError) as exc:
+                logger.error("Could not load YOLO-World model %s: %s", self.model_path, exc)
+                return False
+            self._executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="nero-yolo-world"
+            )
+            self._initialized = True
+            logger.info("Ultralytics YOLO-World initialized from %s", self.model_path)
+            return True
         try:
             self._net = cv2.dnn.readNetFromONNX(str(self.model_path))
         except cv2.error as exc:
@@ -99,6 +126,29 @@ class ObjectDetector:
         self._initialized = True
         logger.info("OpenCV YOLO object detector initialized from %s", self.model_path)
         return True
+
+    @property
+    def result_revision(self) -> int | None:
+        """Increment when an asynchronous open-vocabulary result completes."""
+        return self._result_revision if self._world_model is not None else None
+
+    def set_target(self, object_name: str) -> None:
+        """Condition the open-vocabulary detector on an arbitrary text prompt."""
+        normalized = " ".join(object_name.split()).strip()
+        if not normalized:
+            raise ValueError("object target must not be empty")
+        if self._world_model is None:
+            self._target_name = normalized
+            return
+        if self._future is not None:
+            self._future.result()
+            self._future = None
+        self._world_model.set_classes([normalized])
+        with self._result_lock:
+            self._target_name = normalized
+            self._latest_detections = []
+            self._result_revision = 0
+        logger.info("YOLO-World prompt set to %r", normalized)
 
     def detect(
         self,
@@ -116,9 +166,93 @@ class ObjectDetector:
         Returns:
             List of ObjectDetection
         """
+        if self._world_model is not None:
+            return self._detect_world_async(rgb, depth, camera_info)
         if self._net is not None:
             return self._detect_yolo(rgb, depth, camera_info)
         return []
+
+    def _detect_world_async(
+        self,
+        rgb: np.ndarray,
+        depth: Optional[np.ndarray],
+        camera_info=None,
+    ) -> list[ObjectDetection]:
+        """Submit only the newest frame and return the latest completed result."""
+        if self._target_name is None or self._executor is None:
+            return []
+        if self._future is not None and self._future.done():
+            try:
+                completed = self._future.result()
+            except Exception:
+                logger.exception("YOLO-World inference failed")
+                completed = []
+            with self._result_lock:
+                self._latest_detections = completed
+                self._result_revision += 1
+            self._future = None
+        if self._future is None:
+            rgb_copy = np.ascontiguousarray(rgb).copy()
+            depth_copy = None if depth is None else np.ascontiguousarray(depth).copy()
+            self._future = self._executor.submit(
+                self._detect_world, rgb_copy, depth_copy, camera_info
+            )
+        with self._result_lock:
+            return list(self._latest_detections)
+
+    def _detect_world(
+        self,
+        rgb: np.ndarray,
+        depth: Optional[np.ndarray],
+        camera_info=None,
+    ) -> list[ObjectDetection]:
+        """Run one target-conditioned YOLO-World inference."""
+        results = self._world_model.predict(
+            np.asarray(rgb),
+            imgsz=448,
+            conf=self.confidence_threshold,
+            device="cpu",
+            verbose=False,
+        )
+        detections: list[ObjectDetection] = []
+        for result in results:
+            boxes = getattr(result, "boxes", None)
+            if boxes is None:
+                continue
+            xyxy = boxes.xyxy.detach().cpu().numpy()
+            scores = boxes.conf.detach().cpu().numpy()
+            class_ids = boxes.cls.detach().cpu().numpy().astype(int)
+            names = getattr(result, "names", {})
+            for bounds, score, class_id in zip(xyxy, scores, class_ids):
+                bbox = tuple(int(round(float(value))) for value in bounds)
+                position = (
+                    self._compute_3d_position(bbox, depth, camera_info)
+                    if depth is not None
+                    else None
+                )
+                label = (
+                    names.get(class_id, self._target_name or "object")
+                    if hasattr(names, "get")
+                    else names[class_id]
+                )
+                detections.append(
+                    ObjectDetection(
+                        label=str(label),
+                        confidence=float(score),
+                        bbox=bbox,
+                        position_3d=position,
+                        distance=(
+                            float(np.linalg.norm(position)) if position is not None else 0.0
+                        ),
+                    )
+                )
+        return detections
+
+    def close(self) -> None:
+        """Stop the optional asynchronous inference worker."""
+        if self._executor is not None:
+            self._executor.shutdown(wait=True, cancel_futures=True)
+            self._executor = None
 
     def _detect_yolo(
         self,

@@ -128,6 +128,69 @@ def test_opencv_yolo_backend_decodes_coco_detection_with_depth():
     assert detections[0].position_3d[2] == 1.0
 
 
+def test_yolo_world_accepts_arbitrary_target_and_runs_asynchronously(
+    monkeypatch, tmp_path
+):
+    class Tensor:
+        def __init__(self, values):
+            self._values = np.asarray(values)
+
+        def detach(self):
+            return self
+
+        def cpu(self):
+            return self
+
+        def numpy(self):
+            return self._values
+
+    class FakeWorld:
+        def __init__(self, _):
+            self.classes = []
+
+        def set_classes(self, classes):
+            self.classes = list(classes)
+
+        def predict(self, *_args, **_kwargs):
+            boxes = SimpleNamespace(
+                xyxy=Tensor([[1, 1, 9, 9]]),
+                conf=Tensor([0.87]),
+                cls=Tensor([0]),
+            )
+            return [SimpleNamespace(boxes=boxes, names={0: self.classes[0]})]
+
+    monkeypatch.setitem(
+        sys.modules, "ultralytics", SimpleNamespace(YOLOWorld=FakeWorld)
+    )
+    thread_counts = []
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(set_num_threads=thread_counts.append),
+    )
+    model_path = tmp_path / "world.pt"
+    model_path.write_bytes(b"weights")
+    detector = ObjectDetector(model_path=model_path)
+    assert detector.initialize()
+    assert thread_counts == [4]
+    detector.set_target("unusual brass umbrella stand")
+    rgb = np.zeros((10, 10, 3), dtype=np.uint8)
+    depth = np.full((10, 10), 1000, dtype=np.uint16)
+
+    assert detector.detect(rgb, depth) == []
+    for _ in range(100):
+        detections = detector.detect(rgb, depth)
+        if detector.result_revision:
+            break
+        time.sleep(0.001)
+
+    assert detector.result_revision == 1
+    assert detections[0].label == "unusual brass umbrella stand"
+    assert detections[0].confidence == 0.87
+    assert detections[0].position_3d[2] == 1.0
+    detector.close()
+
+
 def test_hardware_agent_clis_use_k1_sensors_implicitly(monkeypatch):
     from nero.agents import (
         booster_studio_agent,

@@ -16,3 +16,4 @@ config/k1_orbslam3_imu_rgbd.yaml
 config/booster_studio_k1_calibration.json
 config/booster_studio_k1_imu_rgbd.yaml
 config/*.onnx
+config/*.pt

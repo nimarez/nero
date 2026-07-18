@@ -107,14 +107,6 @@ class RerunRosBridge:
         from sensor_msgs.msg import CameraInfo, Image, Imu, JointState, PointCloud2
         from std_msgs.msg import String
 
-        try:
-            from vision_msgs.msg import Detection2DArray
-        except ImportError:
-            Detection2DArray = None
-            logger.warning(
-                "vision_msgs is unavailable; detection visualization is disabled"
-            )
-
         self._rr = rr
         self._recording = recording
         self._topics = topics or ObservabilityTopics()
@@ -139,15 +131,10 @@ class RerunRosBridge:
             (PoseStamped, self._topics.reference_pose, self._on_reference_pose, 10),
             (RosPath, self._topics.reference_path, self._on_reference_path, 1),
             (PointCloud2, self._topics.reference_map, self._on_reference_map, sensor_qos),
+            (String, self._topics.detections, self._on_detections, sensor_qos),
         ]
-        if Detection2DArray is not None:
-            specs.append(
-                (Detection2DArray, self._topics.detections, self._on_detections, sensor_qos)
-            )
         self._subscription_topics = tuple(spec[1] for spec in specs)
         expected_topics = set(vars(self._topics).values())
-        if Detection2DArray is None:
-            expected_topics.remove(self._topics.detections)
         if set(self._subscription_topics) != expected_topics:
             missing = expected_topics - set(self._subscription_topics)
             extra = set(self._subscription_topics) - expected_topics
@@ -307,18 +294,51 @@ class RerunRosBridge:
         self._log_map(message, "world/reference/map_points", [255, 180, 0])
 
     def _on_detections(self, message: Any) -> None:
-        self._time(message)
-        centers, sizes, labels = [], [], []
-        for detection in message.detections:
-            center = detection.bbox.center
-            position = getattr(center, "position", center)
-            centers.append([position.x, position.y])
-            sizes.append([detection.bbox.size_x, detection.bbox.size_y])
-            result = detection.results[0] if detection.results else None
-            labels.append(result.hypothesis.class_id if result is not None else "object")
+        try:
+            payload = json.loads(message.data)
+            timestamp = float(payload.get("timestamp", time.time()))
+            items = payload.get("detections", [])
+            if not isinstance(items, list):
+                raise ValueError("detections must be a list")
+        except (AttributeError, json.JSONDecodeError, TypeError, ValueError):
+            logger.warning("Ignoring malformed detection telemetry")
+            return
+        self._recording.set_time_nanos("ros_time", int(timestamp * 1_000_000_000))
+        centers, sizes, labels, points, point_labels = [], [], [], [], []
+        for detection in items:
+            try:
+                x0, y0, x1, y1 = (float(value) for value in detection["bbox"])
+                if x1 <= x0 or y1 <= y0:
+                    raise ValueError("invalid detection bounds")
+                label = str(detection.get("label", "object"))
+                confidence = float(detection.get("confidence", 0.0))
+                distance = float(detection.get("distance", 0.0))
+            except (KeyError, TypeError, ValueError):
+                logger.warning("Skipping malformed detection item")
+                continue
+            centers.append([(x0 + x1) / 2.0, (y0 + y1) / 2.0])
+            sizes.append([x1 - x0, y1 - y0])
+            labels.append(f"{label} {confidence:.2f} {distance:.2f}m")
+            position = detection.get("position_3d")
+            if (
+                isinstance(position, list)
+                and len(position) == 3
+                and detection.get("coordinate_frame") == "camera"
+            ):
+                points.append(position)
+                point_labels.append(label)
         self._recording.log(
             "world/robot/camera/rgb/detections",
             self._rr.Boxes2D(centers=centers, sizes=sizes, labels=labels),
+        )
+        self._recording.log(
+            "world/robot/camera/detection_centroids",
+            self._rr.Points3D(
+                points,
+                labels=point_labels,
+                colors=[255, 80, 80],
+                radii=0.04,
+            ),
         )
 
     def _on_status(self, message: Any) -> None:

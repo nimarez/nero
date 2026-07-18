@@ -206,6 +206,31 @@ def test_depth_image_preserves_uint16_millimetres():
     np.testing.assert_array_equal(restored, depth)
 
 
+def test_detection_telemetry_uses_firmware_safe_json():
+    published = []
+    publisher = RosObservabilityPublisher.__new__(RosObservabilityPublisher)
+    publisher._types = {"String": lambda: SimpleNamespace(data="")}
+    publisher._publishers = {
+        "detections": SimpleNamespace(publish=published.append)
+    }
+    detection = SimpleNamespace(
+        label="unusual brass umbrella stand",
+        confidence=0.87,
+        bbox=(1, 2, 11, 22),
+        position_3d=np.array([0.1, 0.2, 1.3]),
+        distance=1.32,
+        coordinate_frame="camera",
+    )
+
+    publisher.publish_detections([detection], 12.5)
+
+    payload = __import__("json").loads(published[0].data)
+    assert payload["timestamp"] == 12.5
+    assert payload["detections"][0]["label"] == "unusual brass umbrella stand"
+    assert payload["detections"][0]["bbox"] == [1, 2, 11, 22]
+    assert payload["detections"][0]["position_3d"] == [0.1, 0.2, 1.3]
+
+
 def test_rerun_callbacks_create_a_real_recording():
     rr = pytest.importorskip("rerun")
     recording = rr.new_recording("nero_test", make_default=False)
@@ -288,12 +313,16 @@ def test_rerun_callbacks_create_a_real_recording():
     bridge._on_map(cloud)
     bridge._on_reference_map(cloud)
 
-    hypothesis = SimpleNamespace(class_id="chair")
-    result = SimpleNamespace(hypothesis=hypothesis)
-    center = SimpleNamespace(position=SimpleNamespace(x=1.0, y=1.0))
-    box = SimpleNamespace(center=center, size_x=1.0, size_y=1.0)
-    detection = SimpleNamespace(bbox=box, results=[result])
-    bridge._on_detections(SimpleNamespace(header=header, detections=[detection]))
+    bridge._on_detections(
+        SimpleNamespace(
+            data=(
+                '{"timestamp":1.0,"detections":[{"label":"chair",'
+                '"confidence":0.9,"bbox":[0,0,2,2],'
+                '"position_3d":[0.0,0.0,1.0],"distance":1.0,'
+                '"coordinate_frame":"camera"}]}'
+            )
+        )
+    )
     bridge._on_status(SimpleNamespace(data='{"state":"navigating","message":"ok"}'))
     bridge._on_tracking(SimpleNamespace(data='{"status":"OK","map_points":1}'))
     bridge._on_command(SimpleNamespace(linear=vector, angular=SimpleNamespace(z=0.1)))

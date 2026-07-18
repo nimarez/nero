@@ -20,8 +20,8 @@ The physical runtime uses interfaces verified on K1 Geek firmware
 | IMU | Official `B1LowStateSubscriber`, approximately 500 Hz |
 | Planar odometry | `/odometer_state` |
 | Locomotion | Official `B1LocoClient` on loopback |
-| Speech | Official Booster LUI ASR/TTS |
-| Detection | Checksum-verified YOLOv8n ONNX through OpenCV DNN |
+| Speech | Booster LUI ASR/TTS with `flite`/ALSA playback fallback |
+| Detection | Target-conditioned YOLO-World v2 with arbitrary text prompts |
 | SLAM | Native ORB-SLAM3 `Sensor.IMU_RGBD` |
 
 Only the interfaces in this table are part of the physical runtime. RGB and depth
@@ -29,7 +29,7 @@ must have the same timestamp. IMU samples are synchronized to each pair before
 native SLAM.
 
 Startup is fail-closed. Nero requires live RGB, depth, CameraInfo, IMU, odometry,
-the ONNX model, ORB vocabulary, robot calibration, walking mode, and the native
+the open-vocabulary model, ORB vocabulary, robot calibration, walking mode, and the native
 IMU-RGBD backend before it enables velocity output. It never changes the real
 robot's mode automatically. Keep the area clear and the hardware stop reachable.
 
@@ -243,7 +243,8 @@ uv run --extra viz nero-rerun
 
 The bridge plots RGB, metric depth, camera calibration, IMU orientation/rates,
 odometry, every available joint position/velocity/effort, SLAM pose/path/map,
-detections, goals, commands, and simulator reference data. Print the exact
+detection boxes/labels/confidence/depth centroids, goals, commands, and simulator
+reference data. Print the exact
 subscription contract without requiring ROS or Rerun to be installed:
 
 ```bash
@@ -274,7 +275,8 @@ To record without a viewer:
 uv run --extra viz nero-rerun --save output/nero.rrd
 ```
 
-With no sink option, `nero-rerun` spawns a local viewer. Use `--connect` for the
+Live viewing and `--connect` do not write a bag to disk. With no sink option,
+`nero-rerun` spawns a local viewer. Use `--connect` for the
 split robot-to-workstation setup or `--save` for a recording. Rerun is an optional
 uv extra and is not installed in the headless robot runtime.
 
