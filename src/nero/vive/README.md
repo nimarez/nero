@@ -97,6 +97,24 @@ The receiver reports sequence gaps and end-to-end latency, and projects each
 sample into the shared planar `RobotPose {x, y, yaw, t}` contract. A pose older
 than 150 ms is treated as invalid even if its last packet said it was valid.
 
+For the hackathon deployment, install the included services on their respective
+hosts:
+
+```bash
+# Raspberry Pi
+sudo cp deploy/systemd/nero-vive-publisher.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now nero-vive-publisher
+
+# jscore
+sudo cp deploy/systemd/nero-vive-receiver.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now nero-vive-receiver
+```
+
+The receiver atomically maintains `/run/nero/vive_pose.json`. Local planner,
+controller, and telemetry processes can read that file without owning the UDP
+socket. It includes the full packet, a planar `robot_pose`, and transport latency
+and sequence-loss diagnostics.
+
 ---
 
 ## Hardware

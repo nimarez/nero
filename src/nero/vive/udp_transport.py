@@ -9,6 +9,7 @@ import math
 import socket
 import time
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Callable, Sequence
 
 import numpy as np
@@ -247,6 +248,36 @@ class ReceivedPose:
             return self.packet
         return replace(self.packet, tracking_valid=False)
 
+    def state_dict(self) -> dict[str, Any]:
+        """Serializable state for local consumers on jscore."""
+        return {
+            **self.packet.to_dict(),
+            "robot_pose": self.packet.robot_pose(),
+            "transport": {
+                "sender": [self.sender[0], self.sender[1]],
+                "received_at": self.received_at,
+                "latency_ms": self.latency_s * 1000.0,
+                "dropped_since_previous": self.dropped_since_previous,
+                "out_of_order": self.out_of_order,
+            },
+        }
+
+
+class LatestPoseWriter:
+    """Atomically expose the latest received pose to local jscore processes."""
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        self._temporary_path = self.path.with_name(f".{self.path.name}.tmp")
+
+    def write(self, received: ReceivedPose) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._temporary_path.write_text(
+            json.dumps(received.state_dict(), separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        self._temporary_path.replace(self.path)
+
 
 class PoseUdpReceiver:
     def __init__(
@@ -306,12 +337,16 @@ def receiver_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bind", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--json", action="store_true", help="Print one JSON packet per line")
+    parser.add_argument("--latest-file", help="Atomically write the latest pose to this path")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     receiver = PoseUdpReceiver(args.bind, args.port)
+    latest_writer = LatestPoseWriter(args.latest_file) if args.latest_file else None
     logger.info("listening for Vive poses on %s:%d", *receiver.address)
     while True:
         received = receiver.receive()
+        if latest_writer is not None:
+            latest_writer.write(received)
         if args.json:
             print(json.dumps(received.packet.to_dict(), separators=(",", ":")), flush=True)
         elif received.packet.sequence % 100 == 0:

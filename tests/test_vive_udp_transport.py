@@ -3,12 +3,20 @@ from __future__ import annotations
 import math
 import socket
 from collections.abc import Iterator
+from pathlib import Path
 
 import numpy as np
 import pytest
 
 from nero.vive.pose_source import TimedPose
-from nero.vive.udp_transport import PoseKinematics, PosePacket, PoseUdpPublisher, PoseUdpReceiver
+from nero.vive.udp_transport import (
+    LatestPoseWriter,
+    PoseKinematics,
+    PosePacket,
+    PoseUdpPublisher,
+    PoseUdpReceiver,
+    ReceivedPose,
+)
 
 
 def sample_packet(sequence: int = 7) -> PosePacket:
@@ -122,3 +130,23 @@ def test_stream_filters_lighthouses_and_selects_device() -> None:
 
     assert len(fake_socket.datagrams) == 1
     assert PosePacket.decode(fake_socket.datagrams[0]).controller_id == "WW1"
+
+
+def test_latest_pose_writer_exposes_full_and_planar_state(tmp_path: Path) -> None:
+    output = tmp_path / "vive_pose.json"
+    received = ReceivedPose(
+        packet=sample_packet(),
+        sender=("10.77.0.212", 54321),
+        received_at=1_750_000_000.26,
+        latency_s=0.01,
+        dropped_since_previous=2,
+        out_of_order=False,
+    )
+
+    LatestPoseWriter(output).write(received)
+
+    state = __import__("json").loads(output.read_text())
+    assert state["controller_id"] == "WW0"
+    assert state["robot_pose"]["source"] == "vive:WW0"
+    assert state["transport"]["latency_ms"] == pytest.approx(10.0)
+    assert state["transport"]["dropped_since_previous"] == 2
