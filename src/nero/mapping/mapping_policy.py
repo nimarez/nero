@@ -10,7 +10,7 @@ from typing import Optional
 
 import numpy as np
 
-from nero.robot import RobotInterface
+from nero.robot import RobotAdapter
 from nero.robot import RobotState
 from nero.slam.orb_slam3_node import ORBSLAM3Node
 from nero.slam.pose_estimator import PoseEstimator
@@ -71,7 +71,7 @@ class MappingPolicy:
 
     def __init__(
         self,
-        robot: Optional[RobotInterface],
+        robot: Optional[RobotAdapter],
         slam_config: Optional[dict] = None,
         mapping_config: Optional[MappingConfig] = None,
         safety_config: Optional[dict] = None,
@@ -100,6 +100,8 @@ class MappingPolicy:
         self._exploration_radius = 0.0
         self._obstacle_detected = False
         self._last_pose: Optional[np.ndarray] = None
+        self._last_camera_pose: Optional[np.ndarray] = None
+        self._last_robot_state: Optional[RobotState] = None
 
         # Safety
         self._safety_config = safety_config or {}
@@ -117,7 +119,7 @@ class MappingPolicy:
         if self._robot:
             state = self._robot.get_state()
             if state.depth is not None:
-                self._slam.initialize()
+                self._slam.initialize(camera_info=state.camera_info)
 
         self._trajectory.start()
         self._splat_mapper.start_collection()
@@ -184,9 +186,10 @@ class MappingPolicy:
         robot_state = self._robot.get_state() if self._robot else None
         if robot_state is None:
             return self._status("Robot not connected")
+        self._last_robot_state = robot_state
 
         # Get current pose from SLAM
-        current_pose = self._get_current_pose(robot_state)
+        current_pose, camera_pose = self._get_current_poses(robot_state)
         if current_pose is None:
             return self._status("SLAM not initialized")
 
@@ -194,13 +197,38 @@ class MappingPolicy:
         self._trajectory.add_point(current_pose)
 
         # Capture frame for splatting
-        if robot_state.rgb is not None:
+        if robot_state.rgb is not None and camera_pose is not None:
+            camera_matrix = None
+            if robot_state.camera_info is not None:
+                camera_matrix = np.asarray(robot_state.camera_info.k, dtype=float).reshape(3, 3)
             frame = FrameData(
-                timestamp=time.time(),
-                image=robot_state.rgb.data,
-                depth=robot_state.depth.data if robot_state.depth is not None else None,
-                pose=current_pose,
+                timestamp=self._robot.image_timestamp(robot_state.rgb),
+                image=self._robot.image_to_array(robot_state.rgb),
+                depth=(
+                    self._robot.image_to_array(robot_state.depth)
+                    if robot_state.depth is not None
+                    else None
+                ),
+                pose=camera_pose,
                 frame_id=self._splat_mapper.get_frame_count(),
+                camera_matrix=camera_matrix,
+                depth_map_factor=(
+                    self._slam.calibration.depth_map_factor
+                    if self._slam.calibration is not None
+                    else 1000.0
+                ),
+                depth_min_m=(
+                    self._slam.calibration.depth_min_m
+                    if self._slam.calibration is not None
+                    and self._slam.calibration.depth_min_m is not None
+                    else 0.5
+                ),
+                depth_max_m=(
+                    self._slam.calibration.depth_max_m
+                    if self._slam.calibration is not None
+                    and self._slam.calibration.depth_max_m is not None
+                    else 6.0
+                ),
             )
             self._splat_mapper.add_frame(frame)
 
@@ -325,20 +353,26 @@ class MappingPolicy:
             angular_z=self._exploration_angle,
         )
 
-    def _get_current_pose(self, robot_state: RobotState) -> Optional[np.ndarray]:
-        """Get current robot pose from SLAM."""
+    def _get_current_poses(
+        self, robot_state: RobotState
+    ) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """Get synchronized body and camera poses from SLAM or odometry."""
         if robot_state.rgb is None or robot_state.depth is None:
-            return self._last_pose
+            return self._last_pose, self._last_camera_pose
 
         rgb = self._robot.image_to_array(robot_state.rgb)
         depth = self._robot.image_to_array(robot_state.depth)
         slam_pose = self._slam.track_frame(
             rgb,
             depth,
+            imu_data=robot_state.imu_samples,
             timestamp=self._robot.image_timestamp(robot_state.rgb),
         )
         if slam_pose.tracking_status == "OK":
-            return slam_pose.to_matrix()
+            camera_pose = slam_pose.to_matrix()
+            body_pose = self._slam.body_pose(slam_pose).to_matrix()
+            self._last_camera_pose = camera_pose
+            return body_pose, camera_pose
 
         # Fallback to odometry
         if robot_state.odom is not None:
@@ -352,9 +386,11 @@ class MappingPolicy:
                     [np.sin(yaw), np.cos(yaw)],
                 ]
             )
-            return pose
+            camera_pose = pose @ self._slam.tbc
+            self._last_camera_pose = camera_pose
+            return pose, camera_pose
 
-        return self._last_pose
+        return self._last_pose, self._last_camera_pose
 
     def _status(self, message: str) -> MappingStatus:
         """Create status with default values."""
@@ -367,3 +403,15 @@ class MappingPolicy:
             training_progress=0.0,
             elapsed_time=time.time() - (self._start_time or time.time()),
         )
+
+    @property
+    def last_robot_state(self) -> Optional[RobotState]:
+        return self._last_robot_state
+
+    @property
+    def last_pose(self) -> Optional[np.ndarray]:
+        return None if self._last_pose is None else self._last_pose.copy()
+
+    @property
+    def slam(self) -> ORBSLAM3Node:
+        return self._slam

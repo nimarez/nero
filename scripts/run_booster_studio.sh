@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -eo pipefail
 
 ros_setup="${NERO_ROS_SETUP:-/opt/ros/humble/setup.bash}"
 if [[ ! -f "$ros_setup" ]]; then
@@ -10,4 +10,5 @@ fi
 # Booster Studio installs rclpy and its native libraries in the ROS prefix.
 # Sourcing this is required even when uv can see ordinary system packages.
 source "$ros_setup"
+set -u
 exec uv run nero-booster-studio "$@"

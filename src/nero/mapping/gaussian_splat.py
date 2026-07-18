@@ -28,6 +28,18 @@ class FrameData:
     depth: Optional[np.ndarray]
     pose: np.ndarray  # 4x4 camera pose
     frame_id: int
+    camera_matrix: Optional[np.ndarray] = None
+    depth_map_factor: float = 1000.0
+    depth_min_m: float = 0.5
+    depth_max_m: float = 6.0
+
+    def __post_init__(self) -> None:
+        if self.depth_map_factor <= 0:
+            raise ValueError("depth_map_factor must be positive")
+        if not 0 < self.depth_min_m < self.depth_max_m:
+            raise ValueError("invalid depth operating range")
+        if np.asarray(self.pose).shape != (4, 4):
+            raise ValueError("pose must be a 4x4 camera pose")
 
 
 @dataclass
@@ -407,28 +419,36 @@ class GaussianSplatMapper:
         colors = []
         for frame in self._frames:
             if frame.depth is not None:
-                # Simple back-projection
+                # Metric RGB-D back-projection using this frame's calibration.
                 h, w = frame.depth.shape
-                fx, fy = 216.5, 216.5
-                cx, cy = w / 2, h / 2
+                camera = (
+                    np.asarray(frame.camera_matrix, dtype=float).reshape(3, 3)
+                    if frame.camera_matrix is not None
+                    else np.array(
+                        [[216.5, 0.0, w / 2], [0.0, 216.5, h / 2], [0.0, 0.0, 1.0]]
+                    )
+                )
+                fx, fy = camera[0, 0], camera[1, 1]
+                cx, cy = camera[0, 2], camera[1, 2]
 
                 ys, xs = np.meshgrid(np.arange(h), np.arange(w), indexing="ij")
-                zs = frame.depth
+                zs = np.asarray(frame.depth, dtype=float) / frame.depth_map_factor
                 xs_3d = (xs - cx) * zs / fx
                 ys_3d = (ys - cy) * zs / fy
 
                 pts = np.stack([xs_3d, ys_3d, zs], axis=-1).reshape(-1, 3)
-                valid = (zs > 0.1) & (zs < 5.0)
-                pts = pts[valid]
+                valid = np.isfinite(zs) & (zs >= frame.depth_min_m) & (zs <= frame.depth_max_m)
+                pts = pts[valid.reshape(-1)]
 
                 # Transform to world frame
                 pts_h = np.hstack([pts, np.ones((len(pts), 1))])
                 pts_world = (frame.pose @ pts_h.T).T[:, :3]
 
-                cols = frame.image.reshape(-1, 3)[valid.flatten()]
+                cols = frame.image.reshape(-1, 3)[valid.reshape(-1)]
 
                 points.append(pts_world)
-                colors.append(cols)
+                # OpenCV images are BGR; PLY declares channels in RGB order.
+                colors.append(cols[:, ::-1])
 
         if points:
             all_points = np.vstack(points)

@@ -88,7 +88,9 @@ def stream(
 
     trails: dict[str, deque[np.ndarray]] = defaultdict(lambda: deque(maxlen=trail_len))
     for frame, pose in enumerate(source.poll(), start=1):
-        rr.set_time("frame", sequence=frame)
+        # `set_time_sequence` is the 0.22 spelling; later versions renamed it to
+        # `set_time(..., sequence=)`. The project pins rerun-sdk==0.22.1.
+        rr.set_time_sequence("frame", frame)
         _log_pose(rr, pose, trails[pose.name], axis_length)
         if frame % LOG_EVERY == 0:
             x, y, z = pose.position

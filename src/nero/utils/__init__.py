@@ -1,6 +1,5 @@
-"""Utility modules for nero."""
+"""Utility modules for Nero."""
 
-from .camera_stream import CameraStream
 from .visualization import Visualization
 
-__all__ = ["CameraStream", "Visualization"]
+__all__ = ["Visualization"]

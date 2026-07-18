@@ -12,6 +12,12 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+def _blend_angles(first: float, second: float, second_weight: float) -> float:
+    """Interpolate yaw on the unit circle without a +/-pi discontinuity."""
+    delta = np.arctan2(np.sin(second - first), np.cos(second - first))
+    return float(np.arctan2(np.sin(first + second_weight * delta), np.cos(first + second_weight * delta)))
+
+
 @dataclass
 class FusedPose:
     """Fused pose estimate from multiple sources."""
@@ -42,6 +48,10 @@ class PoseEstimator:
         odom_weight: float = 0.3,
         imu_orientation_weight: float = 0.5,
     ):
+        if slam_weight < 0 or odom_weight < 0 or slam_weight + odom_weight <= 0:
+            raise ValueError("pose weights must be non-negative with a positive sum")
+        if not 0 <= imu_orientation_weight <= 1:
+            raise ValueError("imu_orientation_weight must be between zero and one")
         self.slam_weight = slam_weight
         self.odom_weight = odom_weight
         self.imu_orientation_weight = imu_orientation_weight
@@ -49,6 +59,7 @@ class PoseEstimator:
         self._last_slam_pose = None
         self._last_odom_pose = None
         self._last_imu_rpy = None
+        self._odom_to_slam: np.ndarray | None = None
         self._fused_pose: Optional[FusedPose] = None
         self._last_update_time = 0.0
 
@@ -89,6 +100,48 @@ class PoseEstimator:
         has_odom = self._last_odom_pose is not None
         has_imu = self._last_imu_rpy is not None
 
+        if has_slam and has_odom and self._odom_to_slam is None:
+            yaw_offset = float(
+                np.arctan2(
+                    np.sin(self._last_slam_pose.yaw - self._last_odom_pose[2]),
+                    np.cos(self._last_slam_pose.yaw - self._last_odom_pose[2]),
+                )
+            )
+            rotation = np.array(
+                [
+                    [np.cos(yaw_offset), -np.sin(yaw_offset)],
+                    [np.sin(yaw_offset), np.cos(yaw_offset)],
+                ]
+            )
+            self._odom_to_slam = np.eye(3)
+            self._odom_to_slam[:2, :2] = rotation
+            self._odom_to_slam[:2, 2] = (
+                self._last_slam_pose.position[:2]
+                - rotation @ self._last_odom_pose[:2]
+            )
+
+        aligned_odom = self._last_odom_pose
+        if has_odom and self._odom_to_slam is not None:
+            xy = self._odom_to_slam @ [
+                self._last_odom_pose[0],
+                self._last_odom_pose[1],
+                1.0,
+            ]
+            yaw_offset = np.arctan2(
+                self._odom_to_slam[1, 0], self._odom_to_slam[0, 0]
+            )
+            aligned_odom = np.array(
+                [
+                    xy[0],
+                    xy[1],
+                    _blend_angles(
+                        self._last_odom_pose[2],
+                        self._last_odom_pose[2] + yaw_offset,
+                        1.0,
+                    ),
+                ]
+            )
+
         if not has_slam and not has_odom:
             # No data available, return last estimate or zeros
             if self._fused_pose is None:
@@ -98,7 +151,7 @@ class PoseEstimator:
         # Compute fused position
         if has_slam and has_odom:
             slam_pos = self._last_slam_pose.position[:2]
-            odom_pos = self._last_odom_pose[:2]
+            odom_pos = aligned_odom[:2]
             position_2d = self.slam_weight * slam_pos + self.odom_weight * odom_pos
             # Normalize weights
             position_2d /= self.slam_weight + self.odom_weight
@@ -107,18 +160,22 @@ class PoseEstimator:
             position_2d = self._last_slam_pose.position[:2]
             confidence = 0.8
         else:
-            position_2d = self._last_odom_pose[:2]
+            position_2d = aligned_odom[:2]
             confidence = 0.5
 
         # Compute fused yaw
-        if has_imu and has_odom:
-            yaw = (1 - self.imu_orientation_weight) * self._last_odom_pose[
-                2
-            ] + self.imu_orientation_weight * self._last_imu_rpy[2]
+        if has_slam:
+            yaw = self._last_slam_pose.yaw
+        elif has_imu and has_odom:
+            yaw = _blend_angles(
+                aligned_odom[2],
+                self._last_imu_rpy[2],
+                self.imu_orientation_weight,
+            )
         elif has_imu:
             yaw = self._last_imu_rpy[2]
         elif has_odom:
-            yaw = self._last_odom_pose[2]
+            yaw = aligned_odom[2]
         else:
             yaw = 0.0
 
@@ -151,5 +208,6 @@ class PoseEstimator:
         self._last_slam_pose = None
         self._last_odom_pose = None
         self._last_imu_rpy = None
+        self._odom_to_slam = None
         self._fused_pose = None
         logger.info("Pose estimator reset")

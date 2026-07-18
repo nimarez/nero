@@ -2,9 +2,9 @@
 
 This module implements the agent/policy loop:
 1. Read the K1's built-in RGB-D camera stream
-2. Accept object name from user
-3. Detect the object in the camera stream
-4. Navigate to the object while avoiding obstacles
+2. Accept a human direction and retain only matching live detections
+3. Project the track into the SLAM world frame
+4. Follow a dynamic stand-off pose while avoiding obstacles
 """
 
 from __future__ import annotations
@@ -19,24 +19,26 @@ import numpy as np
 
 from nero.perception.object_detector import ObjectDetector, ObjectDetection
 from nero.navigation.controller import VelocityController, VelocityCommand
+from nero.navigation.object_goal import (
+    approach_pose,
+    blend_world_position,
+    body_point_to_world,
+    camera_point_to_world,
+    planar_detection_to_world,
+)
+from nero.interaction import safe_stand_off_distance
 
-# Optional imports for real robot usage
-try:
-    from nero.perception.depth_processor import DepthProcessor
-    from nero.slam.orb_slam3_node import ORBSLAM3Node, SLAMPose
-    from nero.slam.pose_estimator import PoseEstimator, FusedPose
-    from nero.navigation.safety import SafetyMonitor, SafetyStatus
-
-    HAS_BOOSTEROS = True
-except ImportError:
-    DepthProcessor = None
-    ORBSLAM3Node = None
-    SLAMPose = None
-    PoseEstimator = None
-    FusedPose = None
-    SafetyMonitor = None
-    SafetyStatus = None
-    HAS_BOOSTEROS = False
+from nero.perception.depth_processor import DepthProcessor
+from nero.slam.orb_slam3_node import ORBSLAM3Node
+from nero.slam.pose_estimator import PoseEstimator, FusedPose
+from nero.navigation.safety import SafetyMonitor, SafetyStatus
+from nero.navigation.runtime import (
+    SensorFrame,
+    initialize_sensor_navigation,
+    localize_sensor_frame,
+    read_sensor_frame,
+    send_velocity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,9 +62,11 @@ class NavigationGoal:
     """A navigation goal."""
 
     object_name: str
-    position: Optional[np.ndarray] = None  # [x, y, z] in world frame
+    object_position_world: Optional[np.ndarray] = None
+    approach_pose: Optional[np.ndarray] = None  # [x, y, yaw] in world frame
     detection: Optional[ObjectDetection] = None
-    target_distance: float = 1.0  # Stop this far from object
+    stand_off_distance: float = 0.8
+    last_observed_monotonic: Optional[float] = None
 
 
 @dataclass
@@ -106,15 +110,20 @@ class NavigationPolicy:
         object_detector=None,
         navigation_config=None,
         safety_config=None,
+        object_track_timeout: float = 1.0,
+        object_position_filter: float = 0.35,
+        goal_yaw_tolerance: float = 0.15,
     ):
         # Environment: real robot or simulation
         self.robot = robot
         self.sim_env = sim_env
         self._is_sim = sim_env is not None
 
-        # Components (only initialized for real robot mode)
-        if HAS_BOOSTEROS and not self._is_sim:
-            self.slam = ORBSLAM3Node(config=slam_config, **(slam_options or {}))
+        # Components are required for every sensor-backed robot adapter. The
+        # lightweight in-process SimEnvironment has its own synthetic path.
+        if not self._is_sim:
+            options = dict(slam_options or {})
+            self.slam = ORBSLAM3Node(config=slam_config, **options)
             self.pose_estimator = PoseEstimator()
             self.depth_processor = DepthProcessor()
             self.safety = SafetyMonitor(**(safety_config or {}))
@@ -139,6 +148,15 @@ class NavigationPolicy:
         self._max_object_not_found = 10  # frames before giving up
         self._navigation_timeout = 120.0  # seconds (longer for sim)
         self._last_detection: Optional[ObjectDetection] = None
+        if object_track_timeout <= 0:
+            raise ValueError("object_track_timeout must be positive")
+        if not 0 < object_position_filter <= 1:
+            raise ValueError("object_position_filter must be in (0, 1]")
+        if goal_yaw_tolerance <= 0:
+            raise ValueError("goal_yaw_tolerance must be positive")
+        self._object_track_timeout = object_track_timeout
+        self._object_position_filter = object_position_filter
+        self._goal_yaw_tolerance = goal_yaw_tolerance
 
     def start(self) -> PolicyStatus:
         """Start the navigation policy.
@@ -153,14 +171,16 @@ class NavigationPolicy:
         if self._is_sim:
             self.sim_env.initialize()
         elif self.robot:
-            self.robot.initialize()
-            if HAS_BOOSTEROS and self.slam:
-                camera_info = self.robot.get_camera_info()
-                self.slam.initialize(camera_info)
-        elif HAS_BOOSTEROS and self.slam:
+            initialize_sensor_navigation(
+                self.robot, self.slam, self.pose_estimator, self.safety
+            )
+        elif self.slam:
             self.slam.initialize()
 
-        self.object_detector.initialize()
+        if not self._is_sim and not self.object_detector.initialize():
+            raise RuntimeError(
+                "No live object detector is available; install the configured ONNX model"
+            )
         if self.safety:
             self.safety.reset()
         if self.pose_estimator:
@@ -187,9 +207,13 @@ class NavigationPolicy:
             return self._status
 
         logger.info(f"Target object set: {object_name}")
-        self._goal = NavigationGoal(object_name=object_name)
+        self._goal = NavigationGoal(
+            object_name=object_name,
+            stand_off_distance=safe_stand_off_distance(object_name),
+        )
         self._state = PolicyState.DETECTING
         self._object_not_found_count = 0
+        self._start_time = time.time()
         self._update_status(message=f"Searching for '{object_name}'...")
         return self._status
 
@@ -229,13 +253,12 @@ class NavigationPolicy:
             elif self._state == PolicyState.DETECTING:
                 return self._step_detecting(sensor_data)
 
-            elif self._state in (PolicyState.NAVIGATING, PolicyState.TRACKING_OBJECT):
+            elif self._state in (
+                PolicyState.NAVIGATING,
+                PolicyState.TRACKING_OBJECT,
+                PolicyState.ARRIVED,
+            ):
                 return self._step_navigating(sensor_data)
-
-            elif self._state == PolicyState.ARRIVED:
-                return self._update_status(
-                    message=f"Arrived at '{self._goal.object_name}'"
-                )
 
             elif self._state == PolicyState.LOST:
                 return self._update_status(message="Lost - cannot find object")
@@ -269,13 +292,12 @@ class NavigationPolicy:
         elif self._state == PolicyState.DETECTING:
             return self._step_sim_detecting(frame, pose)
 
-        elif self._state in (PolicyState.NAVIGATING, PolicyState.TRACKING_OBJECT):
+        elif self._state in (
+            PolicyState.NAVIGATING,
+            PolicyState.TRACKING_OBJECT,
+            PolicyState.ARRIVED,
+        ):
             return self._step_sim_navigating(frame, pose)
-
-        elif self._state == PolicyState.ARRIVED:
-            return self._update_status(
-                robot_pose=pose, message=f"Arrived at '{self._goal.object_name}'"
-            )
 
         elif self._state == PolicyState.LOST:
             return self._update_status(
@@ -287,31 +309,25 @@ class NavigationPolicy:
 
         return self._update_status(robot_pose=pose)
 
+    def _matching_target_detections(
+        self, detections: list[ObjectDetection]
+    ) -> list[ObjectDetection]:
+        """Keep non-target detections out of policy state and telemetry."""
+        if self._goal is None:
+            return []
+        target_name = self._goal.object_name.lower()
+        return [
+            detection
+            for detection in detections
+            if target_name in detection.label.lower()
+        ]
+
     def _step_sim_detecting(self, frame: np.ndarray, pose: np.ndarray) -> PolicyStatus:
         """Step in DETECTING state for simulation."""
-        detections = self.sim_env.get_detections()
+        detections = self._matching_target_detections(self.sim_env.get_detections())
         target = self.object_detector.find_object(detections, self._goal.object_name)
 
-        if target is not None:
-            self._last_detection = target
-            self._goal.detection = target
-            self._object_not_found_count = 0
-
-            if self._has_arrived(target.distance):
-                self._state = PolicyState.ARRIVED
-                return self._update_status(
-                    robot_pose=pose,
-                    detections=detections,
-                    message=f"Found '{self._goal.object_name}' at {target.distance:.2f}m",
-                )
-
-            self._state = PolicyState.NAVIGATING
-            return self._update_status(
-                robot_pose=pose,
-                detections=detections,
-                message=f"Found '{self._goal.object_name}' at {target.distance:.2f}m, navigating...",
-            )
-        else:
+        if target is None or target.position_3d is None:
             self._object_not_found_count += 1
             if self._object_not_found_count >= self._max_object_not_found:
                 self._state = PolicyState.LOST
@@ -326,67 +342,96 @@ class NavigationPolicy:
                 message=f"Searching for '{self._goal.object_name}'... ({self._object_not_found_count}/{self._max_object_not_found})",
             )
 
+        object_world = planar_detection_to_world(target.position_3d, pose)
+        self._observe_object(target, object_world, pose)
+        self._state = PolicyState.NAVIGATING
+        return self._update_status(
+            robot_pose=pose,
+            detections=detections,
+            message=f"World-frame goal acquired for '{self._goal.object_name}'",
+        )
+
     def _step_sim_navigating(self, frame: np.ndarray, pose: np.ndarray) -> PolicyStatus:
         """Step in NAVIGATING state for simulation."""
-        detections = self.sim_env.get_detections()
+        detections = self._matching_target_detections(self.sim_env.get_detections())
         target = self.object_detector.find_object(detections, self._goal.object_name)
 
-        if target is not None:
-            self._last_detection = target
-            self._goal.detection = target
-            self._object_not_found_count = 0
+        observed_now = target is not None and target.position_3d is not None
+        if observed_now:
+            object_world = planar_detection_to_world(target.position_3d, pose)
+            self._observe_object(target, object_world, pose)
+        elif not self._goal_is_fresh():
+            self._state = PolicyState.LOST
+            self._stop_robot()
+            return self._update_status(
+                robot_pose=pose,
+                detections=detections,
+                message="Lost object; world-frame goal expired",
+            )
 
-            if self._has_arrived(target.distance):
-                self._state = PolicyState.ARRIVED
-                self._stop_robot()
-                return self._update_status(
-                    robot_pose=pose,
-                    detections=detections,
-                    message=f"Arrived at '{self._goal.object_name}'",
-                )
-
-            cmd = self._compute_tracking_velocity(target)
+        if self._goal.approach_pose is None:
+            cmd = VelocityCommand()
+        elif observed_now and self._goal_reached(pose):
+            self._state = PolicyState.ARRIVED
+            cmd = VelocityCommand()
         else:
-            self._object_not_found_count += 1
-            if self._object_not_found_count >= self._max_object_not_found:
-                self._state = PolicyState.LOST
-                self._stop_robot()
-                return self._update_status(
-                    robot_pose=pose,
-                    detections=detections,
-                    message="Lost object during navigation",
-                )
-            if self._last_detection and self._last_detection.position_3d is not None:
-                cmd = self._compute_tracking_velocity(self._last_detection)
-            else:
-                cmd = VelocityCommand()
+            self._state = PolicyState.NAVIGATING
+            cmd = self.controller.compute_goal_velocity(
+                pose,
+                self._goal.approach_pose,
+                yaw_tolerance=self._goal_yaw_tolerance,
+            )
 
         self.sim_env.set_velocity(cmd.linear_x, cmd.linear_y, cmd.angular_z)
 
-        distance_text = f"{target.distance:.2f}m" if target is not None else "unknown"
+        state_text = (
+            "holding goal pose" if self._state == PolicyState.ARRIVED else "navigating"
+        )
         return self._update_status(
             robot_pose=pose,
             velocity_command=cmd,
             detections=detections,
-            message=f"Navigating to '{self._goal.object_name}' ({distance_text})",
+            message=f"{state_text.capitalize()} for '{self._goal.object_name}'",
         )
 
-    def _compute_tracking_velocity(self, detection: ObjectDetection) -> VelocityCommand:
-        """Compute velocity command to track detected object."""
-        k_linear = 0.5
-        k_angular = 1.0
+    def _observe_object(
+        self,
+        detection: ObjectDetection,
+        object_position_world: np.ndarray,
+        robot_pose: np.ndarray,
+    ) -> None:
+        """Update the filtered object track and its derived approach pose."""
+        self._last_detection = detection
+        self._goal.detection = detection
+        self._object_not_found_count = 0
+        self._goal.object_position_world = blend_world_position(
+            self._goal.object_position_world,
+            object_position_world,
+            self._object_position_filter,
+        )
+        self._goal.approach_pose = approach_pose(
+            robot_pose,
+            self._goal.object_position_world,
+            self._goal.stand_off_distance,
+        )
+        self._goal.last_observed_monotonic = time.monotonic()
 
-        error_distance = detection.distance - self._goal.target_distance
-        error_angle = detection.angle
+    def _goal_is_fresh(self) -> bool:
+        observed = self._goal.last_observed_monotonic
+        return (
+            observed is not None
+            and time.monotonic() - observed <= self._object_track_timeout
+        )
 
-        linear_x = np.clip(k_linear * error_distance, -0.3, 0.3)
-        angular_z = np.clip(-k_angular * error_angle, -1.0, 1.0)
-
-        return VelocityCommand(linear_x=linear_x, linear_y=0.0, angular_z=angular_z)
-
-    def _has_arrived(self, distance: float) -> bool:
-        """Check the target distance with a small numerical/control tolerance."""
-        return distance <= self._goal.target_distance + 0.01
+    def _goal_reached(self, robot_pose: np.ndarray) -> bool:
+        return (
+            self._goal.approach_pose is not None
+            and self.controller.has_reached_pose(
+                robot_pose,
+                self._goal.approach_pose,
+                yaw_tolerance=self._goal_yaw_tolerance,
+            )
+        )
 
     def _stop_robot(self) -> None:
         """Stop the robot."""
@@ -395,34 +440,27 @@ class NavigationPolicy:
         elif self.robot:
             self.robot.stop()
 
-    def _step_detecting(self, sensor_data: dict) -> PolicyStatus:
+    def _step_detecting(self, sensor_data: SensorFrame) -> PolicyStatus:
         """Step in DETECTING state."""
-        rgb = sensor_data["rgb"]
-        depth = sensor_data["depth"]
-        camera_info = sensor_data.get("camera_info")
+        rgb = sensor_data.rgb
+        depth = sensor_data.depth
+        camera_info = sensor_data.camera_info
 
         # Detect objects
-        detections = self.object_detector.detect(rgb, depth, camera_info)
+        detections = self._matching_target_detections(
+            self.object_detector.detect(rgb, depth, camera_info)
+        )
         target = self.object_detector.find_object(detections, self._goal.object_name)
 
-        if target is not None:
+        if target is not None and target.position_3d is not None:
             self._last_detection = target
             self._goal.detection = target
+            self._goal.last_observed_monotonic = time.monotonic()
             self._object_not_found_count = 0
-
-            # Check if object is close enough
-            if self._has_arrived(target.distance):
-                self._state = PolicyState.ARRIVED
-                return self._update_status(
-                    detections=detections,
-                    message=f"Found '{self._goal.object_name}' at {target.distance:.2f}m",
-                )
-
-            # Start navigating
             self._state = PolicyState.NAVIGATING
             return self._update_status(
                 detections=detections,
-                message=f"Found '{self._goal.object_name}' at {target.distance:.2f}m, navigating...",
+                message=f"Found '{self._goal.object_name}'; acquiring world-frame goal",
             )
         else:
             self._object_not_found_count += 1
@@ -437,44 +475,40 @@ class NavigationPolicy:
                 message=f"Searching for '{self._goal.object_name}'... ({self._object_not_found_count}/{self._max_object_not_found})",
             )
 
-    def _step_navigating(self, sensor_data: dict) -> PolicyStatus:
+    def _step_navigating(self, sensor_data: SensorFrame | dict) -> PolicyStatus:
         """Step in NAVIGATING state."""
-        rgb = sensor_data["rgb"]
-        depth = sensor_data["depth"]
-        camera_info = sensor_data.get("camera_info")
-        imu_rpy = sensor_data.get("imu_rpy")
-        odom = sensor_data.get("odometry")
-
-        # Update SLAM
-        slam_pose = self.slam.track_frame(
-            rgb,
-            depth,
-            imu_data=sensor_data.get("imu_samples"),
-            timestamp=sensor_data.get("timestamp"),
+        if isinstance(sensor_data, dict):
+            sensor_data = SensorFrame(
+                rgb=sensor_data["rgb"],
+                depth=sensor_data["depth"],
+                timestamp=sensor_data.get("timestamp", 0.0),
+                camera_info=sensor_data.get("camera_info"),
+                imu_rpy=np.asarray(sensor_data.get("imu_rpy", np.zeros(3))),
+                imu_samples=sensor_data.get("imu_samples"),
+                odometry=np.asarray(sensor_data.get("odometry", np.zeros(3))),
+            )
+        localized = localize_sensor_frame(
+            sensor_data,
+            slam=self.slam,
+            pose_estimator=self.pose_estimator,
+            depth_processor=self.depth_processor,
+            safety=self.safety,
         )
-
-        # Update pose estimator
-        fused_pose = self.pose_estimator.update(
-            slam_pose=slam_pose,
-            odom_pose=odom,
-            imu_rpy=imu_rpy,
-        )
-
-        # Check safety
-        safety_status = self.safety.check_safety(
-            imu_rpy=imu_rpy,
-            slam_tracking=slam_pose.tracking_status == "OK",
-        )
+        rgb = sensor_data.rgb
+        depth = sensor_data.depth
+        camera_info = sensor_data.camera_info
+        slam_pose = localized.slam_pose
+        fused_pose = localized.fused_pose
+        safety_status = localized.safety_status
         if not safety_status.is_safe:
             self._state = PolicyState.ERROR
+            self._stop_robot()
             return self._update_status(
                 safety_status=safety_status,
                 message=f"Safety violation: {safety_status.reason}",
             )
 
-        # Process depth for obstacles
-        depth_m = self.depth_processor.preprocess(depth)
-        obstacle_info = self.depth_processor.detect_obstacles(depth_m)
+        obstacle_info = localized.obstacle_info
 
         # Check navigation timeout
         if (
@@ -482,59 +516,66 @@ class NavigationPolicy:
             and (time.time() - self._start_time) > self._navigation_timeout
         ):
             self._state = PolicyState.LOST
+            self._stop_robot()
             return self._update_status(message="Navigation timeout")
 
         # Detect object again (for tracking)
-        detections = self.object_detector.detect(rgb, depth, camera_info)
+        detections = self._matching_target_detections(
+            self.object_detector.detect(rgb, depth, camera_info)
+        )
         target = self.object_detector.find_object(detections, self._goal.object_name)
 
-        if target is not None:
-            self._last_detection = target
-            self._goal.detection = target
-            self._object_not_found_count = 0
-
-            # Check if arrived
-            if self._has_arrived(target.distance):
-                self._state = PolicyState.ARRIVED
-                return self._update_status(
-                    detections=detections,
-                    message=f"Arrived at '{self._goal.object_name}'",
-                )
-
-            # Track object
-            cmd = self.controller.compute_object_tracking_velocity(
-                object_position=target.position_3d,
-                obstacle_info=obstacle_info,
-                target_distance=self._goal.target_distance,
+        observed_now = (
+            target is not None
+            and target.position_3d is not None
+            and slam_pose.tracking_status == "OK"
+        )
+        robot_pose = fused_pose.position_2d
+        if observed_now:
+            object_world = (
+                body_point_to_world(target.position_3d, robot_pose)
+                if target.coordinate_frame == "body"
+                else camera_point_to_world(target.position_3d, slam_pose.to_matrix())
             )
+            self._observe_object(target, object_world, robot_pose)
+        elif not self._goal_is_fresh():
+            self._state = PolicyState.LOST
+            if self.robot:
+                self.robot.stop()
+            return self._update_status(
+                current_pose=fused_pose,
+                safety_status=safety_status,
+                detections=detections,
+                message="Lost object; world-frame goal expired",
+            )
+
+        if self._goal.approach_pose is None:
+            cmd = VelocityCommand()
+        elif observed_now and self._goal_reached(robot_pose):
+            self._state = PolicyState.ARRIVED
+            cmd = VelocityCommand()
         else:
-            self._object_not_found_count += 1
-            if self._object_not_found_count >= self._max_object_not_found:
-                self._state = PolicyState.LOST
-                return self._update_status(
-                    detections=detections, message="Lost object during navigation"
-                )
-            # Continue toward last known position
-            if self._last_detection and self._last_detection.position_3d is not None:
-                cmd = self.controller.compute_object_tracking_velocity(
-                    object_position=self._last_detection.position_3d,
-                    obstacle_info=obstacle_info,
-                    target_distance=self._goal.target_distance,
-                )
-            else:
-                cmd = VelocityCommand()
+            self._state = PolicyState.NAVIGATING
+            cmd = self.controller.compute_goal_velocity(
+                current_pose=robot_pose,
+                goal_pose=self._goal.approach_pose,
+                obstacle_info=obstacle_info,
+                yaw_tolerance=self._goal_yaw_tolerance,
+            )
 
         # Send velocity command
         if self.robot:
-            self.robot.set_velocity(cmd.linear_x, cmd.linear_y, cmd.angular_z)
+            send_velocity(self.robot, cmd)
 
-        distance_text = f"{target.distance:.2f}" if target else "unknown"
+        state_text = (
+            "holding goal pose" if self._state == PolicyState.ARRIVED else "navigating"
+        )
         return self._update_status(
             current_pose=fused_pose,
             safety_status=safety_status,
             velocity_command=cmd,
             detections=detections,
-            message=f"Navigating to '{self._goal.object_name}' ({distance_text}m)",
+            message=f"{state_text.capitalize()} for '{self._goal.object_name}'",
         )
 
     def stop(self) -> PolicyStatus:
@@ -554,23 +595,13 @@ class NavigationPolicy:
         self._update_status(message="Stopped")
         return self._status
 
-    def _get_sensor_data(self) -> Optional[dict]:
+    def _get_sensor_data(self) -> Optional[SensorFrame]:
         """Get latest sensor data from robot."""
         if self.robot is None:
             return None
 
         try:
-            state = self.robot.get_state(include_images=True)
-
-            return {
-                "rgb": self.robot.image_to_array(state.rgb),
-                "depth": self.robot.image_to_array(state.depth),
-                "timestamp": self.robot.image_timestamp(state.rgb),
-                "camera_info": state.camera_info,
-                "imu_rpy": state.orientation_rpy,
-                "imu_samples": getattr(state, "imu_samples", None),
-                "odometry": state.position_2d,
-            }
+            return read_sensor_frame(self.robot)
         except Exception as e:
             logger.error(f"Failed to get sensor data: {e}")
             return None

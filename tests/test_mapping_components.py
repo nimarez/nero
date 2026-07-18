@@ -1,4 +1,5 @@
 import json
+import struct
 
 import numpy as np
 import pytest
@@ -6,7 +7,7 @@ from scipy.spatial.transform import Rotation
 
 from nero.mapping.trajectory_recorder import TrajectoryRecorder
 from nero.slam.map_manager import Keyframe, MapManager
-from nero.utils.pointcloud_converter import load_pointcloud
+from nero.utils.pointcloud_converter import load_pointcloud, resolve_pointcloud_path
 
 
 def pose(x, y, z, yaw=0.0):
@@ -51,9 +52,7 @@ def test_map_manager_round_trip_listing_trajectory_and_delete(tmp_path):
     assert loaded is not None
     assert loaded.metadata.area_covered_m2 == 6
     assert loaded.keyframes == [keyframe]
-    np.testing.assert_array_equal(
-        manager.get_trajectory("office"), [[0, 0, 0], [2, 3, 0]]
-    )
+    np.testing.assert_array_equal(manager.get_trajectory("office"), [[0, 0, 0], [2, 3, 0]])
     assert [item.name for item in manager.list_maps()] == ["office"]
     assert manager.delete_map("office")
     assert not manager.delete_map("office")
@@ -79,3 +78,26 @@ def test_simple_ascii_ply_and_numpy_pointcloud_loading(tmp_path):
     unsupported.write_text("")
     with pytest.raises(ValueError, match="Unsupported"):
         load_pointcloud(unsupported)
+
+
+def test_binary_splat_ply_reads_only_xyz_properties(tmp_path):
+    ply_path = tmp_path / "splat.ply"
+    header = (
+        b"ply\nformat binary_little_endian 1.0\nelement vertex 2\n"
+        b"property float x\nproperty float y\nproperty float z\n"
+        b"property float opacity\nend_header\n"
+    )
+    ply_path.write_bytes(header + struct.pack("<ffffffff", 1, 2, 3, 0.5, 4, 5, 6, 0.75))
+    np.testing.assert_array_equal(load_pointcloud(ply_path), [[1, 2, 3], [4, 5, 6]])
+
+
+def test_git_lfs_pointer_has_actionable_error(tmp_path):
+    pointer = tmp_path / "missing.ply"
+    pointer.write_text("version https://git-lfs.github.com/spec/v1\n")
+    with pytest.raises(ValueError, match="git lfs pull"):
+        load_pointcloud(pointer)
+
+
+def test_main_room_shorthand_resolves_to_bundled_asset():
+    resolved = resolve_pointcloud_path("assets/main_room.ply")
+    assert resolved.as_posix().endswith("simulation/scenes/main_room/assets/main_room.ply")

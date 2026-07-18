@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from nero.slam.imu_buffer import IMUMeasurement, K1IMUSource
+from nero.slam.imu_buffer import IMUMeasurement
 from nero.slam.k1_calibration import K1Calibration
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,24 @@ class SLAMPose:
         matrix[:3, :3] = Rotation.from_quat(self.orientation).as_matrix()
         matrix[:3, 3] = self.position
         return matrix
+
+    def camera_to_body(self, tbc: np.ndarray) -> "SLAMPose":
+        """Convert the world camera pose to the world body/IMU pose.
+
+        ``tbc`` is the ORB-SLAM3 ``T_b_c1`` calibration: the camera pose in
+        the body frame.  Therefore ``T_w_b = T_w_c @ inverse(T_b_c)``.
+        """
+        transform = np.asarray(tbc, dtype=float)
+        if transform.shape != (4, 4):
+            raise ValueError("tbc must be a 4x4 transform")
+        twb = self.to_matrix() @ np.linalg.inv(transform)
+        return SLAMPose(
+            position=twb[:3, 3].copy(),
+            orientation=Rotation.from_matrix(twb[:3, :3]).as_quat(),
+            timestamp=self.timestamp,
+            tracking_status=self.tracking_status,
+            num_map_points=self.num_map_points,
+        )
 
 
 @dataclass
@@ -87,7 +105,6 @@ class ORBSLAM3Node:
         settings_path: str | None = None,
         calibration_path: str | None = None,
         allow_fallback: bool | None = None,
-        start_imu_source: bool = True,
         **aliases: Any,
     ):
         config_dict = config if isinstance(config, dict) else {}
@@ -110,10 +127,8 @@ class ORBSLAM3Node:
         self.allow_fallback = (
             sys.platform != "linux" if allow_fallback is None else allow_fallback
         )
-        self.start_imu_source = start_imu_source
         self._lock = threading.Lock()
         self._slam_system: Any = None
-        self._imu_source: K1IMUSource | None = None
         self._calibration: K1Calibration | None = None
         self._use_fallback = True
         self._is_initialized = False
@@ -133,6 +148,21 @@ class ORBSLAM3Node:
     @property
     def using_native(self) -> bool:
         return not self._use_fallback
+
+    @property
+    def tbc(self) -> np.ndarray:
+        """Return the calibrated camera pose in the body/IMU frame."""
+        if self._calibration is None:
+            return np.eye(4)
+        return np.asarray(self._calibration.tbc, dtype=float)
+
+    @property
+    def calibration(self) -> K1Calibration | None:
+        return self._calibration
+
+    def body_pose(self, camera_pose: SLAMPose) -> SLAMPose:
+        """Convert an ORB camera pose into the robot body frame."""
+        return camera_pose.camera_to_body(self.tbc)
 
     def initialize(self, camera_info: Any = None) -> bool:
         if camera_info is not None:
@@ -171,14 +201,6 @@ class ORBSLAM3Node:
         system.initialize()
         self._slam_system = system
         self._use_fallback = False
-        if self.start_imu_source:
-            self._imu_source = K1IMUSource()
-            try:
-                self._imu_source.start()
-            except Exception as exc:
-                self._slam_system.shutdown()
-                self._slam_system = None
-                raise RuntimeError("K1 IMU subscription failed") from exc
         logger.info("ORB-SLAM3 initialized with Sensor.IMU_RGBD")
 
     @staticmethod
@@ -223,10 +245,6 @@ class ORBSLAM3Node:
             if self._use_fallback:
                 pose = self._track_fallback(rgb, depth, ts)
             else:
-                if imu_data is None and self._imu_source is not None:
-                    imu_data = self._imu_source.buffer.between(
-                        self._last_frame_timestamp, ts
-                    )
                 pose = self._track_native(rgb, depth, self._coerce_imu(imu_data), ts)
             self._last_frame_timestamp = ts
             self._current_pose = pose
@@ -273,7 +291,9 @@ class ORBSLAM3Node:
             process = self._slam_system.process_image_rgbd_inertial
         result = process(image, depth_image, timestamp, imu)
         if result is not None and hasattr(result, "success"):
-            if not bool(result.success) or not bool(result.is_valid):
+            success = result.success() if callable(result.success) else result.success
+            valid = result.is_valid() if callable(result.is_valid) else result.is_valid
+            if not bool(success) or not bool(valid):
                 logger.warning("ORB-SLAM3 rejected IMU_RGBD frame %.6f", timestamp)
                 return self._lost_pose(timestamp)
             state_value = result.state
@@ -400,6 +420,22 @@ class ORBSLAM3Node:
     def get_map_points_count(self) -> int:
         return self._map_points_count
 
+    def get_map_points(self) -> np.ndarray:
+        """Return the currently tracked native map points when exposed by the binding."""
+        if self._use_fallback or self._slam_system is None:
+            return np.empty((0, 3), dtype=np.float32)
+        getter = getattr(self._slam_system, "get_tracked_mappoints", None)
+        if getter is None:
+            return np.empty((0, 3), dtype=np.float32)
+        points = getter()
+        if points is None:
+            return np.empty((0, 3), dtype=np.float32)
+        values = np.asarray(points, dtype=np.float32)
+        if values.size == 0:
+            return np.empty((0, 3), dtype=np.float32)
+        values = values.reshape(-1, values.shape[-1])[:, :3]
+        return values[np.all(np.isfinite(values), axis=1)]
+
     def get_keyframe_count(self) -> int:
         return self._keyframe_count
 
@@ -418,17 +454,7 @@ class ORBSLAM3Node:
             self._last_frame_timestamp = None
             self._prev_keypoints = self._prev_descriptors = self._prev_depth = None
 
-    def save_map(self, path: str) -> bool:
-        logger.warning("The Python ORB-SLAM3 binding does not expose atlas persistence")
-        return False
-
-    def load_map(self, path: str) -> bool:
-        logger.warning("The Python ORB-SLAM3 binding does not expose atlas persistence")
-        return False
-
     def shutdown(self) -> None:
-        if self._imu_source is not None:
-            self._imu_source.close()
         if self._slam_system is not None and hasattr(self._slam_system, "shutdown"):
             self._slam_system.shutdown()
         self._is_initialized = False

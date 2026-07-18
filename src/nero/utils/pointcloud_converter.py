@@ -17,106 +17,53 @@ import argparse
 import logging
 from pathlib import Path
 
-import numpy as np
-
 from nero.navigation import (
     pointcloud_to_grid,
     save_grid_as_png,
     save_grid_yaml,
 )
+from nero.navigation.pointcloud_io import load_pointcloud
 
 logger = logging.getLogger(__name__)
 
-
-def load_pointcloud(path: str | Path) -> np.ndarray:
-    """Load point cloud from file.
-
-    Returns:
-        (N, 3) array of (x, y, z) points
-    """
-    path = Path(path)
-
-    if path.suffix == ".npy":
-        return np.load(path)
-
-    if path.suffix == ".ply":
-        try:
-            import open3d as o3d
-
-            pcd = o3d.io.read_point_cloud(str(path))
-            return np.asarray(pcd.points)
-        except ImportError:
-            # Fallback: simple PLY parser
-            return _parse_ply(path)
-
-    if path.suffix == ".pcd":
-        try:
-            import open3d as o3d
-
-            pcd = o3d.io.read_point_cloud(str(path))
-            return np.asarray(pcd.points)
-        except ImportError:
-            raise ImportError("Install open3d for PCD support: uv add open3d")
-
-    if path.suffix in (".las", ".laz"):
-        try:
-            import pylas
-
-            las = pylas.read(str(path))
-            return np.column_stack([las.x, las.y, las.z])
-        except ImportError:
-            raise ImportError("Install pylas for LAS/LAZ support: uv add pylas")
-
-    raise ValueError(f"Unsupported point cloud format: {path.suffix}")
+_BUNDLED_MAIN_ROOM = (
+    Path(__file__).resolve().parents[1] / "simulation/scenes/main_room/assets/main_room.ply"
+)
 
 
-def _parse_ply(path: Path) -> np.ndarray:
-    """Simple PLY parser for vertex data."""
-    points = []
-    in_header = True
-    props = []
-
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if line == "end_header":
-                in_header = False
-                continue
-            if in_header:
-                if line.startswith("property"):
-                    props.append(line.split()[-1])
-            else:
-                values = line.split()
-                if len(values) >= 3:
-                    points.append(
-                        [float(values[0]), float(values[1]), float(values[2])]
-                    )
-
-    if not points:
-        raise ValueError(f"No points found in {path}")
-
-    return np.array(points)
+def resolve_pointcloud_path(value: str | Path) -> Path:
+    """Resolve the documented main-room shorthand without copying its LFS asset."""
+    path = Path(value)
+    if path.exists():
+        return path
+    if str(path) in ("main_room", "assets/main_room.ply"):
+        return _BUNDLED_MAIN_ROOM
+    return path
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Convert point cloud to occupancy grid"
-    )
+    parser = argparse.ArgumentParser(description="Convert point cloud to occupancy grid")
     parser.add_argument("input", help="Input point cloud file (.ply, .pcd, .npy, .las)")
+    parser.add_argument("-o", "--output", required=True, help="Output directory for map files")
+    parser.add_argument("--resolution", type=float, default=0.05, help="Grid resolution (m/px)")
+    parser.add_argument("--grid-size", type=float, default=20.0, help="Grid size in meters")
     parser.add_argument(
-        "-o", "--output", required=True, help="Output directory for map files"
-    )
-    parser.add_argument(
-        "--resolution", type=float, default=0.05, help="Grid resolution (m/px)"
-    )
-    parser.add_argument(
-        "--grid-size", type=float, default=20.0, help="Grid size in meters"
+        "--up-axis",
+        choices=("x", "y", "z", "auto"),
+        default="auto",
+        help="Vertical axis; main_room.ply is Y-up",
     )
     parser.add_argument(
         "--height-thresh",
         type=float,
         default=0.5,
         help="Height threshold to filter ground points (m)",
+    )
+    parser.add_argument(
+        "--max-height",
+        type=float,
+        default=None,
+        help="Ignore points above this height (useful for ceilings)",
     )
     parser.add_argument("--name", default="map", help="Output filename prefix")
     return parser.parse_args()
@@ -131,8 +78,9 @@ def main() -> None:
     )
 
     # Load point cloud
-    logger.info(f"Loading point cloud: {args.input}")
-    points = load_pointcloud(args.input)
+    input_path = resolve_pointcloud_path(args.input)
+    logger.info(f"Loading point cloud: {input_path}")
+    points = load_pointcloud(input_path)
     logger.info(f"Loaded {len(points)} points")
 
     # Convert to occupancy grid
@@ -142,6 +90,8 @@ def main() -> None:
         resolution=args.resolution,
         grid_size=args.grid_size,
         height_threshold=args.height_thresh,
+        max_height=args.max_height,
+        up_axis=args.up_axis,
     )
     logger.info(f"Grid: {grid.width}x{grid.height} at {grid.resolution}m/px")
 

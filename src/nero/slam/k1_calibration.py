@@ -5,18 +5,22 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from scipy.spatial.transform import Rotation
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CAMERA_INFO_TOPIC = "rt/booster/camera/color/camera_info"
+DEFAULT_CAMERA_INFO_TOPIC = "/boostercamera/head/rgb/camera_info"
+DEFAULT_RGB_TOPIC = "/boostercamera/head/rgb"
+DEFAULT_DEPTH_TOPIC = "/boostercamera/head/depth"
+K1_GEEK_RESOLUTION = (544, 448)
+K1_GEEK_FPS = 20.0
+K1_GEEK_FOV_DEGREES = (105.0, 94.0)
+K1_GEEK_DEPTH_RANGE_M = (0.5, 6.0)
 
 
 def _yaml_real(value: float) -> str:
@@ -26,46 +30,6 @@ def _yaml_real(value: float) -> str:
 
 def _stamp_seconds(stamp: Any) -> float:
     return float(stamp.sec) + float(stamp.nanosec) * 1e-9
-
-
-def _vector3(value: Any) -> np.ndarray:
-    if isinstance(value, dict):
-        return np.array([value[axis] for axis in ("x", "y", "z")], dtype=float)
-    if isinstance(value, (list, tuple, np.ndarray)):
-        if len(value) != 3:
-            raise ValueError("3-vector must contain exactly three values")
-        return np.asarray(value, dtype=float)
-    return np.array([value.x, value.y, value.z], dtype=float)
-
-
-def _transform(xyz: Any, rpy: Any) -> np.ndarray:
-    result = np.eye(4)
-    result[:3, :3] = Rotation.from_euler("xyz", _vector3(rpy)).as_matrix()
-    result[:3, 3] = _vector3(xyz)
-    return result
-
-
-def _sdk_transform(value: Any) -> np.ndarray:
-    result = np.eye(4)
-    result[:3, :3] = Rotation.from_quat(
-        [
-            value.orientation.x,
-            value.orientation.y,
-            value.orientation.z,
-            value.orientation.w,
-        ]
-    ).as_matrix()
-    result[:3, 3] = _vector3(value.position)
-    return result
-
-
-def _device_body(value: Any) -> Any:
-    """Unwrap the DeviceInfo JSON emitted by the official Python binding."""
-    if isinstance(value, dict) and "body" in value:
-        value = value["body"]
-    if isinstance(value, str):
-        value = json.loads(value)
-    return value
 
 
 @dataclass
@@ -86,6 +50,15 @@ class K1Calibration:
     imu_gyro_walk: float
     imu_acc_walk: float
     source: str = "K1 runtime + stationary IMU measurement"
+    shutter_type: str = "global"
+    rgb_fov_degrees: list[float] | None = None
+    depth_width: int | None = None
+    depth_height: int | None = None
+    depth_fps: float | None = None
+    depth_fov_degrees: list[float] | None = None
+    depth_accuracy_at_1m: float | None = None
+    depth_min_m: float | None = None
+    depth_max_m: float | None = None
 
     def validate(self) -> None:
         if len(self.camera_matrix) != 9:
@@ -108,6 +81,63 @@ class K1Calibration:
             raise ValueError(f"invalid IMU_RGBD calibration fields: {', '.join(invalid)}")
         if not np.all(np.isfinite(np.asarray(self.tbc, dtype=float))):
             raise ValueError("tbc contains non-finite values")
+        matrix = np.asarray(self.camera_matrix, dtype=float).reshape(3, 3)
+        if not np.all(np.isfinite(matrix)) or matrix[0, 0] <= 0 or matrix[1, 1] <= 0:
+            raise ValueError("camera_matrix must contain finite positive focal lengths")
+        rotation = np.asarray(self.tbc, dtype=float)[:3, :3]
+        if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-5) or not np.isclose(
+            np.linalg.det(rotation), 1.0, atol=1e-5
+        ):
+            raise ValueError("tbc rotation must be a proper orthonormal matrix")
+        if self.shutter_type.lower() != "global":
+            raise ValueError("K1 Geek calibration must use its global shutter")
+        if self.depth_width is not None and self.depth_width <= 0:
+            raise ValueError("depth_width must be positive")
+        if self.depth_height is not None and self.depth_height <= 0:
+            raise ValueError("depth_height must be positive")
+        if self.depth_fps is not None and self.depth_fps <= 0:
+            raise ValueError("depth_fps must be positive")
+        if self.depth_width is not None and self.depth_width != self.width:
+            raise ValueError("K1 Geek RGB and depth widths must match")
+        if self.depth_height is not None and self.depth_height != self.height:
+            raise ValueError("K1 Geek RGB and depth heights must match")
+        if self.depth_fps is not None and not np.isclose(self.depth_fps, self.camera_fps):
+            raise ValueError("K1 Geek RGB and depth frame rates must match")
+        for name, fov in (
+            ("rgb_fov_degrees", self.rgb_fov_degrees),
+            ("depth_fov_degrees", self.depth_fov_degrees),
+        ):
+            if fov is not None and (
+                len(fov) != 2 or any(not 0 < float(value) < 180 for value in fov)
+            ):
+                raise ValueError(f"{name} must contain horizontal and vertical angles")
+        if self.depth_accuracy_at_1m is not None and not 0 < self.depth_accuracy_at_1m < 1:
+            raise ValueError("depth_accuracy_at_1m must be a fractional error")
+        if self.depth_min_m is not None and self.depth_max_m is not None:
+            if not 0 < self.depth_min_m < self.depth_max_m:
+                raise ValueError("invalid K1 depth operating range")
+
+    def validate_geek_profile(self) -> None:
+        """Require the delivered sensor contract published for the K1 Geek."""
+        self.validate()
+        if (self.width, self.height) != K1_GEEK_RESOLUTION:
+            raise ValueError(
+                f"K1 Geek RGB must be {K1_GEEK_RESOLUTION[0]}x{K1_GEEK_RESOLUTION[1]}"
+            )
+        if not np.isclose(self.camera_fps, K1_GEEK_FPS, rtol=0.05):
+            raise ValueError(f"K1 Geek RGB must deliver {K1_GEEK_FPS:g} fps")
+        if self.depth_width != self.width or self.depth_height != self.height:
+            raise ValueError("K1 Geek depth resolution metadata is missing or mismatched")
+        if self.depth_fps is None or not np.isclose(
+            self.depth_fps, K1_GEEK_FPS, rtol=0.05
+        ):
+            raise ValueError("K1 Geek depth must deliver 20 fps")
+        if self.rgb_fov_degrees != list(K1_GEEK_FOV_DEGREES):
+            raise ValueError("K1 Geek RGB FOV must be 105x94 degrees")
+        if self.depth_fov_degrees != list(K1_GEEK_FOV_DEGREES):
+            raise ValueError("K1 Geek depth FOV must be 105x94 degrees")
+        if (self.depth_min_m, self.depth_max_m) != K1_GEEK_DEPTH_RANGE_M:
+            raise ValueError("K1 Geek depth range must be 0.5-6 m")
 
     def save(self, path: Path) -> Path:
         self.validate()
@@ -228,123 +258,134 @@ def estimate_frequency(timestamps: list[float], sensor: str) -> float:
     intervals = intervals[np.isfinite(intervals) & (intervals > 0)]
     if len(intervals) < 9:
         raise ValueError(f"{sensor} timestamps are not strictly increasing")
-    period = float(np.median(intervals))
+    # Some K1 camera pipelines alternate 33 ms and 67 ms delivery intervals.
+    # Count over the complete span measures their real average rate; a median
+    # would incorrectly report 30 Hz for that 20 Hz stream.
+    period = float((values[-1] - values[0]) / (len(values) - 1))
     if period <= 0 or not np.isfinite(period):
         raise ValueError(f"cannot estimate {sensor} frequency")
     return 1.0 / period
 
 
-def probe_k1(
-    *, iface: str, robot_name: str | None, duration: float, camera_info_topic: str
+def probe_k1_ros(
+    *,
+    duration: float,
+    iface: str = "lo",
+    camera_info_topic: str = DEFAULT_CAMERA_INFO_TOPIC,
+    rgb_topic: str = DEFAULT_RGB_TOPIC,
+    depth_topic: str = DEFAULT_DEPTH_TOPIC,
 ) -> K1Calibration:
-    """Collect factory geometry and stationary noise data from a connected K1."""
+    """Calibrate from the ROS streams shipped on production K1 firmware.
+
+    Production firmware 1.5 exposes calibrated intrinsics and synchronized
+    RGB-D frames via ROS. The mount transform comes from Booster's nominal K1
+    Geek model; the output source field records that distinction explicitly.
+    """
     try:
-        import booster_robotics_sdk_python as br
+        import rclpy
+        import booster_robotics_sdk_python as booster
+        from sensor_msgs.msg import CameraInfo, Image
     except ImportError as exc:
-        raise RuntimeError("the official Booster Python SDK is only available on Linux") from exc
+        raise RuntimeError("K1 ROS calibration requires ROS 2 sensor messages") from exc
 
-    br.ChannelFactory.Instance().Init(0, iface)
-    camera_client = br.CameraClient()
-    loco_client = br.B1LocoClient()
-    camera_client.InitWithName(robot_name) if robot_name else camera_client.Init()
-    loco_client.InitWithName(robot_name) if robot_name else loco_client.Init()
-
-    camera_catalog = _device_body(json.loads(camera_client.GetCameras().to_json_str()))
-    sensor_catalog = _device_body(json.loads(loco_client.GetSensors().to_json_str()))
-    cameras = (
-        camera_catalog if isinstance(camera_catalog, list) else camera_catalog.get("cameras", [])
+    owns_rclpy = not rclpy.ok()
+    if owns_rclpy:
+        rclpy.init(args=None)
+    booster.ChannelFactory.Instance().Init(0, iface)
+    node = rclpy.create_node("nero_k1_calibration")
+    qos = rclpy.qos.QoSProfile(
+        depth=200,
+        reliability=rclpy.qos.ReliabilityPolicy.RELIABLE,
+        history=rclpy.qos.HistoryPolicy.KEEP_LAST,
     )
-    if not cameras:
-        raise RuntimeError(f"K1 returned no cameras: {camera_catalog}")
-    camera = next(
-        (
-            item
-            for item in cameras
-            if "head" in str(item.get("pos", item.get("position", ""))).lower()
-        ),
-        cameras[0],
-    )
-    imus = (
-        sensor_catalog
-        if isinstance(sensor_catalog, list)
-        else sensor_catalog.get("imus", sensor_catalog.get("imu", []))
-    )
-    if isinstance(imus, dict):
-        imus = [imus]
-    if not imus:
-        raise RuntimeError(f"K1 returned no IMU metadata: {sensor_catalog}")
-    imu = imus[0]
-
     camera_info: dict[str, Any] = {}
-    camera_timestamps: list[float] = []
+    rgb_timestamps: list[float] = []
+    depth_timestamps: list[float] = []
     imu_samples: list[tuple[float, np.ndarray, np.ndarray]] = []
-    info_event = threading.Event()
 
-    def on_camera_info(message: Any) -> None:
-        # CameraInfo can be latched or use a different clock domain. Receipt
-        # intervals measure the delivered rate that ORB-SLAM actually sees.
-        timestamp = time.monotonic()
-        if not camera_timestamps or timestamp > camera_timestamps[-1]:
-            camera_timestamps.append(timestamp)
+    def on_info(message: Any) -> None:
         camera_info.update(
-            frame=str(message.header.frame_id),
-            width=int(message.width),
-            height=int(message.height),
-            k=list(message.k),
-            d=list(message.d),
+            frame=str(message.header.frame_id), width=int(message.width),
+            height=int(message.height), k=list(message.k), d=list(message.d),
         )
-        info_event.set()
 
-    def on_imu(message: Any) -> None:
-        timestamp = _stamp_seconds(message.header.stamp)
-        gyro = _vector3(message.angular_velocity)
-        accel = _vector3(message.linear_acceleration)
+    def on_image(values: list[float]):
+        def callback(message: Any) -> None:
+            timestamp = _stamp_seconds(message.header.stamp)
+            if not values or timestamp > values[-1]:
+                values.append(timestamp)
+        return callback
+
+    def on_low_state(message: Any) -> None:
+        timestamp = time.time()
+        message = message.imu_state
         if not imu_samples or timestamp > imu_samples[-1][0]:
-            imu_samples.append((timestamp, gyro, accel))
+            imu_samples.append(
+                (
+                    timestamp,
+                    np.asarray(message.gyro, dtype=float),
+                    np.asarray(message.acc, dtype=float),
+                )
+            )
 
-    camera_subscriber = br.CameraInfoSubscriber(on_camera_info, camera_info_topic)
-    imu_subscriber = br.B1RosImuSubscriber(on_imu)
-    camera_subscriber.InitChannel()
-    imu_subscriber.InitChannel()
+    subscriptions = [
+        node.create_subscription(CameraInfo, camera_info_topic, on_info, qos),
+        node.create_subscription(Image, rgb_topic, on_image(rgb_timestamps), qos),
+        node.create_subscription(Image, depth_topic, on_image(depth_timestamps), qos),
+    ]
+    low_state_subscriber = booster.B1LowStateSubscriber(on_low_state)
+    low_state_subscriber.InitChannel()
     try:
-        if not info_event.wait(timeout=10.0):
-            raise RuntimeError(f"no CameraInfo received on {camera_info_topic}")
         logger.info("Keep the K1 completely stationary for %.1f seconds", duration)
-        time.sleep(duration)
+        deadline = time.monotonic() + max(10.0, duration + 10.0)
+        capture_started: float | None = None
+        while time.monotonic() < deadline:
+            rclpy.spin_once(node, timeout_sec=0.05)
+            if camera_info and rgb_timestamps and depth_timestamps and imu_samples:
+                if capture_started is None:
+                    capture_started = time.monotonic()
+                if time.monotonic() - capture_started >= duration:
+                    break
+        missing = [
+            name for name, values in (
+                (camera_info_topic, camera_info), (rgb_topic, rgb_timestamps),
+                (depth_topic, depth_timestamps), ("K1 low-state IMU", imu_samples),
+            ) if not values
+        ]
+        if missing:
+            raise RuntimeError("no live K1 samples received from: " + ", ".join(missing))
     finally:
-        camera_subscriber.CloseChannel()
-        imu_subscriber.CloseChannel()
+        low_state_subscriber.CloseChannel()
+        for subscription in subscriptions:
+            node.destroy_subscription(subscription)
+        node.destroy_node()
+        if owns_rclpy:
+            rclpy.shutdown()
 
     noise = estimate_imu_noise(imu_samples)
-    camera_fps = estimate_frequency(camera_timestamps, "camera")
-    extrinsics = camera.get("extrinsics", {})
-    if not all(key in extrinsics for key in ("xyz", "rpy", "parent_frame")):
-        raise RuntimeError(f"camera catalog has no usable factory extrinsics: {camera}")
-    parent = str(extrinsics["parent_frame"]).lower()
-    imu_mount = str(imu.get("mount_position", "body")).lower()
-    parent_to_camera = _transform(extrinsics["xyz"], extrinsics["rpy"])
-    if ("body" in parent and "body" in imu_mount) or ("head" in parent and "head" in imu_mount):
-        tbc = parent_to_camera
-    elif "head" in parent and "body" in imu_mount:
-        body_to_head = _sdk_transform(loco_client.GetFrameTransform(br.Frame.kBody, br.Frame.kHead))
-        tbc = body_to_head @ parent_to_camera
-    else:
-        raise RuntimeError(f"cannot compose camera parent {parent!r} with IMU mount {imu_mount!r}")
-
-    depth_scale = float(camera.get("depth_scale", 0.001))
-    color = camera.get("color_encoding", {})
-    color_format = str(color.get("format", "RGB8") if isinstance(color, dict) else color).upper()
+    rgb_fps = estimate_frequency(rgb_timestamps, "RGB camera")
+    depth_fps = estimate_frequency(depth_timestamps, "depth camera")
+    nominal_path = Path(__file__).resolve().parents[3] / "config/k1_geek_nominal_calibration.json"
+    nominal = K1Calibration.load(nominal_path)
     return K1Calibration(
         camera_frame=camera_info["frame"],
-        imu_frame=str(imu.get("name", imu_mount)),
-        width=camera_info["width"],
-        height=camera_info["height"],
-        camera_fps=camera_fps,
+        imu_frame="body_imu",
+        width=camera_info["width"], height=camera_info["height"],
+        camera_fps=rgb_fps,
         camera_matrix=[float(value) for value in camera_info["k"]],
         distortion=[float(value) for value in camera_info["d"]],
-        depth_map_factor=1.0 / depth_scale,
-        camera_rgb="BGR" not in color_format,
-        tbc=tbc.tolist(),
+        depth_map_factor=1000.0,
+        camera_rgb=False,
+        tbc=nominal.tbc,
+        source=(
+            "K1 production ROS intrinsics/rates + stationary IMU measurement; "
+            "nominal K1 Geek camera-to-body mount transform"
+        ),
+        shutter_type="global", rgb_fov_degrees=list(K1_GEEK_FOV_DEGREES),
+        depth_width=camera_info["width"], depth_height=camera_info["height"],
+        depth_fps=depth_fps, depth_fov_degrees=list(K1_GEEK_FOV_DEGREES),
+        depth_accuracy_at_1m=0.03,
+        depth_min_m=K1_GEEK_DEPTH_RANGE_M[0], depth_max_m=K1_GEEK_DEPTH_RANGE_M[1],
         **noise,
     )
 
@@ -352,7 +393,6 @@ def probe_k1(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Probe K1 calibration for ORB-SLAM3 IMU_RGBD")
     parser.add_argument("--iface", default="lo", help="DDS interface; use lo when running on K1")
-    parser.add_argument("--robot-name", default=None)
     parser.add_argument(
         "--duration", type=float, default=60.0, help="stationary IMU capture seconds"
     )
@@ -361,12 +401,12 @@ def main() -> None:
     parser.add_argument("--settings", type=Path, default=Path("config/k1_orbslam3_imu_rgbd.yaml"))
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
-    calibration = probe_k1(
-        iface=args.iface,
-        robot_name=args.robot_name,
+    calibration = probe_k1_ros(
         duration=args.duration,
+        iface=args.iface,
         camera_info_topic=args.camera_info_topic,
     )
+    calibration.validate_geek_profile()
     calibration.save(args.output)
     calibration.write_orbslam_settings(args.settings)
     print(f"K1 calibration saved: {args.output}")

@@ -2,20 +2,21 @@ import sys
 import hashlib
 import io
 import tarfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from nero.mapping.mapping_policy import MappingConfig, MappingPolicy
+from nero.mapping.gaussian_splat import FrameData, GaussianSplatMapper
 from nero.slam.imu_buffer import IMUBuffer, IMUMeasurement
 from nero.slam.k1_calibration import (
     K1Calibration,
-    _device_body,
     estimate_frequency,
     estimate_imu_noise,
 )
-from nero.slam.orb_slam3_node import ORBSLAM3Node
+from nero.slam.orb_slam3_node import ORBSLAM3Node, SLAMPose
 import nero.slam.setup_orbslam as setup_orbslam
 from nero.slam.setup_orbslam import check_native_runtime
 
@@ -71,6 +72,14 @@ def test_calibration_round_trip_and_orb_settings(tmp_path):
     assert "IMU.InsertKFsWhenLost: 0" in text
 
 
+def test_nominal_calibration_enforces_complete_geek_sensor_contract():
+    nominal = K1Calibration.load(Path("config/k1_geek_nominal_calibration.json"))
+    nominal.validate_geek_profile()
+    invalid = calibration()
+    with pytest.raises(ValueError, match="544x448"):
+        invalid.validate_geek_profile()
+
+
 def test_stationary_imu_noise_estimator_returns_finite_positive_terms():
     rng = np.random.default_rng(7)
     samples = [
@@ -84,11 +93,9 @@ def test_stationary_imu_noise_estimator_returns_finite_positive_terms():
 
 def test_sensor_frequency_uses_live_timestamps():
     assert estimate_frequency([index / 25 for index in range(20)], "camera") == pytest.approx(25)
-
-
-def test_booster_device_info_body_is_unwrapped():
-    assert _device_body({"body": {"cameras": [1]}, "kind": 4}) == {"cameras": [1]}
-    assert _device_body({"body": '{"imus": [1]}'}) == {"imus": [1]}
+    # K1 delivery alternates 30 Hz and 15 Hz intervals but averages 20 Hz.
+    alternating = np.cumsum([0.0] + [1 / 30, 1 / 15] * 10).tolist()
+    assert estimate_frequency(alternating, "K1 camera") == pytest.approx(20)
 
 
 class FakeSystem:
@@ -128,6 +135,12 @@ class RejectingEnhancedSystem(FakeSystem):
         return SimpleNamespace(success=False, is_valid=False)
 
 
+class CallableRejectingEnhancedSystem(FakeSystem):
+    def process_rgbd_inertial_enhanced(self, rgb, depth, timestamp, imu):
+        self.calls.append((rgb, depth, timestamp, imu))
+        return SimpleNamespace(success=lambda: True, is_valid=lambda: False)
+
+
 def native_node(tmp_path, monkeypatch):
     vocabulary = tmp_path / "ORBvoc.txt"
     vocabulary.write_text("vocabulary")
@@ -140,7 +153,6 @@ def native_node(tmp_path, monkeypatch):
         settings_path=str(tmp_path / "settings.yaml"),
         calibration_path=str(calibration_path),
         allow_fallback=False,
-        start_imu_source=False,
     )
     node.initialize()
     return node
@@ -205,7 +217,35 @@ def test_native_backend_honors_enhanced_result_failure(tmp_path, monkeypatch):
         settings_path=str(tmp_path / "settings.yaml"),
         calibration_path=str(calibration_path),
         allow_fallback=False,
-        start_imu_source=False,
+    )
+    node.initialize()
+    pose = node.track_frame(
+        np.zeros((240, 320, 3), np.uint8),
+        np.ones((240, 320), np.uint16),
+        imu_data=[IMUMeasurement(1.0, (0, 0, 9.81), (0, 0, 0))],
+        timestamp=1.0,
+    )
+    assert pose.tracking_status == "LOST"
+
+
+def test_native_backend_calls_enhanced_result_validity_methods(tmp_path, monkeypatch):
+    vocabulary = tmp_path / "ORBvoc.txt"
+    vocabulary.write_text("vocabulary")
+    calibration_path = tmp_path / "calibration.json"
+    calibration().save(calibration_path)
+    monkeypatch.setitem(
+        sys.modules,
+        "orbslam3",
+        SimpleNamespace(
+            Sensor=SimpleNamespace(IMU_RGBD="IMU_RGBD"),
+            System=CallableRejectingEnhancedSystem,
+        ),
+    )
+    node = ORBSLAM3Node(
+        vocab_path=str(vocabulary),
+        settings_path=str(tmp_path / "settings.yaml"),
+        calibration_path=str(calibration_path),
+        allow_fallback=False,
     )
     node.initialize()
     pose = node.track_frame(
@@ -230,6 +270,21 @@ def test_fallback_is_explicit_and_handles_featureless_frame():
     assert pose.tracking_status == "LOST"
 
 
+def test_slam_camera_pose_converts_to_body_frame():
+    camera_pose = SLAMPose(
+        position=np.array([3.0, 0.0, 0.0]),
+        orientation=np.array([0.0, 0.0, 0.0, 1.0]),
+        timestamp=4.0,
+        num_map_points=12,
+    )
+    tbc = np.eye(4)
+    tbc[0, 3] = 0.5
+    body_pose = camera_pose.camera_to_body(tbc)
+    np.testing.assert_allclose(body_pose.position, [2.5, 0.0, 0.0])
+    assert body_pose.timestamp == 4.0
+    assert body_pose.num_map_points == 12
+
+
 def test_mapping_policy_accepts_current_slam_config(tmp_path):
     policy = MappingPolicy(
         robot=None,
@@ -240,6 +295,26 @@ def test_mapping_policy_accepts_current_slam_config(tmp_path):
         mapping_config=MappingConfig(output_dir=str(tmp_path / "mapping")),
     )
     assert policy._slam.vocab_path.name == "ORBvoc.txt"
+
+
+def test_fallback_pointcloud_uses_metric_depth_intrinsics_and_rgb_colors(tmp_path):
+    mapper = GaussianSplatMapper(
+        output_dir=str(tmp_path / "mapping"), max_frames=1, frame_skip=1
+    )
+    mapper.start_collection()
+    frame = FrameData(
+        timestamp=1.0,
+        image=np.array([[[10, 20, 30]]], dtype=np.uint8),
+        depth=np.array([[1000]], dtype=np.uint16),
+        pose=np.eye(4),
+        frame_id=0,
+        camera_matrix=np.eye(3),
+    )
+    assert mapper.add_frame(frame)
+    result = mapper._train_fallback()
+    assert result["num_gaussians"] == 1
+    vertex = (tmp_path / "mapping" / "splat" / "pointcloud.ply").read_text().splitlines()[-1]
+    assert vertex == "0.000000 0.000000 1.000000 30 20 10"
 
 
 def test_native_runtime_check_is_a_noop_off_linux(monkeypatch):

@@ -9,31 +9,22 @@ dependencies = [
     "Pillow>=10.0.0",
     "pyyaml>=6.0",
     "scipy>=1.11.0",
-    "matplotlib>=3.7.0",
     "booster-robotics-sdk-python==1.5.6; sys_platform == 'linux'",
     "orbslam3-python==2.0.0; sys_platform == 'linux'",
 ]
 
+[project.optional-dependencies]
+viz = ["rerun-sdk==0.22.1"]
+
 [dependency-groups]
 dev = [
-    "pytest>=7.0",
+    "pytest>=7.0,<8.0",
     "black>=23.0",
     "ruff>=0.1.0",
 ]
-# Optional: external-tracking + visualisation tooling. Not needed to run the robot.
-#
-# NOTE: `rerun-sdk` is deliberately NOT listed here. rerun-sdk >= 0.24 requires
-# numpy >= 2, which conflicts with this project's `numpy < 2.0.0` pin (kept for
-# the compiled orbslam3 / booster-robotics wheels). The newest rerun-sdk that
-# resolves against numpy 1.x is 0.23.1. Until that is settled, the Rerun viewer
-# tooling runs from a separate venv -- see src/nero/vive/README.md.
-#
-# `pysurvive` is likewise absent: it ships inside the libsurvive source tree,
-# not on PyPI, and is loaded via PYTHONPATH.
-eval = []
 
 [build-system]
-requires = ["uv_build>=0.9.22,<0.10"]
+requires = ["uv_build>=0.9.22,<0.12"]
 build-backend = "uv_build"
 
 [tool.ruff]
@@ -44,12 +35,14 @@ target-version = "py310"
 nero-orb-slam = "nero.agents.orb_slam_agent:main"
 nero-sim = "nero.agents.sim_agent:main"
 nero-booster-studio = "nero.agents.booster_studio_agent:main"
+nero-sim-benchmark = "nero.agents.sim_benchmark_agent:main"
 nero-mapping = "nero.agents.mapping_agent:main"
 nero-map-nav = "nero.agents.map_nav_agent:main"
 nero-pc2map = "nero.utils.pointcloud_converter:main"
 nero-k1-calibration = "nero.slam.k1_calibration:main"
 nero-setup-orbslam = "nero.slam.setup_orbslam:main"
 nero-setup-booster-room = "nero.simulation.booster_studio_room:main"
+nero-rerun = "nero.observability.rerun_bridge:main"
 nero-vive-rerun = "nero.vive.rerun_stream:main"
 
 [tool.pytest.ini_options]

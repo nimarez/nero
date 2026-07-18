@@ -32,10 +32,8 @@ class VelocityCommand:
 class VelocityController:
     """Converts navigation goals into velocity commands.
 
-    Implements a simple proportional controller for:
-    - Goal following (move to target position)
-    - Obstacle avoidance
-    - Object tracking (move toward detected object)
+    Implements a simple proportional controller for world-frame pose goals and
+    local obstacle avoidance.
     """
 
     def __init__(
@@ -59,6 +57,8 @@ class VelocityController:
         current_pose: np.ndarray,  # [x, y, yaw]
         goal_pose: np.ndarray,  # [x, y, yaw]
         obstacle_info: Optional[dict] = None,
+        *,
+        yaw_tolerance: float = 0.15,
     ) -> VelocityCommand:
         """Compute velocity to reach goal.
 
@@ -75,20 +75,35 @@ class VelocityController:
         dy = goal_pose[1] - current_pose[1]
         distance = math.sqrt(dx**2 + dy**2)
 
-        # Check if we've reached the goal
         if distance < self.goal_threshold:
-            return VelocityCommand()
+            yaw_error = self._normalize_angle(goal_pose[2] - current_pose[2])
+            if abs(yaw_error) < yaw_tolerance:
+                return VelocityCommand()
+            return VelocityCommand(
+                angular_z=float(
+                    np.clip(
+                        self.kp_angular * yaw_error,
+                        -self.max_angular_velocity,
+                        self.max_angular_velocity,
+                    )
+                )
+            )
 
-        # Compute desired heading
         desired_yaw = math.atan2(dy, dx)
         yaw_error = self._normalize_angle(desired_yaw - current_pose[2])
 
         # Compute velocities
-        linear = self.kp_linear * distance
+        # Do not drive forward until the goal is in the forward hemisphere.
+        heading_scale = max(0.0, math.cos(yaw_error))
+        linear = self.kp_linear * distance * heading_scale
         angular = self.kp_angular * yaw_error
 
         # Clamp velocities
-        linear = np.clip(linear, self.min_velocity, self.max_linear_velocity)
+        linear = np.clip(linear, 0.0, self.max_linear_velocity)
+        if heading_scale < 0.1:
+            linear = 0.0
+        elif 0 < linear < self.min_velocity:
+            linear = self.min_velocity
         angular = np.clip(
             angular, -self.max_angular_velocity, self.max_angular_velocity
         )
@@ -104,59 +119,19 @@ class VelocityController:
             angular_z=float(angular),
         )
 
-    def compute_object_tracking_velocity(
+    def has_reached_pose(
         self,
-        object_position: np.ndarray,  # [x, y, z] in camera frame
-        obstacle_info: Optional[dict] = None,
-        target_distance: float = 1.0,
-    ) -> VelocityCommand:
-        """Compute velocity to track an object.
-
-        Args:
-            object_position: Object position in camera frame
-            obstacle_info: Optional obstacle detection info
-            target_distance: Desired distance to maintain from object
-
-        Returns:
-            VelocityCommand
-        """
-        # Object direction in camera frame
-        obj_x = object_position[0]  # lateral
-        obj_z = object_position[2]  # forward
-
-        # Distance error
-        distance = math.sqrt(obj_x**2 + obj_z**2)
-        distance_error = distance - target_distance
-
-        # Angular error (turn toward object)
-        angular_error = math.atan2(obj_x, obj_z)
-
-        # Compute velocities
-        linear = self.kp_linear * distance_error
-        angular = self.kp_angular * angular_error
-
-        # Clamp
-        linear = np.clip(linear, -self.max_linear_velocity, self.max_linear_velocity)
-        angular = np.clip(
-            angular, -self.max_angular_velocity, self.max_angular_velocity
-        )
-
-        # Apply minimum velocity
-        if abs(linear) > 0 and abs(linear) < self.min_velocity:
-            linear = self.min_velocity * np.sign(linear)
-        if abs(angular) > 0 and abs(angular) < self.min_velocity:
-            angular = self.min_velocity * np.sign(angular)
-
-        # Apply obstacle avoidance
-        if obstacle_info and obstacle_info.get("has_obstacle"):
-            linear, angular = self._avoid_obstacles(
-                linear, angular, obstacle_info, distance
-            )
-
-        return VelocityCommand(
-            linear_x=float(linear),
-            angular_z=float(angular),
-        )
+        current_pose: np.ndarray,
+        goal_pose: np.ndarray,
+        *,
+        yaw_tolerance: float = 0.15,
+    ) -> bool:
+        """Check both planar position and final facing direction."""
+        current = np.asarray(current_pose, dtype=float)
+        goal = np.asarray(goal_pose, dtype=float)
+        position_error = float(np.linalg.norm(goal[:2] - current[:2]))
+        yaw_error = abs(self._normalize_angle(float(goal[2] - current[2])))
+        return position_error < self.goal_threshold and yaw_error < yaw_tolerance
 
     def compute_avoidance_velocity(
         self,

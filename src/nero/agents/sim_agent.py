@@ -5,9 +5,9 @@ a simulated robot and camera instead of physical hardware.
 
 Agent/Policy Loop:
 1. Show external camera stream of a space (both cameras)
-2. Detect objects in real-time and announce them via speaker
-3. Await user confirmation to follow a detected object
-4. Navigate to the confirmed object (target distance deduced by robot)
+2. Await a ``go to <object>`` direction and acknowledge it via speaker
+3. Detect and track the requested object
+4. Follow a dynamic world-frame goal pose derived from that object
 
 Usage:
     uv run nero-sim
@@ -27,7 +27,7 @@ from nero.simulation.environment import SimEnvironment
 from nero.simulation.sim_camera import CameraMode
 from nero.utils.visualization import Visualization
 from nero.navigation.policy import NavigationPolicy, PolicyState
-from nero.interaction import announce_and_confirm, deduce_target_distance
+from nero.interaction import TerminalCommandSource, request_navigation_target
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +97,7 @@ def main():
 
     # Mock speaker for sim
     speaker = SimSpeaker()
+    commands = TerminalCommandSource()
 
     # Signal handler
     shutdown_event = False
@@ -106,7 +107,6 @@ def main():
         shutdown_event = True
         logger.info("Shutdown signal received")
 
-    signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
     # Main loop
@@ -116,72 +116,30 @@ def main():
     viz = Visualization()
 
     # State tracking
-    confirmed_object = None
+    target_object = None
     announced_arrival = False
-    announce_cooldown = 5.0  # seconds between re-announcing same object
-    last_announce_time = {}
 
     try:
         while not shutdown_event:
             loop_start = time.time()
+
+            if target_object is None:
+                try:
+                    target_object = request_navigation_target(
+                        speaker, commands, cancelled=lambda: shutdown_event
+                    )
+                except (EOFError, KeyboardInterrupt, InterruptedError):
+                    shutdown_event = True
+                    break
+                policy.set_target(target_object)
+                announced_arrival = False
+                logger.info("Accepted navigation target: %s", target_object)
 
             # Get simulated camera frames (both RGB + Depth)
             frame = sim.get_frame()
             depth_frame = sim.get_depth_frame()
             if frame is None or depth_frame is None:
                 time.sleep(0.01)
-                continue
-
-            # Detect objects in real-time
-            detections = sim.get_detections()
-
-            # Announce candidates only while no target is active.
-            if confirmed_object is None:
-                current_time = time.time()
-                for detection in detections:
-                    obj_name = detection.label.lower()
-                    if (
-                        current_time - last_announce_time.get(obj_name, 0)
-                        < announce_cooldown
-                    ):
-                        continue
-                    last_announce_time[obj_name] = current_time
-
-                    should_follow = announce_and_confirm(speaker, obj_name)
-                    if should_follow:
-                        confirmed_object = obj_name
-                        target_distance = deduce_target_distance(
-                            obj_name, detection.distance
-                        )
-                        logger.info(
-                            f"Confirmed target: {confirmed_object} at "
-                            f"{target_distance:.2f}m"
-                        )
-                        policy.set_target(confirmed_object)
-                        policy._goal.target_distance = target_distance
-                        break
-
-            # Get current policy state
-            status = policy.status
-
-            # If no target confirmed yet, show idle state
-            if confirmed_object is None and status.state == PolicyState.IDLE:
-                frame_with_text = viz.draw_navigation_info(
-                    frame,
-                    state="idle",
-                    message="Scanning for objects... (press 'd' for demo scene)",
-                    fps=sim.camera.get_fps(),
-                )
-                if not args.no_display:
-                    key = viz.show_stream(
-                        frame_with_text, "Nero Simulation", sim.camera.get_fps()
-                    )
-                    if key == ord("q"):
-                        shutdown_event = True
-                    elif key == ord("d"):
-                        sim.setup_demo_scene()
-                        last_announce_time.clear()
-                        logger.info("Demo scene reloaded")
                 continue
 
             # Step policy
@@ -203,7 +161,12 @@ def main():
                 ),
             )
 
-            # Display detected objects
+            # Display only detections relevant to the requested target.
+            detections = [
+                detection
+                for detection in status.detections
+                if target_object in detection.label.lower()
+            ]
             if detections:
                 obj_text = ", ".join(
                     [f"{d.label}({d.distance:.1f}m)" for d in detections]
@@ -226,19 +189,17 @@ def main():
                 elif key == ord("r") and status.state == PolicyState.ARRIVED:
                     # Reset and look for new object
                     policy.reset()
-                    confirmed_object = None
+                    target_object = None
                     announced_arrival = False
-                    last_announce_time.clear()
                     logger.info("Reset - ready for new target")
                 elif key == ord("d"):
                     sim.setup_demo_scene()
-                    last_announce_time.clear()
                     logger.info("Demo scene reloaded")
 
             # Check for completion
             if status.state == PolicyState.ARRIVED and not announced_arrival:
-                logger.info(f"Arrived at {confirmed_object}")
-                speaker.speak(f"Arrived at {confirmed_object}.")
+                logger.info(f"Arrived at {target_object}")
+                speaker.speak(f"Arrived at {target_object}.")
                 announced_arrival = True
                 if not args.no_display:
                     logger.info(
@@ -257,6 +218,7 @@ def main():
         # Cleanup
         logger.info("Shutting down...")
         policy.stop()
+        commands.close()
         if not args.no_display:
             cv2.destroyAllWindows()
         logger.info("Shutdown complete")

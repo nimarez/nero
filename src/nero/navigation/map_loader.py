@@ -160,6 +160,8 @@ def pointcloud_to_grid(
     grid_size: float = 20.0,  # meters
     origin: Optional[tuple[float, float]] = None,
     height_threshold: float = 0.5,  # meters above ground
+    max_height: float | None = None,
+    up_axis: str = "z",
 ) -> OccupancyGrid:
     """Convert a 3D point cloud to a 2D occupancy grid.
 
@@ -169,28 +171,51 @@ def pointcloud_to_grid(
         grid_size: Size of grid in meters (square)
         origin: World origin, defaults to min of point cloud
         height_threshold: Consider points above this as obstacles
+        max_height: Ignore points above this height (for example ceilings)
+        up_axis: Vertical point-cloud axis, or ``auto`` to infer the shortest span
 
     Returns:
         OccupancyGrid object
     """
+    points = np.asarray(points)
+    if points.ndim != 2 or points.shape[1] < 3 or len(points) == 0:
+        raise ValueError("points must be a non-empty (N, 3) array")
+    if resolution <= 0 or grid_size <= 0:
+        raise ValueError("resolution and grid_size must be positive")
+    if up_axis == "auto":
+        robust_spans = np.quantile(points[:, :3], 0.99, axis=0) - np.quantile(
+            points[:, :3], 0.01, axis=0
+        )
+        up_index = int(np.argmin(robust_spans))
+    else:
+        try:
+            up_index = {"x": 0, "y": 1, "z": 2}[up_axis]
+        except KeyError as exc:
+            raise ValueError("up_axis must be x, y, z, or auto") from exc
+    plane_indices = [index for index in range(3) if index != up_index]
+    plane = points[:, plane_indices]
+    height = points[:, up_index]
+
     if origin is None:
-        origin = (float(points[:, 0].min()), float(points[:, 1].min()))
+        origin = (float(plane[:, 0].min()), float(plane[:, 1].min()))
 
     grid_pixels = int(grid_size / resolution)
     data = np.zeros((grid_pixels, grid_pixels), dtype=np.int8)
 
-    # Project to 2D
-    for pt in points:
-        if pt[2] < height_threshold:
-            continue  # Skip ground points
-
-        px = int((pt[0] - origin[0]) / resolution)
-        py = int((pt[1] - origin[1]) / resolution)
-
-        if 0 <= px < grid_pixels and 0 <= py < grid_pixels:
-            # Flip y for image coords
-            py_img = grid_pixels - 1 - py
-            data[py_img, px] = 100
+    selected = height >= height_threshold
+    if max_height is not None:
+        selected &= height <= max_height
+    pixels = np.floor((plane[selected] - np.asarray(origin, dtype=float)) / resolution).astype(
+        np.int64
+    )
+    in_bounds = (
+        (pixels[:, 0] >= 0)
+        & (pixels[:, 0] < grid_pixels)
+        & (pixels[:, 1] >= 0)
+        & (pixels[:, 1] < grid_pixels)
+    )
+    pixels = pixels[in_bounds]
+    data[grid_pixels - 1 - pixels[:, 1], pixels[:, 0]] = 100
 
     return OccupancyGrid(
         data=data,

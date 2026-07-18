@@ -22,7 +22,7 @@ from nero.navigation.path_planner import (
 from nero.navigation.safety import SafetyMonitor
 from nero.perception.depth_processor import DepthProcessor
 from nero.slam.orb_slam3_node import SLAMPose
-from nero.slam.pose_estimator import PoseEstimator
+from nero.slam.pose_estimator import PoseEstimator, _blend_angles
 
 
 def free_grid(size=5, resolution=1.0):
@@ -161,8 +161,22 @@ def test_pose_estimator_fuses_sources_and_preserves_zero_timestamp():
         imu_rpy=np.array([0.0, 0.0, 0.4]),
         timestamp=1.0,
     )
-    np.testing.assert_allclose(fused.position, [1.5, 3.0, 1.0])
-    assert fused.yaw == pytest.approx(0.3)
+    # Odometry and SLAM origins are aligned before fusion; raw absolute
+    # coordinates from unrelated frames must never be averaged directly.
+    np.testing.assert_allclose(fused.position, [2.0, 4.0, 1.0])
+    assert fused.yaw == pytest.approx(0.0)
     assert fused.source == "fused"
     estimator.reset()
     assert estimator.get_pose() is None
+
+
+def test_pose_estimator_blends_yaw_across_wraparound():
+    result = _blend_angles(np.deg2rad(179), np.deg2rad(-179), 0.5)
+    assert abs(abs(result) - np.pi) < 1e-6
+
+
+def test_pose_estimator_rejects_invalid_weights():
+    with pytest.raises(ValueError, match="pose weights"):
+        PoseEstimator(slam_weight=0, odom_weight=0)
+    with pytest.raises(ValueError, match="imu_orientation_weight"):
+        PoseEstimator(imu_orientation_weight=2)
