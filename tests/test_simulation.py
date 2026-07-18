@@ -118,7 +118,11 @@ def test_booster_studio_topics_match_installed_k1_simulator():
     topics = BoosterStudioTopics()
     assert topics.rgb == "/rgbd_camera/rgb/image_compressed"
     assert topics.depth == "/rgbd_camera/depth/image_raw"
-    assert topics.imu == "booster/ros2_k2_imu/robot1"
+    assert topics.imu is None
+    assert BoosterStudioTopics.IMU_CANDIDATES == (
+        "/imu/data",
+        "/booster/ros2_k2_imu/robot1",
+    )
     assert topics.pose == "/soccer/sim/localization/robot_pose"
     assert topics.detections == "/soccer/sim/vision/detections"
 

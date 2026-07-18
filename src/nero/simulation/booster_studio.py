@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 
 import cv2
 import numpy as np
@@ -30,10 +30,18 @@ logger = logging.getLogger(__name__)
 class BoosterStudioTopics:
     """Single-robot topics published by Booster Studio's K1 simulator."""
 
+    IMU_CANDIDATES: ClassVar[tuple[str, ...]] = (
+        "/imu/data",
+        "/booster/ros2_k2_imu/robot1",
+    )
+
     rgb: str = "/rgbd_camera/rgb/image_compressed"
     depth: str = "/rgbd_camera/depth/image_raw"
     camera_info: str = "/rgbd_camera/rgb/camera_info"
-    imu: str = "booster/ros2_k2_imu/robot1"
+    # Studio 1.9.10 exposes /imu/data with its renderer connected, while its
+    # headless startup can briefly expose the legacy robot-specific topic.
+    # None means subscribe to both so the K1's built-in IMU stays implicit.
+    imu: str | None = None
     pose: str = "/soccer/sim/localization/robot_pose"
     detections: str = "/soccer/sim/vision/detections"
 
@@ -103,6 +111,11 @@ class BoosterStudioRobotInterface:
         if not rclpy.ok():
             rclpy.init(args=None)
         self._node = rclpy.create_node("nero_booster_studio")
+        imu_topics = (
+            (self._topics.imu,)
+            if self._topics.imu is not None
+            else BoosterStudioTopics.IMU_CANDIDATES
+        )
         self._subscriptions = [
             self._node.create_subscription(
                 CompressedImage, self._topics.rgb, self._on_rgb, 10
@@ -113,7 +126,10 @@ class BoosterStudioRobotInterface:
             self._node.create_subscription(
                 CameraInfo, self._topics.camera_info, self._on_camera_info, 10
             ),
-            self._node.create_subscription(Imu, self._topics.imu, self._on_imu, 50),
+            *(
+                self._node.create_subscription(Imu, topic, self._on_imu, 50)
+                for topic in imu_topics
+            ),
             self._node.create_subscription(
                 Pose2D, self._topics.pose, self._on_pose, 10
             ),
