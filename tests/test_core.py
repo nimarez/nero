@@ -1,10 +1,13 @@
 import math
+import sys
+from types import SimpleNamespace
 
 import numpy as np
 
 import nero.agents as agents
 from nero.navigation.controller import VelocityController
 from nero.perception.object_detector import ObjectDetection, ObjectDetector
+from nero.robot import RobotInterface
 
 
 def test_lazy_agent_exports_are_callable():
@@ -50,3 +53,33 @@ def test_velocity_controller_stops_and_clamps():
         {"has_obstacle": True, "min_distance": 0.2}
     )
     assert reverse.linear_x == -0.1
+
+
+def test_robot_image_helpers_normalize_k1_images():
+    image = np.arange(12).reshape(2, 2, 3)
+    np.testing.assert_array_equal(
+        RobotInterface.image_to_array(SimpleNamespace(data=image)), image
+    )
+    np.testing.assert_array_equal(RobotInterface.image_to_array(image), image)
+
+
+def test_hardware_agent_clis_use_k1_sensors_implicitly(monkeypatch):
+    from nero.agents import map_nav_agent, mapping_agent, orb_slam_agent
+
+    monkeypatch.setattr(sys, "argv", ["nero-orb-slam"])
+    orb_args = orb_slam_agent.parse_args()
+    assert not hasattr(orb_args, "camera")
+    assert not hasattr(orb_args, "depth_camera")
+    assert not hasattr(orb_args, "robot_serial")
+
+    monkeypatch.setattr(sys, "argv", ["nero-mapping"])
+    mapping_args = mapping_agent.parse_args()
+    assert not hasattr(mapping_args, "camera")
+    assert not hasattr(mapping_args, "depth_camera")
+    assert not hasattr(mapping_args, "robot_serial")
+
+    monkeypatch.setattr(sys, "argv", ["nero-map-nav", "--map", "map.npy"])
+    map_nav_args = map_nav_agent.parse_args()
+    assert not hasattr(map_nav_args, "camera")
+    assert not hasattr(map_nav_args, "depth_camera")
+    assert not hasattr(map_nav_args, "robot_serial")

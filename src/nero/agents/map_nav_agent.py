@@ -4,7 +4,7 @@ Navigates using a pre-built static map without SLAM.
 Uses visual odometry for localization and A* for path planning.
 
 Usage:
-    nero-map-nav --map maps/office.png --yaml maps/office.yaml --camera usb:0
+    nero-map-nav --map maps/office.png --yaml maps/office.yaml
     nero-map-nav --map maps/office.npy --goal 3.5 2.0
 """
 
@@ -14,8 +14,6 @@ import argparse
 import logging
 import sys
 import time
-from typing import Optional
-
 import cv2
 
 from nero.navigation import (
@@ -24,32 +22,8 @@ from nero.navigation import (
     MapNavigationPolicy,
 )
 from nero.robot import RobotInterface
-from nero.simulation.mock_robot import MockRobot
-from nero.utils.camera_stream import CameraSource, CameraStream
 
 logger = logging.getLogger(__name__)
-
-
-def create_camera_stream(source: str) -> CameraStream:
-    """Create a camera stream from a USB index, URL, or file path."""
-    if source.startswith("usb:"):
-        return CameraStream(source[4:], CameraSource.USB)
-    if source.startswith("rtsp://"):
-        return CameraStream(source, CameraSource.RTSP)
-    if source.startswith("http://") or source.startswith("https://"):
-        return CameraStream(source, CameraSource.HTTP)
-    return CameraStream(source, CameraSource.FILE)
-
-
-def wait_for_frame(camera: CameraStream, timeout: float = 2.0):
-    """Wait briefly for the background capture thread to publish a frame."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        frame = camera.get_frame()
-        if frame is not None:
-            return frame
-        time.sleep(0.01)
-    return None
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,13 +32,6 @@ def parse_args() -> argparse.Namespace:
         "--map", required=True, help="Path to occupancy grid map (PNG or .npy)"
     )
     parser.add_argument("--yaml", help="Path to map YAML metadata (for PNG maps)")
-    parser.add_argument(
-        "--camera", default="usb:0", help="Camera source (usb:0, rtsp://..., file.mp4)"
-    )
-    parser.add_argument(
-        "--depth-camera",
-        help="Depth camera source (optional, for scale recovery)",
-    )
     parser.add_argument(
         "--goal",
         nargs=2,
@@ -123,41 +90,18 @@ def main() -> None:
         logger.error("Failed to load map. Exiting.")
         sys.exit(1)
 
-    # Open camera
-    camera = create_camera_stream(args.camera)
-    if not camera.start():
-        logger.error(f"Failed to open camera: {args.camera}")
-        sys.exit(1)
-
-    # Open depth camera if provided
-    depth_camera: Optional[CameraStream] = None
-    if args.depth_camera:
-        depth_camera = create_camera_stream(args.depth_camera)
-        if not depth_camera.start():
-            logger.error(f"Failed to open depth camera: {args.depth_camera}")
-            sys.exit(1)
-
     # Initialize robot
     try:
         robot = RobotInterface()
         robot.initialize()
         logger.info("Robot connected and initialized in walk mode")
     except Exception as e:
-        logger.warning(f"Failed to connect to robot: {e}; using mock robot")
-        robot = MockRobot()
-        robot.initialize()
+        logger.error(f"Failed to connect to K1 robot: {e}")
+        sys.exit(1)
 
     try:
-        # Get first frame and init odometry
-        frame = wait_for_frame(camera)
-        if frame is None:
-            logger.error("Failed to read from camera")
-            sys.exit(1)
-
-        depth = None
-        if depth_camera is not None:
-            depth = depth_camera.get_frame()
-
+        # Initialize odometry from the K1's built-in RGB camera.
+        frame = robot.get_rgb_frame()
         policy.init_odometry(frame)
 
         # Set goal if provided
@@ -174,14 +118,13 @@ def main() -> None:
 
         while running:
             loop_started = time.monotonic()
-            frame = camera.get_frame()
-            if frame is None:
-                logger.warning("Failed to read frame")
+            try:
+                state = robot.get_state(include_images=True)
+                frame = robot.image_to_array(state.rgb)
+                depth = None if args.no_depth else robot.image_to_array(state.depth)
+            except Exception as e:
+                logger.warning(f"Failed to read K1 sensors: {e}")
                 continue
-
-            depth = None
-            if depth_camera is not None:
-                depth = depth_camera.get_frame()
 
             # Run policy
             vx, vy, vyaw = policy.update(frame, depth)
@@ -254,9 +197,6 @@ def main() -> None:
         logger.info("Interrupted")
     finally:
         robot.set_velocity(0.0, 0.0, 0.0)
-        camera.stop()
-        if depth_camera is not None:
-            depth_camera.stop()
         cv2.destroyAllWindows()
 
 

@@ -5,8 +5,7 @@ This agent explores a space while collecting RGB-D frames with poses,
 then trains a 3D Gaussian Splat model for viewing.
 
 Usage:
-    python -m nero.agents.mapping_agent --camera usb:0 --pattern spiral --max-frames 500
-    python -m nero.agents.mapping_agent --camera rtsp://192.168.1.100/stream --output-dir /path/to/output
+    python -m nero.agents.mapping_agent --pattern spiral --max-frames 500
 """
 
 from __future__ import annotations
@@ -14,13 +13,11 @@ from __future__ import annotations
 import argparse
 import logging
 import signal
-import sys
 import time
 
 import cv2
 
 from nero.robot import RobotInterface
-from nero.utils.camera_stream import CameraStream, CameraSource
 from nero.utils.visualization import Visualization
 from nero.mapping.mapping_policy import MappingPolicy, MappingState, MappingConfig
 
@@ -31,12 +28,6 @@ def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
         description="Nero Mapping Agent - Gaussian Splat Reconstruction"
-    )
-    parser.add_argument(
-        "--camera",
-        type=str,
-        default="usb:0",
-        help="Camera source (usb:N, rtsp://..., http://..., or file path)",
     )
     parser.add_argument(
         "--pattern",
@@ -70,12 +61,6 @@ def parse_args() -> argparse.Namespace:
         help="Output directory for splat files",
     )
     parser.add_argument(
-        "--robot-serial",
-        type=str,
-        default=None,
-        help="Booster robot serial number",
-    )
-    parser.add_argument(
         "--no-display",
         action="store_true",
         help="Disable visual display",
@@ -86,18 +71,6 @@ def parse_args() -> argparse.Namespace:
         help="Enable debug logging",
     )
     return parser.parse_args()
-
-
-def parse_camera_source(camera_str: str) -> tuple[str, CameraSource]:
-    """Parse camera source string."""
-    if camera_str.startswith("usb:"):
-        return camera_str[4:], CameraSource.USB
-    elif camera_str.startswith("rtsp://"):
-        return camera_str, CameraSource.RTSP
-    elif camera_str.startswith("http://"):
-        return camera_str, CameraSource.HTTP
-    else:
-        return camera_str, CameraSource.FILE
 
 
 def main():
@@ -111,31 +84,19 @@ def main():
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    # Parse camera source
-    camera_source, camera_type = parse_camera_source(args.camera)
-
     logger.info("Starting Nero Mapping Agent")
-    logger.info(f"Camera: {camera_type.value} - {camera_source}")
+    logger.info("Sensors: K1 built-in RGB-D camera")
     logger.info(f"Pattern: {args.pattern}")
     logger.info(f"Max frames: {args.max_frames}")
 
-    # Initialize camera
-    camera = CameraStream(
-        source=camera_source,
-        source_type=camera_type,
-        width=640,
-        height=480,
-        fps=30,
-    )
-
     # Initialize robot
     try:
-        robot = RobotInterface(virtual_robot_name=args.robot_serial or "")
+        robot = RobotInterface()
         robot.initialize()
         logger.info("Robot connected")
     except Exception as e:
-        logger.warning(f"Robot connection failed: {e}, using mock mode")
-        robot = None
+        logger.error(f"Failed to connect to K1 robot: {e}")
+        raise SystemExit(1) from e
 
     # Initialize mapping config
     mapping_config = MappingConfig(
@@ -158,11 +119,6 @@ def main():
             "min_obstacle_distance": 0.5,
         },
     )
-
-    # Start camera
-    if not camera.start():
-        logger.error("Failed to start camera")
-        sys.exit(1)
 
     # Start mapping
     policy.start()
@@ -191,15 +147,19 @@ def main():
             # Step policy
             status = policy.step()
 
-            # Get camera frame
-            frame = camera.get_frame()
+            # Display the K1's built-in RGB stream.
+            try:
+                frame = robot.get_rgb_frame()
+            except Exception as e:
+                logger.warning(f"Failed to read K1 RGB frame: {e}")
+                frame = None
             if frame is not None:
                 # Draw mapping info overlay
                 frame = viz.draw_navigation_info(
                     frame,
                     state=status.state.value,
                     message=status.message,
-                    fps=camera.get_fps(),
+                    fps=loop_rate,
                     velocity=(
                         (
                             status.velocity_command.linear_x,
@@ -247,7 +207,7 @@ def main():
 
                 # Display
                 if not args.no_display:
-                    key = viz.show_stream(frame, "Nero Mapping Agent", camera.get_fps())
+                    key = viz.show_stream(frame, "Nero Mapping Agent", loop_rate)
                     if key == ord("q"):
                         shutdown_event = True
                     elif key == ord("t") and status.state == MappingState.EXPLORING:
@@ -275,9 +235,7 @@ def main():
         # Cleanup
         logger.info("Shutting down...")
         policy.stop()
-        camera.stop()
-        if robot:
-            robot.stop()
+        robot.stop()
         if not args.no_display:
             cv2.destroyAllWindows()
         logger.info("Shutdown complete")

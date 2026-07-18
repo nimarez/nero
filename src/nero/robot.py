@@ -151,6 +151,22 @@ class RobotInterface:
     def get_depth(self) -> AnyImage:
         return self._robot.get_image(img_type="depth")
 
+    def get_rgb_frame(self) -> np.ndarray:
+        """Get the K1 RGB image as a NumPy array."""
+        return self.image_to_array(self.get_rgb())
+
+    def get_depth_frame(self) -> np.ndarray:
+        """Get the K1 depth image as a NumPy array."""
+        return self.image_to_array(self.get_depth())
+
+    @staticmethod
+    def image_to_array(image: AnyImage) -> np.ndarray:
+        """Normalize Booster image wrappers and raw arrays."""
+        if image is None:
+            raise ValueError("K1 returned no image data")
+        data = getattr(image, "data", image)
+        return np.asarray(data)
+
     def get_imu(self) -> IMUState:
         return self._robot.get_imu()
 

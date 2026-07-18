@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """ORB-SLAM Agent: Navigate to a detected object using ORB-SLAM based navigation.
 
-This agent shows an external camera stream to the user, waits for an object name,
-detects the object using GroundingDINO, and navigates the robot to it.
+This agent uses the K1's built-in RGB-D camera, waits for an object name,
+detects the object, and navigates the robot to it.
 
 Usage:
-    python -m nero.agents.orb_slam_agent --camera usb:0 --object "chair"
-    python -m nero.agents.orb_slam_agent --camera rtsp://192.168.1.100/stream --object "bottle"
+    python -m nero.agents.orb_slam_agent --object "chair"
 """
 
 from __future__ import annotations
@@ -14,13 +13,11 @@ from __future__ import annotations
 import argparse
 import logging
 import signal
-import sys
 import time
 
 import cv2
 
 from nero.robot import RobotInterface
-from nero.utils.camera_stream import CameraStream, CameraSource
 from nero.utils.visualization import Visualization
 from nero.navigation.policy import NavigationPolicy, PolicyState
 
@@ -33,22 +30,10 @@ def parse_args() -> argparse.Namespace:
         description="Nero ORB-SLAM Agent - Navigate to a detected object"
     )
     parser.add_argument(
-        "--camera",
-        type=str,
-        default="usb:0",
-        help="Camera source (usb:N, rtsp://..., http://..., or file path)",
-    )
-    parser.add_argument(
         "--object",
         type=str,
         default=None,
         help="Target object name (if not provided, will prompt at runtime)",
-    )
-    parser.add_argument(
-        "--robot-serial",
-        type=str,
-        default=None,
-        help="Booster robot serial number",
     )
     parser.add_argument(
         "--target-distance",
@@ -69,18 +54,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def parse_camera_source(camera_str: str) -> tuple[str, CameraSource]:
-    """Parse camera source string."""
-    if camera_str.startswith("usb:"):
-        return camera_str[4:], CameraSource.USB
-    elif camera_str.startswith("rtsp://"):
-        return camera_str, CameraSource.RTSP
-    elif camera_str.startswith("http://"):
-        return camera_str, CameraSource.HTTP
-    else:
-        return camera_str, CameraSource.FILE
-
-
 def main():
     """Main entry point for ORB-SLAM agent."""
     args = parse_args()
@@ -92,38 +65,21 @@ def main():
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    # Parse camera source
-    camera_source, camera_type = parse_camera_source(args.camera)
-
     logger.info("Starting Nero ORB-SLAM Agent")
-    logger.info(f"Camera: {camera_type.value} - {camera_source}")
+    logger.info("Sensors: K1 built-in RGB-D camera")
     logger.info(f"Target object: {args.object or '(will prompt)'}")
-
-    # Initialize camera
-    camera = CameraStream(
-        source=camera_source,
-        source_type=camera_type,
-        width=640,
-        height=480,
-        fps=30,
-    )
 
     # Initialize robot
     try:
-        robot = RobotInterface(virtual_robot_name=args.robot_serial or "")
+        robot = RobotInterface()
         robot.initialize()
         logger.info("Robot connected and initialized in walk mode")
     except Exception as e:
-        logger.warning(f"Robot connection failed: {e}, using mock mode")
-        robot = None
+        logger.error(f"Failed to connect to K1 robot: {e}")
+        raise SystemExit(1) from e
 
     # Initialize navigation policy
     policy = NavigationPolicy(robot=robot)
-
-    # Start camera
-    if not camera.start():
-        logger.error("Failed to start camera")
-        sys.exit(1)
 
     policy.start()
     if args.object:
@@ -152,9 +108,11 @@ def main():
         while not shutdown_event:
             loop_start = time.time()
 
-            # Get camera frame
-            frame = camera.get_frame()
-            if frame is None:
+            # Display the K1's built-in RGB stream.
+            try:
+                frame = robot.get_rgb_frame()
+            except Exception as e:
+                logger.warning(f"Failed to read K1 RGB frame: {e}")
                 time.sleep(0.01)
                 continue
 
@@ -170,11 +128,11 @@ def main():
                     frame,
                     state="idle",
                     message="Press 's' to set target object",
-                    fps=camera.get_fps(),
+                    fps=loop_rate,
                 )
                 if not args.no_display:
                     key = viz.show_stream(
-                        frame_with_text, "Nero ORB-SLAM Agent", camera.get_fps()
+                        frame_with_text, "Nero ORB-SLAM Agent", loop_rate
                     )
                     if key == ord("q"):
                         shutdown_event = True
@@ -193,7 +151,7 @@ def main():
                 frame,
                 state=status.state.value,
                 message=status.message,
-                fps=camera.get_fps(),
+                fps=loop_rate,
                 velocity=(
                     (
                         status.velocity_command.linear_x,
@@ -218,7 +176,7 @@ def main():
 
             # Display
             if not args.no_display:
-                key = viz.show_stream(frame, "Nero ORB-SLAM Agent", camera.get_fps())
+                key = viz.show_stream(frame, "Nero ORB-SLAM Agent", loop_rate)
                 if key == ord("q"):
                     shutdown_event = True
                 elif key == ord("r") and status.state == PolicyState.ARRIVED:
@@ -247,9 +205,7 @@ def main():
         # Cleanup
         logger.info("Shutting down...")
         policy.stop()
-        camera.stop()
-        if robot:
-            robot.stop()
+        robot.stop()
         if not args.no_display:
             cv2.destroyAllWindows()
         logger.info("Shutdown complete")

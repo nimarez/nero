@@ -1,7 +1,7 @@
 """Main navigation policy for object-following behavior.
 
 This module implements the agent/policy loop:
-1. Show external camera stream of a space
+1. Read the K1's built-in RGB-D camera stream
 2. Accept object name from user
 3. Detect the object in the camera stream
 4. Navigate to the object while avoiding obstacles
@@ -555,8 +555,8 @@ class NavigationPolicy:
             state = self.robot.get_state(include_images=True)
 
             return {
-                "rgb": state.rgb,
-                "depth": state.depth,
+                "rgb": self.robot.image_to_array(state.rgb),
+                "depth": self.robot.image_to_array(state.depth),
                 "camera_info": state.camera_info,
                 "imu_rpy": state.orientation_rpy,
                 "odometry": state.position_2d,
