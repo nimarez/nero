@@ -22,7 +22,6 @@ dev = [
     "black>=23.0",
     "ruff>=0.1.0",
 ]
-
 [build-system]
 requires = ["uv_build>=0.9.22,<0.12"]
 build-backend = "uv_build"
@@ -45,6 +44,7 @@ nero-setup-booster-room = "nero.simulation.booster_studio_room:main"
 nero-rerun = "nero.observability.rerun_bridge:main"
 nero-command = "nero.remote_command:main"
 nero-command-relay = "nero.remote_command:relay_main"
+nero-vive-rerun = "nero.vive.rerun_stream:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
