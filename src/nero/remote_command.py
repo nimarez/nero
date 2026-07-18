@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import shlex
+import signal
 import socket
 import subprocess
 import time
@@ -46,6 +47,7 @@ def _start_viewer(port: int, memory_limit: str) -> subprocess.Popen[bytes] | Non
         [str(script), "--port", str(port)],
         cwd=repo_root,
         env=environment,
+        start_new_session=True,
     )
     deadline = time.monotonic() + 20.0
     while time.monotonic() < deadline:
@@ -54,22 +56,35 @@ def _start_viewer(port: int, memory_limit: str) -> subprocess.Popen[bytes] | Non
             return viewer
         return_code = viewer.poll()
         if return_code is not None:
+            _stop_viewer(viewer)
             raise RuntimeError(f"Rerun viewer exited with status {return_code}")
         time.sleep(0.1)
-    viewer.terminate()
-    viewer.wait(timeout=5)
+    _stop_viewer(viewer)
     raise RuntimeError(f"Rerun did not begin listening on port {port}")
 
 
 def _stop_viewer(viewer: subprocess.Popen[bytes] | None) -> None:
-    if viewer is None or viewer.poll() is not None:
+    if viewer is None:
         return
-    viewer.terminate()
+    # The native macOS viewer may outlive its CLI launcher. It inherits the
+    # dedicated process group created above, so stop the whole owned group.
+    try:
+        os.killpg(viewer.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
     try:
         viewer.wait(timeout=5)
     except subprocess.TimeoutExpired:
-        viewer.kill()
-        viewer.wait(timeout=5)
+        pass
+
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(viewer.pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.1)
+    os.killpg(viewer.pid, signal.SIGKILL)
 
 
 def relay_main() -> None:

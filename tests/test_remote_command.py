@@ -53,14 +53,20 @@ def test_default_command_owns_viewer_and_remote_bridge(monkeypatch):
     assert stopped == [viewer]
 
 
-def test_stop_viewer_terminates_owned_process():
+def test_stop_viewer_terminates_owned_process(monkeypatch):
+    signals = []
     viewer = SimpleNamespace(
-        poll=lambda: None,
-        terminate=lambda: setattr(viewer, "terminated", True),
+        pid=123,
         wait=lambda timeout: setattr(viewer, "wait_timeout", timeout),
     )
+    def killpg(pid, sent_signal):
+        signals.append((pid, sent_signal))
+        if sent_signal == 0:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(remote_command.os, "killpg", killpg)
 
     remote_command._stop_viewer(viewer)
 
-    assert viewer.terminated
+    assert signals == [(123, remote_command.signal.SIGTERM), (123, 0)]
     assert viewer.wait_timeout == 5
