@@ -146,7 +146,19 @@ def test_hardware_agent_clis_use_k1_sensors_implicitly(monkeypatch):
     assert not hasattr(mapping_args, "depth_camera")
     assert not hasattr(mapping_args, "robot_serial")
 
-    monkeypatch.setattr(sys, "argv", ["nero-map-nav", "--map", "map.npy"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "nero-map-nav",
+            "--map",
+            "map.npy",
+            "--initial-pose",
+            "0",
+            "0",
+            "0",
+        ],
+    )
     map_nav_args = map_nav_agent.parse_args()
     assert not hasattr(map_nav_args, "camera")
     assert not hasattr(map_nav_args, "depth_camera")

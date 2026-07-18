@@ -13,3 +13,7 @@ output
 config/ORBvoc.txt
 config/k1_calibration.json
 config/k1_orbslam3_imu_rgbd.yaml
+src/nero/simulation/scenes/industrial_storage_room/assets/*.ply
+src/nero/simulation/scenes/industrial_storage_room/assets/*.glb
+src/nero/simulation/scenes/main_room/assets/*.ply
+src/nero/simulation/scenes/main_room/assets/*.glb

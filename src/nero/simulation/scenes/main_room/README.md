@@ -20,6 +20,14 @@ load this splat or collider. Integration requires a PLY splat renderer, a
 simulator-compatible collider reference or conversion, and an explicit frame
 alignment check.
 
+The splat is, however, supported as an input to the map-navigation asset
+pipeline. From the repository root, `uv run nero-pc2map assets/main_room.ply ...`
+resolves to this file, reads its binary Gaussian-splat PLY properties, and
+projects XYZ into an occupancy grid. Use `--up-axis y --height-thresh 0.15
+--max-height 2.0`; see the root README for the complete tested command. This does
+not make the splat a physics collider—the adjacent GLB remains the appropriate
+source for simulator collision geometry.
+
 ## Getting the files (Git LFS)
 
 Both assets are stored in Git LFS — `main_room.ply` is well over GitHub's 100 MB

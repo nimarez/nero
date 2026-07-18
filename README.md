@@ -113,17 +113,40 @@ All commands run through uv:
 | `uv run nero-booster-studio` | Full policy on a Booster Studio virtual K1 |
 | `uv run nero-sim-benchmark` | Compare native SLAM with simulator truth |
 | `uv run nero-mapping` | Collect RGB-D/pose frames and invoke COLMAP + gsplat |
-| `uv run nero-map-nav --map MAP` | Occupancy-grid navigation with visual odometry |
+| `uv run nero-map-nav --map MAP --initial-pose X Y YAW` | Occupancy-grid navigation on shared IMU-RGBD ORB-SLAM |
 | `uv run nero-pc2map CLOUD -o MAP` | Convert a point cloud to an occupancy map |
 | `uv run nero-k1-calibration` | Capture real K1 IMU-RGBD calibration |
 | `uv run --extra viz nero-rerun` | Bridge normalized Nero ROS topics into Rerun |
 
 `nero-mapping` is a separate reconstruction pipeline. COLMAP and the configured
 gsplat training command must already be installed; they are intentionally not
-robot runtime dependencies. `nero-map-nav` accepts an explicit world-map goal,
-which is distinct from command-driven object navigation. These two auxiliary
-mapping commands are experimental and are not part of the validated object-
-navigation path.
+robot runtime dependencies. Object navigation and `nero-map-nav` now share the
+same synchronized K1 sensor reader, IMU-RGBD ORB-SLAM localization, pose fusion,
+safety monitor, depth obstacle processing, and goal-pose velocity controller.
+Only goal selection differs: a live semantic object pose versus A* waypoints in
+an occupancy map.
+
+The bundled real main-room splat can be converted without Open3D. The alias
+`assets/main_room.ply` resolves to its Git-LFS location:
+
+```bash
+git lfs install --local
+git lfs pull --include='src/nero/simulation/scenes/main_room/assets/main_room.ply'
+uv run nero-pc2map assets/main_room.ply -o output/main_room_map \
+  --name main_room --resolution 0.05 --grid-size 40 \
+  --up-axis y --height-thresh 0.15 --max-height 2.0
+uv run nero-map-nav \
+  --map output/main_room_map/main_room.png \
+  --yaml output/main_room_map/main_room.yaml \
+  --initial-pose X Y YAW --goal X Y YAW
+```
+
+`--initial-pose` is the robot's measured pose in the map frame at startup. It is
+required for meaningful navigation because a new ORB-SLAM session has an
+arbitrary origin; the policy performs rigid SE(2) alignment and never assumes
+the captured splat and live SLAM frames already coincide. Inspect the generated
+grid before commanding the real robot—the splat projection is a planning input,
+not collision-certified geometry.
 
 ## Booster Studio
 

@@ -32,6 +32,13 @@ from nero.perception.depth_processor import DepthProcessor
 from nero.slam.orb_slam3_node import ORBSLAM3Node
 from nero.slam.pose_estimator import PoseEstimator, FusedPose
 from nero.navigation.safety import SafetyMonitor, SafetyStatus
+from nero.navigation.runtime import (
+    SensorFrame,
+    initialize_sensor_navigation,
+    localize_sensor_frame,
+    read_sensor_frame,
+    send_velocity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -164,10 +171,9 @@ class NavigationPolicy:
         if self._is_sim:
             self.sim_env.initialize()
         elif self.robot:
-            self.robot.initialize()
-            if self.slam:
-                camera_info = self.robot.get_camera_info()
-                self.slam.initialize(camera_info)
+            initialize_sensor_navigation(
+                self.robot, self.slam, self.pose_estimator, self.safety
+            )
         elif self.slam:
             self.slam.initialize()
 
@@ -434,11 +440,11 @@ class NavigationPolicy:
         elif self.robot:
             self.robot.stop()
 
-    def _step_detecting(self, sensor_data: dict) -> PolicyStatus:
+    def _step_detecting(self, sensor_data: SensorFrame) -> PolicyStatus:
         """Step in DETECTING state."""
-        rgb = sensor_data["rgb"]
-        depth = sensor_data["depth"]
-        camera_info = sensor_data.get("camera_info")
+        rgb = sensor_data.rgb
+        depth = sensor_data.depth
+        camera_info = sensor_data.camera_info
 
         # Detect objects
         detections = self._matching_target_detections(
@@ -469,36 +475,31 @@ class NavigationPolicy:
                 message=f"Searching for '{self._goal.object_name}'... ({self._object_not_found_count}/{self._max_object_not_found})",
             )
 
-    def _step_navigating(self, sensor_data: dict) -> PolicyStatus:
+    def _step_navigating(self, sensor_data: SensorFrame | dict) -> PolicyStatus:
         """Step in NAVIGATING state."""
-        rgb = sensor_data["rgb"]
-        depth = sensor_data["depth"]
-        camera_info = sensor_data.get("camera_info")
-        imu_rpy = sensor_data.get("imu_rpy")
-        odom = sensor_data.get("odometry")
-
-        # Update SLAM
-        slam_pose = self.slam.track_frame(
-            rgb,
-            depth,
-            imu_data=sensor_data.get("imu_samples"),
-            timestamp=sensor_data.get("timestamp"),
+        if isinstance(sensor_data, dict):
+            sensor_data = SensorFrame(
+                rgb=sensor_data["rgb"],
+                depth=sensor_data["depth"],
+                timestamp=sensor_data.get("timestamp", 0.0),
+                camera_info=sensor_data.get("camera_info"),
+                imu_rpy=np.asarray(sensor_data.get("imu_rpy", np.zeros(3))),
+                imu_samples=sensor_data.get("imu_samples"),
+                odometry=np.asarray(sensor_data.get("odometry", np.zeros(3))),
+            )
+        localized = localize_sensor_frame(
+            sensor_data,
+            slam=self.slam,
+            pose_estimator=self.pose_estimator,
+            depth_processor=self.depth_processor,
+            safety=self.safety,
         )
-
-        # Update pose estimator
-        body_slam_pose = self.slam.body_pose(slam_pose)
-        fused_pose = self.pose_estimator.update(
-            slam_pose=body_slam_pose,
-            odom_pose=odom,
-            imu_rpy=imu_rpy,
-            timestamp=sensor_data.get("timestamp"),
-        )
-
-        # Check safety
-        safety_status = self.safety.check_safety(
-            imu_rpy=imu_rpy,
-            slam_tracking=slam_pose.tracking_status == "OK",
-        )
+        rgb = sensor_data.rgb
+        depth = sensor_data.depth
+        camera_info = sensor_data.camera_info
+        slam_pose = localized.slam_pose
+        fused_pose = localized.fused_pose
+        safety_status = localized.safety_status
         if not safety_status.is_safe:
             self._state = PolicyState.ERROR
             self._stop_robot()
@@ -507,9 +508,7 @@ class NavigationPolicy:
                 message=f"Safety violation: {safety_status.reason}",
             )
 
-        # Process depth for obstacles
-        depth_m = self.depth_processor.preprocess(depth)
-        obstacle_info = self.depth_processor.detect_obstacles(depth_m)
+        obstacle_info = localized.obstacle_info
 
         # Check navigation timeout
         if (
@@ -566,7 +565,7 @@ class NavigationPolicy:
 
         # Send velocity command
         if self.robot:
-            self.robot.set_velocity(cmd.linear_x, cmd.linear_y, cmd.angular_z)
+            send_velocity(self.robot, cmd)
 
         state_text = (
             "holding goal pose" if self._state == PolicyState.ARRIVED else "navigating"
@@ -596,23 +595,13 @@ class NavigationPolicy:
         self._update_status(message="Stopped")
         return self._status
 
-    def _get_sensor_data(self) -> Optional[dict]:
+    def _get_sensor_data(self) -> Optional[SensorFrame]:
         """Get latest sensor data from robot."""
         if self.robot is None:
             return None
 
         try:
-            state = self.robot.get_state(include_images=True)
-
-            return {
-                "rgb": self.robot.image_to_array(state.rgb),
-                "depth": self.robot.image_to_array(state.depth),
-                "timestamp": self.robot.image_timestamp(state.rgb),
-                "camera_info": state.camera_info,
-                "imu_rpy": state.orientation_rpy,
-                "imu_samples": getattr(state, "imu_samples", None),
-                "odometry": state.position_2d,
-            }
+            return read_sensor_frame(self.robot)
         except Exception as e:
             logger.error(f"Failed to get sensor data: {e}")
             return None

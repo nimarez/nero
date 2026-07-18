@@ -8,8 +8,12 @@ from nero.navigation.map_loader import (
     save_grid_yaml,
 )
 from nero.navigation.path_planner import Path, astar, follow_path, smooth_path
-from nero.navigation.visual_odometry import Pose2D, VisualOdometry
-from nero.navigation.map_policy import MapNavConfig, MapNavState, MapNavigationPolicy
+from nero.navigation.map_policy import (
+    MapNavConfig,
+    MapNavState,
+    MapNavigationPolicy,
+    MapPolicyStatus,
+)
 
 __all__ = [
     "OccupancyGrid",
@@ -21,9 +25,8 @@ __all__ = [
     "astar",
     "follow_path",
     "smooth_path",
-    "Pose2D",
-    "VisualOdometry",
     "MapNavConfig",
     "MapNavState",
     "MapNavigationPolicy",
+    "MapPolicyStatus",
 ]

@@ -248,8 +248,18 @@ class RosObservabilityPublisher:
             matrix[:3, :3] = Rotation.from_euler("z", float(pose.yaw)).as_matrix()
             matrix[:3, 3] = np.asarray(pose.position, dtype=float)
             self.publish_pose(matrix, timestamp)
+        elif getattr(status, "pose", None) is not None:
+            planar_pose = np.asarray(status.pose, dtype=float)
+            matrix = np.eye(4)
+            matrix[:3, :3] = Rotation.from_euler(
+                "z", float(planar_pose[2])
+            ).as_matrix()
+            matrix[:2, 3] = planar_pose[:2]
+            self.publish_pose(matrix, timestamp)
         goal = getattr(status, "current_goal", None)
         approach = getattr(goal, "approach_pose", None)
+        if approach is None:
+            approach = getattr(status, "goal_pose", None)
         if approach is not None:
             goal_matrix = np.eye(4)
             goal_matrix[:3, :3] = Rotation.from_euler(
