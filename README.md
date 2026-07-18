@@ -105,6 +105,11 @@ simulator container and activate it as the empty K1 scene:
 uv run nero-setup-booster-room --activate
 ```
 
+Activation also changes the disposable simulator from its default shared-memory
+motion transport to its supported ROS transport. This makes the simulated K1's
+high-rate IMU available to Nero as `booster/ros2_k2_imu/robot1`; the original
+container setting is backed up and restored together with the scene.
+
 Then restart the virtual robot, or switch away from and back to the empty K1
 scene. The room contains walls, a couch, chairs, a coffee table, cabinets,
 shelves, and a red ball. The ball deliberately retains Booster Studio's special

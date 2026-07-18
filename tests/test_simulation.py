@@ -17,6 +17,7 @@ from nero.simulation.sim_camera import CameraMode, SimCamera
 from nero.simulation.booster_studio_room import (
     BACKUP_SUFFIX,
     SCENE_DIR,
+    configure_ros_transport,
     find_sim_root,
     install_room,
     restore_default_scene,
@@ -117,7 +118,7 @@ def test_booster_studio_topics_match_installed_k1_simulator():
     topics = BoosterStudioTopics()
     assert topics.rgb == "/rgbd_camera/rgb/image_compressed"
     assert topics.depth == "/rgbd_camera/depth/image_raw"
-    assert topics.imu == "booster/ros2_k2_imu/robot0"
+    assert topics.imu == "booster/ros2_k2_imu/robot1"
     assert topics.pose == "/soccer/sim/localization/robot_pose"
     assert topics.detections == "/soccer/sim/vision/detections"
 
@@ -241,6 +242,23 @@ def test_room_activation_is_reversible_and_does_not_overwrite_backup(tmp_path):
     restore_default_scene(sim_root)
     assert default_scene.read_text() == original_scene
     assert default_extensions.read_text() == original_extensions
+
+
+def test_room_activation_enables_ros_imu_transport_and_restores_it(tmp_path):
+    sim_root = _fake_booster_sim(tmp_path)
+    container_env = tmp_path / ".env"
+    original = "MODEL_PATH=mjcf/default_pitch_K1.xml\nSIM_TRANSPORT=shm\n"
+    container_env.write_text(original)
+
+    install_room(sim_root, activate=True, container_env=container_env)
+    assert "SIM_TRANSPORT=ros" in container_env.read_text()
+    assert container_env.with_name(".env" + BACKUP_SUFFIX).read_text() == original
+
+    # Reconfiguration is idempotent and never replaces the original backup.
+    configure_ros_transport(container_env)
+    assert container_env.read_text().count("SIM_TRANSPORT=ros") == 1
+    restore_default_scene(sim_root, container_env=container_env)
+    assert container_env.read_text() == original
 
 
 def test_room_activation_refuses_to_modify_signed_app_bundle(tmp_path):

@@ -33,7 +33,7 @@ class BoosterStudioTopics:
     rgb: str = "/rgbd_camera/rgb/image_compressed"
     depth: str = "/rgbd_camera/depth/image_raw"
     camera_info: str = "/rgbd_camera/rgb/camera_info"
-    imu: str = "booster/ros2_k2_imu/robot0"
+    imu: str = "booster/ros2_k2_imu/robot1"
     pose: str = "/soccer/sim/localization/robot_pose"
     detections: str = "/soccer/sim/vision/detections"
 

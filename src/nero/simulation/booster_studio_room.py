@@ -58,7 +58,31 @@ def _copy_scene(sim_root: Path) -> tuple[Path, Path]:
     return scene_target, extensions_target
 
 
-def install_room(sim_root: Path, *, activate: bool = False) -> tuple[Path, Path]:
+def configure_ros_transport(container_env: Path) -> None:
+    """Back up the container boot config and enable its ROS sensor transport."""
+    backup = container_env.with_name(container_env.name + BACKUP_SUFFIX)
+    if not backup.exists():
+        shutil.copy2(container_env, backup)
+    lines = container_env.read_text().splitlines()
+    updated = []
+    found = False
+    for line in lines:
+        if line.startswith("SIM_TRANSPORT="):
+            updated.append("SIM_TRANSPORT=ros")
+            found = True
+        else:
+            updated.append(line)
+    if not found:
+        updated.append("SIM_TRANSPORT=ros")
+    container_env.write_text("\n".join(updated) + "\n")
+
+
+def install_room(
+    sim_root: Path,
+    *,
+    activate: bool = False,
+    container_env: Path | None = None,
+) -> tuple[Path, Path]:
     """Copy the room into a simulator tree and optionally replace its empty scene."""
     scene_target, extensions_target = _copy_scene(sim_root)
     if not activate:
@@ -80,10 +104,12 @@ def install_room(sim_root: Path, *, activate: bool = False) -> tuple[Path, Path]
         if not backup.exists():
             shutil.copy2(target, backup)
         shutil.copy2(source, target)
+    if container_env is not None:
+        configure_ros_transport(container_env)
     return scene_target, extensions_target
 
 
-def restore_default_scene(sim_root: Path) -> None:
+def restore_default_scene(sim_root: Path, *, container_env: Path | None = None) -> None:
     """Restore the original empty K1 scene after an activated room test."""
     mjcf_dir = sim_root / "mjcf"
     restored = 0
@@ -100,6 +126,13 @@ def restore_default_scene(sim_root: Path) -> None:
         raise FileNotFoundError(
             "A complete Nero scene backup was not found; nothing restored"
         )
+    if container_env is not None:
+        backup = container_env.with_name(container_env.name + BACKUP_SUFFIX)
+        if not backup.is_file():
+            raise FileNotFoundError(
+                "The original simulator transport config was not found"
+            )
+        shutil.copy2(backup, container_env)
 
 
 def parse_args() -> argparse.Namespace:
@@ -124,11 +157,18 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     sim_root = find_sim_root(args.sim_root)
+    container_env = Path.home() / ".env"
+    if not container_env.is_file():
+        container_env = None
     if args.restore:
-        restore_default_scene(sim_root)
+        restore_default_scene(sim_root, container_env=container_env)
         print(f"Restored Booster Studio's empty K1 scene in {sim_root}")
         return
-    scene, _ = install_room(sim_root, activate=args.activate)
+    scene, _ = install_room(
+        sim_root,
+        activate=args.activate,
+        container_env=container_env if args.activate else None,
+    )
     status = "installed and activated" if args.activate else "installed"
     print(f"Nero living room {status}: {scene}")
     if args.activate:
