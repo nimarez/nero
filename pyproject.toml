@@ -43,6 +43,7 @@ nero-k1-calibration = "nero.slam.k1_calibration:main"
 nero-setup-orbslam = "nero.slam.setup_orbslam:main"
 nero-setup-booster-room = "nero.simulation.booster_studio_room:main"
 nero-rerun = "nero.observability.rerun_bridge:main"
+nero-vive-rerun = "nero.vive.rerun_stream:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
