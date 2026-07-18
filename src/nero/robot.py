@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -147,6 +149,7 @@ class RobotInterface:
             raw=info,
         )
         self._lui = LuiClient()
+        self._lui_tts_failed = False
         if virtual_robot_name and hasattr(self._lui, "InitWithName"):
             self._lui.InitWithName(virtual_robot_name)
         else:
@@ -387,16 +390,42 @@ class RobotInterface:
         if callable(synthesize):
             synthesize(text)
             return
-        import booster_robotics_sdk_python as booster
+        if not getattr(self, "_lui_tts_failed", False):
+            try:
+                import booster_robotics_sdk_python as booster
 
-        config = booster.LuiTtsConfig()
-        parameter = booster.LuiTtsParameter()
-        parameter.text = text
-        self._lui.StartTts(config)
+                config = booster.LuiTtsConfig()
+                parameter = booster.LuiTtsParameter()
+                parameter.text = text
+                self._lui.StartTts(config)
+                try:
+                    self._lui.SendTtsText(parameter)
+                finally:
+                    self._lui.StopTts()
+                return
+            except Exception:
+                self._lui_tts_failed = True
+                logger.warning(
+                    "K1 LUI TTS is unavailable; falling back to flite",
+                    exc_info=True,
+                )
+
         try:
-            self._lui.SendTtsText(parameter)
-        finally:
-            self._lui.StopTts()
+            with tempfile.NamedTemporaryFile(suffix=".wav") as audio_file:
+                subprocess.run(
+                    ["flite", "-t", text, "-o", audio_file.name],
+                    check=True,
+                    timeout=30,
+                )
+                subprocess.run(
+                    ["aplay", "-D", "plughw:0,0", audio_file.name],
+                    check=True,
+                    timeout=30,
+                )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError(
+                "Speech playback requires K1 LUI TTS or flite and aplay"
+            ) from exc
 
     def set_velocity(self, vx: float, vy: float, vyaw: float) -> None:
         if not self._initialized:

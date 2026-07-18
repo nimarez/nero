@@ -31,7 +31,9 @@ class CommandSource(Protocol):
 
 
 class TerminalCommandSource:
-    """Read directions from a terminal, primarily for simulation."""
+    """Read an object name or full direction from a terminal."""
+
+    accepts_bare_object_names = True
 
     def start_listening(self) -> None:
         return None
@@ -157,6 +159,15 @@ def parse_go_to_command(command: str) -> str | None:
     return object_name or None
 
 
+def _parse_bare_object_name(command: str) -> str | None:
+    """Normalize a deliberately entered terminal target such as ``chair``."""
+    object_name = " ".join(command.lower().split()).strip(" ,.!?")
+    if not object_name or re.fullmatch(r"(?:please\s+)?go(?:\s+to)?", object_name):
+        return None
+    object_name = re.sub(r"^(?:the|a|an)\s+", "", object_name)
+    return object_name or None
+
+
 def request_navigation_target(
     speaker: Speaker,
     command_source: CommandSource,
@@ -169,9 +180,15 @@ def request_navigation_target(
         while True:
             if cancelled is not None and cancelled():
                 raise InterruptedError("navigation command wait cancelled")
-            command = command_source.read_command(
-                "Direction (for example, 'go to the chair'): "
-            ).strip()
+            accepts_bare_names = bool(
+                getattr(command_source, "accepts_bare_object_names", False)
+            )
+            prompt = (
+                "Object to follow (for example, 'chair'): "
+                if accepts_bare_names
+                else "Direction (for example, 'go to the chair'): "
+            )
+            command = command_source.read_command(prompt).strip()
             if not command:
                 continue
 
@@ -183,6 +200,8 @@ def request_navigation_target(
             object_name = parse_go_to_command(command) or parse_go_to_command(
                 transcript
             )
+            if object_name is None and accepts_bare_names:
+                object_name = _parse_bare_object_name(command)
             if object_name is None:
                 logger.info("Ignoring non-navigation command: %s", command)
                 continue
@@ -190,7 +209,15 @@ def request_navigation_target(
             # Stop ASR before TTS so the K1 never transcribes its own
             # acknowledgement as the next human command.
             command_source.stop_listening()
-            speaker.speak(f"Going to the {object_name}.")
+            try:
+                speaker.speak(f"Going to the {object_name}.")
+            except Exception:
+                # Some K1 firmware exposes locomotion and sensors but not LUI TTS.
+                # A missing announcement must not discard a deliberate command.
+                logger.warning(
+                    "Could not play navigation acknowledgement on the speaker",
+                    exc_info=True,
+                )
             return object_name
     finally:
         command_source.stop_listening()

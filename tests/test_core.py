@@ -13,6 +13,7 @@ from nero.robot import RobotInterface
 from nero.interaction import (
     K1VoiceCommandSource,
     NavigationTargetListener,
+    TerminalCommandSource,
     parse_go_to_command,
     request_navigation_target,
     safe_stand_off_distance,
@@ -202,6 +203,30 @@ def test_direction_acknowledges_target_without_detection_confirmation():
     assert events[:3] == ["start", "stop", "speak"]
 
 
+def test_terminal_accepts_a_bare_object_name(monkeypatch):
+    prompts = []
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda prompt: (prompts.append(prompt), "the red chair")[1],
+    )
+
+    assert request_navigation_target(
+        SimpleNamespace(speak=lambda _: None), TerminalCommandSource()
+    ) == "red chair"
+    assert prompts == ["Object to follow (for example, 'chair'): "]
+
+
+def test_unavailable_speaker_does_not_discard_terminal_target(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _: "chair")
+
+    def unavailable_speaker(_: str) -> None:
+        raise RuntimeError("LUI TTS unavailable")
+
+    assert request_navigation_target(
+        SimpleNamespace(speak=unavailable_speaker), TerminalCommandSource()
+    ) == "chair"
+
+
 def test_direction_wait_can_be_cancelled_cleanly():
     events = []
     commands = SimpleNamespace(
@@ -320,3 +345,40 @@ def test_robot_speak_uses_booster_speaker_service():
     robot._robot = SimpleNamespace(speaker=SimpleNamespace(synthesize=spoken.append))
     robot.speak("chair detected")
     assert spoken == ["chair detected"]
+
+
+def test_robot_speak_falls_back_to_flite_when_lui_is_unavailable(monkeypatch):
+    class FailingLui:
+        def StartTts(self, _):
+            raise RuntimeError("service unavailable")
+
+    class TtsParameter:
+        text = ""
+
+    monkeypatch.setitem(
+        sys.modules,
+        "booster_robotics_sdk_python",
+        SimpleNamespace(
+            LuiTtsConfig=lambda: object(),
+            LuiTtsParameter=TtsParameter,
+        ),
+    )
+    calls = []
+    monkeypatch.setattr(
+        "nero.robot.subprocess.run",
+        lambda command, **kwargs: calls.append((command, kwargs)),
+    )
+    robot = RobotInterface.__new__(RobotInterface)
+    robot._lui = FailingLui()
+    robot._lui_tts_failed = False
+
+    robot.speak("Going to the chair.")
+    robot.speak("Arrived.")
+
+    assert robot._lui_tts_failed is True
+    assert len(calls) == 4
+    assert calls[0][0][:4] == ["flite", "-t", "Going to the chair.", "-o"]
+    assert calls[1][0][:3] == ["aplay", "-D", "plughw:0,0"]
+    assert calls[2][0][:4] == ["flite", "-t", "Arrived.", "-o"]
+    assert calls[3][0][:3] == ["aplay", "-D", "plughw:0,0"]
+    assert all(kwargs == {"check": True, "timeout": 30} for _, kwargs in calls)
