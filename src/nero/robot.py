@@ -78,7 +78,23 @@ class RobotInterface:
             enable_tf_listener=True,
         )
         self._info = self._robot.robot_info
+        self._initialized = False
         logger.info(f"Connected to {self._info.manufacturer} {self._info.model} ({self._info.serial_number})")
+
+    def initialize(self) -> None:
+        """Initialize robot for navigation.
+
+        Sets robot mode to 'walk' and ensures velocity is zeroed.
+        Must be called before sending velocity commands.
+        """
+        if self._initialized:
+            return
+
+        logger.info("Initializing robot for navigation...")
+        self._robot.set_mode("walk")
+        self._robot.set_velocity(0.0, 0.0, 0.0)
+        self._initialized = True
+        logger.info("Robot initialized in walk mode")
 
     @property
     def robot_info(self) -> RobotInfo:
@@ -169,3 +185,7 @@ class RobotInterface:
         """Clean up resources."""
         self.stop()
         logger.info("Robot interface closed")
+
+
+# Alias for backward compatibility with map_nav_agent
+RobotWrapper = RobotInterface

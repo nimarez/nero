@@ -14,9 +14,16 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class VelocityCommand:
-    """Velocity command to send to robot."""
-    linear_x: float = 0.0  # m/s
-    angular_z: float = 0.0  # rad/s
+    """Velocity command to send to robot.
+
+    The K1 robot requires 3 velocity components:
+    - vx: forward/backward (m/s)
+    - vy: lateral/sideways (m/s)
+    - vyaw: yaw rotation (rad/s)
+    """
+    linear_x: float = 0.0  # m/s (forward)
+    linear_y: float = 0.0  # m/s (lateral)
+    angular_z: float = 0.0  # rad/s (yaw)
     head_pitch: Optional[float] = None
     head_yaw: Optional[float] = None
 

@@ -111,7 +111,7 @@ def main():
     try:
         robot = RobotInterface(serial_number=args.robot_serial)
         robot.initialize()
-        logger.info("Robot connected")
+        logger.info("Robot connected and initialized in walk mode")
     except Exception as e:
         logger.warning(f"Robot connection failed: {e}, using mock mode")
         robot = None

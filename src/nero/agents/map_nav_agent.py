@@ -114,9 +114,12 @@ def main() -> None:
             sys.exit(1)
 
     # Initialize robot
-    robot = RobotWrapper()
-    if not robot.connect():
-        logger.error("Failed to connect to robot")
+    try:
+        robot = RobotWrapper()
+        robot.initialize()
+        logger.info("Robot connected and initialized in walk mode")
+    except Exception as e:
+        logger.error(f"Failed to connect to robot: {e}")
         sys.exit(1)
 
     try:

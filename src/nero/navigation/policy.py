@@ -319,7 +319,7 @@ class NavigationPolicy:
 
         # Send velocity command
         if self.robot:
-            self.robot.set_velocity(cmd.linear_x, cmd.angular_z)
+            self.robot.set_velocity(cmd.linear_x, cmd.linear_y, cmd.angular_z)
 
         return self._update_status(
             current_pose=fused_pose,
