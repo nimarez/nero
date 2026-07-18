@@ -1,0 +1,11 @@
+License: CC0 1.0 Universal (Public Domain Dedication)
+
+The furniture models in assets/nero_room are derived from "3D Interior Home
+Assets" by mabaci and released under CC0 1.0 Universal. You may copy, modify,
+distribute, and use them for any purpose without permission or attribution.
+
+Source: https://opengameart.org/content/3d-interior-home-assets
+Downloaded archive SHA-256:
+a2578d1e81dc96f8435a6be27d41d9ab03fef283d6aa2e51af6283df96a65542
+
+The source models were converted mechanically from GLB to OBJ with Assimp 6.0.

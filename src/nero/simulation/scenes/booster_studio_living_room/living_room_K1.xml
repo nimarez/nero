@@ -1,0 +1,90 @@
+<mujoco model="Nero living room K1">
+  <compiler angle="radian" assetdir="assets"/>
+  <statistic extent="4.0"/>
+
+  <option timestep="0.002" gravity="0 0 -9.81"/>
+
+  <asset>
+    <model name="K1" file="K1_22dof.xml"/>
+
+    <material name="floor" rgba="0.55 0.38 0.22 1" roughness="0.9"/>
+    <material name="wall" rgba="0.86 0.84 0.78 1" roughness="1"/>
+    <material name="couch_mat" rgba="0.14 0.42 0.58 1" roughness="0.8"/>
+    <material name="chair_mat" rgba="0.75 0.48 0.20 1" roughness="0.8"/>
+    <material name="wood" rgba="0.42 0.22 0.10 1" roughness="0.8"/>
+    <material name="cabinet_mat" rgba="0.67 0.59 0.45 1" roughness="0.8"/>
+    <material name="plant" rgba="0.18 0.55 0.28 1" roughness="0.8"/>
+    <material name="ball_mat" rgba="0.85 0.08 0.06 1" roughness="0.65"/>
+
+    <!-- Source meshes are Y-up, so their geoms rotate +90 degrees about X. -->
+    <mesh name="room_couch" file="nero_room/couch.obj"/>
+    <mesh name="room_chair_1" file="nero_room/chair01.obj"/>
+    <mesh name="room_chair_2" file="nero_room/chair02.obj"/>
+    <mesh name="room_table" file="nero_room/table.obj"/>
+    <mesh name="room_bookcase" file="nero_room/bookcase.obj"/>
+    <mesh name="room_cabinet" file="nero_room/cabinet.obj"/>
+    <mesh name="room_shelf" file="nero_room/shelf.obj"/>
+    <mesh name="room_vase" file="nero_room/vase.obj"/>
+  </asset>
+
+  <worldbody>
+    <light name="ceiling_light" pos="0 0 3.2" dir="0 0 -1" directional="false"
+           diffuse="0.95 0.90 0.82" specular="0.15 0.15 0.15" cutoff="80"/>
+    <light name="window_light" pos="-2 -1 2.2" dir="0.5 0.5 -0.7" directional="true"
+           diffuse="0.45 0.52 0.60" specular="0.05 0.05 0.05"/>
+
+    <geom name="living_room_floor" type="plane" pos="0 0 0" size="3.5 3 0.1"
+          material="floor" friction="1.0 0.01 0.001"/>
+    <geom name="living_room_back_wall" type="box" pos="0 3 1.4" size="3.5 0.06 1.4"
+          material="wall"/>
+    <geom name="living_room_left_wall" type="box" pos="-3.5 0 1.4" size="0.06 3 1.4"
+          material="wall"/>
+    <geom name="living_room_right_wall" type="box" pos="3.5 0 1.4" size="0.06 3 1.4"
+          material="wall"/>
+
+    <!-- The robot controller parks models at x + 100 and restores this one at (0, -2). -->
+    <frame pos="100 -2 0" euler="0 0 1.57079632679">
+      <attach model="K1" body="Trunk" prefix="robot1_"/>
+    </frame>
+
+    <body name="couch" pos="0.877101 -0.278395 0">
+      <geom name="couch_collision" type="mesh" mesh="room_couch" euler="1.57079632679 0 0"
+            material="couch_mat"/>
+    </body>
+    <body name="coffee_table" pos="0.398745 0.864224 0">
+      <geom name="coffee_table_collision" type="mesh" mesh="room_table" euler="1.57079632679 0 0"
+            material="wood"/>
+    </body>
+    <body name="chair_left" pos="-2.077991 3.429568 0">
+      <geom name="chair_left_collision" type="mesh" mesh="room_chair_1" euler="1.57079632679 0 0"
+            material="chair_mat"/>
+    </body>
+    <body name="chair_right" pos="-1.573503 3.319244 0">
+      <geom name="chair_right_collision" type="mesh" mesh="room_chair_2" euler="1.57079632679 0 0"
+            material="chair_mat"/>
+    </body>
+    <body name="bookcase" pos="-2.024756 2.277215 0">
+      <geom name="bookcase_collision" type="mesh" mesh="room_bookcase" euler="1.57079632679 0 0"
+            material="wood"/>
+    </body>
+    <body name="cabinet" pos="0.944707 -1.031163 0">
+      <geom name="cabinet_collision" type="mesh" mesh="room_cabinet" euler="1.57079632679 0 0"
+            material="cabinet_mat"/>
+    </body>
+    <body name="wall_shelf" pos="-5.744291 0.691232 0.6">
+      <geom name="wall_shelf_visual" type="mesh" mesh="room_shelf" euler="1.57079632679 0 0"
+            material="wood" contype="0" conaffinity="0"/>
+    </body>
+    <body name="vase" pos="4.206154 0.9 0">
+      <geom name="vase_collision" type="mesh" mesh="room_vase" euler="1.57079632679 0 0"
+            material="plant"/>
+    </body>
+
+    <!-- Booster Studio's bundled detector recognizes a body named "ball". -->
+    <body name="ball" pos="-1.15 0.7 0.13">
+      <freejoint name="ball-root"/>
+      <geom name="ball" type="sphere" size="0.13" mass="0.35" material="ball_mat"
+            friction="0.8 0.01 0.001" condim="6"/>
+    </body>
+  </worldbody>
+</mujoco>

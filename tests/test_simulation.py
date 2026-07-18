@@ -2,6 +2,7 @@ import time
 import threading
 
 import numpy as np
+import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 
 from nero.navigation.policy import NavigationPolicy, PolicyState
@@ -13,6 +14,13 @@ from nero.simulation.booster_studio import (
 from nero.simulation.environment import SimEnvironment
 from nero.simulation.mock_robot import MockRobot
 from nero.simulation.sim_camera import CameraMode, SimCamera
+from nero.simulation.booster_studio_room import (
+    BACKUP_SUFFIX,
+    SCENE_DIR,
+    find_sim_root,
+    install_room,
+    restore_default_scene,
+)
 
 
 def test_mock_robot_clamps_velocity_and_integrates_pose():
@@ -166,3 +174,80 @@ def test_booster_studio_detection_coordinates_feed_shared_controller():
     assert detection.bbox == (90, 75, 110, 85)
     np.testing.assert_allclose(detection.position_3d, [0.5, 0.0, 2.0])
     assert detection.distance == np.hypot(2.0, 0.5)
+
+
+def _fake_booster_sim(tmp_path):
+    root = tmp_path / "robocup_sim_src"
+    mjcf = root / "mjcf"
+    mjcf.mkdir(parents=True)
+    (mjcf / "assets").mkdir()
+    (mjcf / "K1_22dof.xml").write_text("<mujoco/>")
+    (mjcf / "default_pitch_K1.xml").write_text("<mujoco model='original'/>")
+    (mjcf / "default_pitch_K1.extensions.xml").write_text("<extensions/>")
+    return root
+
+
+def test_living_room_scene_is_well_formed_and_has_collision_content():
+    root = ET.parse(SCENE_DIR / "living_room_K1.xml").getroot()
+    assert root.tag == "mujoco"
+    assert root.find(".//model[@name='K1']") is not None
+    assert root.find(".//body[@name='ball']/freejoint") is not None
+    assert root.find(".//body[@name='couch']/geom[@type='mesh']") is not None
+    assert len(root.findall(".//asset/mesh")) == 8
+    assert len(root.findall(".//worldbody/geom[@type='box']")) == 3
+
+    extension_root = ET.parse(SCENE_DIR / "living_room_K1.extensions.xml").getroot()
+    extension_names = {
+        item.attrib["name"] for item in extension_root.findall("extension_process")
+    }
+    assert extension_names == {
+        "detection_extension",
+        "rgb_publisher_extension",
+        "depth_publisher_extension",
+        "pose_publisher_extension",
+    }
+
+
+def test_room_installer_stages_assets_without_changing_default(tmp_path):
+    sim_root = _fake_booster_sim(tmp_path)
+    original = (sim_root / "mjcf" / "default_pitch_K1.xml").read_text()
+    scene, extensions = install_room(sim_root)
+    assert scene.is_file()
+    assert extensions.is_file()
+    assert len(list((sim_root / "mjcf" / "assets" / "nero_room").glob("*.obj"))) == 8
+    assert (sim_root / "mjcf" / "default_pitch_K1.xml").read_text() == original
+    assert find_sim_root(sim_root) == sim_root
+
+
+def test_room_activation_is_reversible_and_does_not_overwrite_backup(tmp_path):
+    sim_root = _fake_booster_sim(tmp_path)
+    default_scene = sim_root / "mjcf" / "default_pitch_K1.xml"
+    default_extensions = sim_root / "mjcf" / "default_pitch_K1.extensions.xml"
+    original_scene = default_scene.read_text()
+    original_extensions = default_extensions.read_text()
+
+    install_room(sim_root, activate=True)
+    scene_backup = default_scene.with_name(default_scene.name + BACKUP_SUFFIX)
+    extensions_backup = default_extensions.with_name(
+        default_extensions.name + BACKUP_SUFFIX
+    )
+    assert scene_backup.read_text() == original_scene
+    assert extensions_backup.read_text() == original_extensions
+    assert "Nero living room K1" in default_scene.read_text()
+
+    # A second activation keeps the first pristine backup.
+    install_room(sim_root, activate=True)
+    assert scene_backup.read_text() == original_scene
+    restore_default_scene(sim_root)
+    assert default_scene.read_text() == original_scene
+    assert default_extensions.read_text() == original_extensions
+
+
+def test_room_activation_refuses_to_modify_signed_app_bundle(tmp_path):
+    sim_root = _fake_booster_sim(tmp_path / "Booster Studio.app" / "Contents")
+    try:
+        install_room(sim_root, activate=True)
+    except PermissionError as exc:
+        assert "signed macOS application bundle" in str(exc)
+    else:
+        raise AssertionError("signed app activation should have been rejected")

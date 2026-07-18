@@ -94,6 +94,31 @@ distances remain intentionally absent from the CLI: detections are live, the
 simulated speaker announces each candidate in the terminal, and a human confirms
 before motion begins.
 
+### Furnished-room scene
+
+Nero includes a small, CC0, collision-enabled living room for testing RGB-D SLAM
+and obstacle handling somewhere more representative than an empty soccer pitch.
+From the **virtual robot terminal**, install it into Booster Studio's disposable
+simulator container and activate it as the empty K1 scene:
+
+```bash
+uv run nero-setup-booster-room --activate
+```
+
+Then restart the virtual robot, or switch away from and back to the empty K1
+scene. The room contains walls, a couch, chairs, a coffee table, cabinets,
+shelves, and a red ball. The ball deliberately retains Booster Studio's special
+`ball` body name so its built-in simulated detector can exercise Nero's spoken
+confirmation flow. Restore the original scene with:
+
+```bash
+uv run nero-setup-booster-room --restore
+```
+
+Use `--sim-root` or `BOOSTER_STUDIO_SIM_ROOT` if the simulator source directory
+is not auto-detected. The installer refuses to modify the signed macOS app; scene
+activation is intentionally limited to the disposable Linux virtual robot.
+
 ## Testing
 
 Run the complete local suite through uv:

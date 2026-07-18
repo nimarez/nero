@@ -38,6 +38,7 @@ nero-map-nav = "nero.agents.map_nav_agent:main"
 nero-pc2map = "nero.utils.pointcloud_converter:main"
 nero-k1-calibration = "nero.slam.k1_calibration:main"
 nero-setup-orbslam = "nero.slam.setup_orbslam:main"
+nero-setup-booster-room = "nero.simulation.booster_studio_room:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

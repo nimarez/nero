@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<extensions>
+  <visual_scene name="scene_switcher"/>
+  <physics name="robot_controller"/>
+  <extension_process
+     name="detection_extension"
+     field_type="adult_size"
+     yolo_export_enabled="false"
+     yolo_export_dir="./yolo_dataset"
+     yolo_export_skip_interval="6"/>
+  <extension_process
+     name="rgb_publisher_extension"
+     enable_compression="true"
+     jpeg_quality="88"/>
+  <extension_process name="depth_publisher_extension"/>
+  <extension_process name="pose_publisher_extension"/>
+</extensions>
