@@ -91,6 +91,15 @@ export BOOSTER_NET_IF=lo
 uv run nero-orb-slam --no-display
 ```
 
+To use the same object-command policy with the fixed main-room map, add the map
+instead of launching a different policy:
+
+```bash
+uv run nero-orb-slam --no-display \
+  --map output/main_room_map/main_room.png \
+  --map-yaml output/main_room_map/main_room.yaml
+```
+
 From this repository on the Mac, open the command terminal and live Rerun viewer
 with one command:
 
@@ -131,18 +140,20 @@ All commands run through uv:
 | `uv run nero-booster-studio` | Full policy on a Booster Studio virtual K1 |
 | `uv run nero-sim-benchmark` | Compare native SLAM with simulator truth |
 | `uv run nero-mapping` | Collect RGB-D/pose frames and invoke COLMAP + gsplat |
-| `uv run nero-map-nav --map MAP --initial-pose X Y YAW` | Occupancy-grid navigation on shared IMU-RGBD ORB-SLAM |
+| `uv run nero-orb-slam --map MAP` | Same object policy with map alignment and A* routing |
+| `uv run nero-map-nav --map MAP` | Explicit pose-goal CLI using the unified policy |
 | `uv run nero-pc2map CLOUD -o MAP` | Convert a point cloud to an occupancy map |
 | `uv run nero-k1-calibration` | Capture real K1 IMU-RGBD calibration |
 | `uv run --extra viz nero-rerun` | Bridge normalized Nero ROS topics into Rerun |
 
 `nero-mapping` is a separate reconstruction pipeline. COLMAP and the configured
 gsplat training command must already be installed; they are intentionally not
-robot runtime dependencies. Object navigation and `nero-map-nav` now share the
-same synchronized K1 sensor reader, IMU-RGBD ORB-SLAM localization, pose fusion,
-safety monitor, depth obstacle processing, and goal-pose velocity controller.
-Only goal selection differs: a live semantic object pose versus A* waypoints in
-an occupancy map.
+robot runtime dependencies. There is one `NavigationPolicy`. Without a map, its
+world frame is the live SLAM session and it drives directly toward the
+object-derived goal pose. With a map,
+an optional `MapNavigator` aligns that same SLAM session to the fixed map and
+routes the same goal through A*. `nero-map-nav` is only an explicit pose-goal
+front end; it does not own a second sensor, safety, localization, or control loop.
 
 The bundled real main-room splat can be converted without Open3D. The alias
 `assets/main_room.ply` resolves to its Git-LFS location:
@@ -156,14 +167,35 @@ uv run nero-pc2map assets/main_room.ply -o output/main_room_map \
 uv run nero-map-nav \
   --map output/main_room_map/main_room.png \
   --yaml output/main_room_map/main_room.yaml \
-  --initial-pose X Y YAW --goal X Y YAW
+  --goal X Y YAW
 ```
 
-`--initial-pose` is the robot's measured pose in the map frame at startup. It is
-required for meaningful navigation because a new ORB-SLAM session has an
-arbitrary origin; the policy performs rigid SE(2) alignment and never assumes
-the captured splat and live SLAM frames already coincide. Inspect the generated
-grid before commanding the real robot—the splat projection is a planning input,
+Map and SLAM information are fused without feeding a possibly imperfect mesh
+back into visual-inertial odometry. The policy estimates a rigid
+`T_map_slam`, evaluates the live fused SLAM pose in the map frame, uses static
+occupancy for global A* planning, and applies current depth obstacles as the
+local safety layer. Object detections are transformed through the same
+`T_map_slam`, so object goals, robot poses, SLAM points, and Rerun telemetry stay
+in one coordinate frame. This keeps short-term motion smooth if map matching is
+temporarily ambiguous. Continuous drift correction should later add only
+confidence-gated, low-rate SE(2) constraints to `T_map_slam`; it should not
+replace or hard-reset ORB-SLAM poses while walking.
+
+A new ORB-SLAM session has an arbitrary origin, so the policy performs rigid
+SE(2) alignment and never assumes the captured splat and live SLAM frames
+already coincide. By default the startup pose in the map frame is localized
+automatically: depth frames are back-projected into gravity-aligned obstacle
+scans and matched against the fixed map with a coarse-to-fine correlative
+search that penalizes scan rays crossing mapped structure (see
+`nero.navigation.global_localization`). Because a single camera view is often
+ambiguous, the policy stays in `LOCALIZING` and remains stopped until it has a
+goal. After a goal is accepted it may slowly spin in place
+(`--localization-spin-speed`, 0 disables this) and accumulate scans across
+viewpoints in the SLAM session frame until the composite match is both strong
+and unambiguous. Pass `--initial-pose X Y YAW` to skip
+auto-localization and use a measured map-frame pose, and `--camera-height` if
+the depth camera is not ~1.1 m above the floor. Inspect the generated grid
+before commanding the real robot—the splat projection is a planning input,
 not collision-certified geometry.
 
 ## Booster Studio

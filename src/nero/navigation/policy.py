@@ -19,6 +19,7 @@ import numpy as np
 
 from nero.perception.object_detector import ObjectDetector, ObjectDetection
 from nero.navigation.controller import VelocityController, VelocityCommand
+from nero.navigation.map_policy import MapNavConfig, MapNavigator, MapRouteResult
 from nero.navigation.object_goal import (
     approach_pose,
     blend_world_position,
@@ -33,6 +34,7 @@ from nero.slam.orb_slam3_node import ORBSLAM3Node
 from nero.slam.pose_estimator import PoseEstimator, FusedPose
 from nero.navigation.safety import SafetyMonitor, SafetyStatus
 from nero.navigation.runtime import (
+    LocalizedFrame,
     SensorFrame,
     initialize_sensor_navigation,
     localize_sensor_frame,
@@ -49,7 +51,9 @@ class PolicyState(enum.Enum):
     IDLE = "idle"
     SHOWING_CAMERA = "showing_camera"
     WAITING_FOR_OBJECT = "waiting_for_object"
+    LOCALIZING = "localizing"
     DETECTING = "detecting"
+    PLANNING = "planning"
     NAVIGATING = "navigating"
     TRACKING_OBJECT = "tracking_object"
     ARRIVED = "arrived"
@@ -62,6 +66,7 @@ class NavigationGoal:
     """A navigation goal."""
 
     object_name: str
+    kind: str = "object"
     object_position_world: Optional[np.ndarray] = None
     approach_pose: Optional[np.ndarray] = None  # [x, y, yaw] in world frame
     detection: Optional[ObjectDetection] = None
@@ -90,6 +95,8 @@ class NavigationPolicy:
 
     State machine:
     IDLE -> SHOWING_CAMERA -> WAITING_FOR_OBJECT -> DETECTING -> NAVIGATING -> ARRIVED
+    An optional fixed map inserts LOCALIZING and PLANNING without changing the
+    sensor, safety, object tracking, command, or actuator loop.
 
     Transitions:
     - IDLE: start() -> SHOWING_CAMERA
@@ -113,6 +120,8 @@ class NavigationPolicy:
         object_track_timeout: float = 1.0,
         object_position_filter: float = 0.35,
         goal_yaw_tolerance: float = 0.15,
+        map_config: MapNavConfig | None = None,
+        enable_object_detection: bool = True,
     ):
         # Environment: real robot or simulation
         self.robot = robot
@@ -133,8 +142,23 @@ class NavigationPolicy:
             self.depth_processor = None
             self.safety = None
 
-        self.object_detector = object_detector or ObjectDetector()
-        self.controller = VelocityController(**(navigation_config or {}))
+        self.object_detector = None
+        if enable_object_detection:
+            self.object_detector = object_detector or ObjectDetector()
+        self.map_navigator = (
+            MapNavigator(map_config) if map_config is not None else None
+        )
+        controller_config = dict(navigation_config or {})
+        if map_config is not None:
+            controller_config.setdefault(
+                "max_linear_velocity", map_config.max_linear_vel
+            )
+            controller_config.setdefault(
+                "max_angular_velocity", map_config.max_angular_vel
+            )
+            controller_config.setdefault("goal_threshold", map_config.goal_threshold)
+            goal_yaw_tolerance = map_config.goal_yaw_tolerance
+        self.controller = VelocityController(**controller_config)
 
         # State
         self._state = PolicyState.IDLE
@@ -142,6 +166,7 @@ class NavigationPolicy:
         self._status = PolicyStatus()
         self._running = False
         self._start_time: Optional[float] = None
+        self._last_sensor: SensorFrame | None = None
 
         # Tracking
         self._object_not_found_count = 0
@@ -169,6 +194,8 @@ class NavigationPolicy:
         self._start_time = time.time()
 
         # Initialize components
+        if self.map_navigator is not None and self.map_navigator.grid is None:
+            self.map_navigator.load_map()
         if self._is_sim:
             self.sim_env.initialize()
         elif self.robot:
@@ -178,9 +205,13 @@ class NavigationPolicy:
         elif self.slam:
             self.slam.initialize()
 
-        if not self._is_sim and not self.object_detector.initialize():
+        if (
+            not self._is_sim
+            and self.object_detector is not None
+            and not self.object_detector.initialize()
+        ):
             raise RuntimeError(
-                "No live object detector is available; install the configured ONNX model"
+                "No live object detector is available; install the configured model"
             )
         if self.safety:
             self.safety.reset()
@@ -203,11 +234,14 @@ class NavigationPolicy:
         if self._state not in (
             PolicyState.SHOWING_CAMERA,
             PolicyState.WAITING_FOR_OBJECT,
+            PolicyState.LOCALIZING,
         ):
             self._update_status(message="Cannot set object in current state")
             return self._status
 
         logger.info(f"Target object set: {object_name}")
+        if self.object_detector is None:
+            return self._update_status(message="Object detection is disabled")
         set_detector_target = getattr(self.object_detector, "set_target", None)
         if callable(set_detector_target):
             set_detector_target(object_name)
@@ -216,7 +250,11 @@ class NavigationPolicy:
             object_name=object_name,
             stand_off_distance=safe_stand_off_distance(object_name),
         )
-        self._state = PolicyState.DETECTING
+        self._state = (
+            PolicyState.LOCALIZING
+            if self.map_navigator is not None and not self.map_navigator.alignment_ready
+            else PolicyState.DETECTING
+        )
         self._object_not_found_count = 0
         self._start_time = time.time()
         self._update_status(message=f"Searching for '{object_name}'...")
@@ -225,6 +263,34 @@ class NavigationPolicy:
     def set_object(self, object_name: str) -> PolicyStatus:
         """Alias for set_target (backward compatibility)."""
         return self.set_target(object_name)
+
+    def set_pose_goal(self, x: float, y: float, yaw: float = 0.0) -> PolicyStatus:
+        """Set a goal pose in the active world frame.
+
+        With a fixed map this is a map-frame pose. Without one it is expressed
+        in the current SLAM session frame.
+        """
+        if self._state in (PolicyState.IDLE, PolicyState.ERROR):
+            return self._update_status(message="Cannot set pose goal in current state")
+        pose = np.array([float(x), float(y), float(yaw)])
+        if self.map_navigator is not None and not self.map_navigator.validate_goal(
+            pose
+        ):
+            return self._update_status(message="Requested pose is occupied in the map")
+        self._goal = NavigationGoal(
+            object_name="map goal" if self.map_navigator is not None else "pose goal",
+            kind="pose",
+            approach_pose=pose,
+        )
+        if self.map_navigator is not None:
+            self.map_navigator.set_goal(pose)
+        self._start_time = time.time()
+        self._state = (
+            PolicyState.PLANNING
+            if self.map_navigator is None or self.map_navigator.alignment_ready
+            else PolicyState.LOCALIZING
+        )
+        return self._update_status(message="Pose goal accepted")
 
     def step(self) -> PolicyStatus:
         """Execute one step of the policy loop.
@@ -243,9 +309,87 @@ class NavigationPolicy:
         else:
             sensor_data = self._get_sensor_data()
             if sensor_data is None:
+                self._last_sensor = None
                 return self._update_status(
                     state=PolicyState.ERROR, message="Failed to get sensor data"
                 )
+            self._last_sensor = sensor_data
+
+            try:
+                localized = localize_sensor_frame(
+                    sensor_data,
+                    slam=self.slam,
+                    pose_estimator=self.pose_estimator,
+                    depth_processor=self.depth_processor,
+                    safety=self.safety,
+                )
+            except Exception as exc:
+                logger.exception("Navigation localization failure")
+                self._stop_robot()
+                return self._update_status(
+                    state=PolicyState.ERROR, message=f"Localization failed: {exc}"
+                )
+            if not localized.safety_status.is_safe:
+                self._stop_robot()
+                return self._update_status(
+                    state=PolicyState.ERROR,
+                    current_pose=localized.fused_pose,
+                    safety_status=localized.safety_status,
+                    message=f"Safety violation: {localized.safety_status.reason}",
+                )
+            if localized.slam_pose.tracking_status != "OK":
+                self._stop_robot()
+                waiting = self._goal is None
+                self._state = (
+                    PolicyState.LOCALIZING
+                    if self.map_navigator is not None
+                    else PolicyState.WAITING_FOR_OBJECT if waiting else PolicyState.LOST
+                )
+                return self._update_status(
+                    current_pose=localized.fused_pose,
+                    safety_status=localized.safety_status,
+                    message=(
+                        "Waiting for ORB-SLAM tracking"
+                        if waiting
+                        else "ORB-SLAM tracking lost"
+                    ),
+                )
+
+            if self.map_navigator is not None:
+                try:
+                    aligned, detail = self.map_navigator.update_alignment(
+                        localized, self.depth_processor
+                    )
+                except Exception as exc:
+                    logger.exception("Map alignment failed")
+                    self._stop_robot()
+                    return self._update_status(
+                        state=PolicyState.ERROR,
+                        safety_status=localized.safety_status,
+                        message=f"Map alignment failed: {exc}",
+                    )
+                if not aligned:
+                    self._state = PolicyState.LOCALIZING
+                    spin_speed = (
+                        self.map_navigator.config.localization_spin_speed
+                        if self._goal is not None
+                        else 0.0
+                    )
+                    command = VelocityCommand(angular_z=spin_speed)
+                    send_velocity(self.robot, command)
+                    return self._update_status(
+                        current_pose=localized.fused_pose,
+                        safety_status=localized.safety_status,
+                        velocity_command=command,
+                        message=detail,
+                    )
+                if self._state == PolicyState.LOCALIZING:
+                    if self._goal is None:
+                        self._state = PolicyState.WAITING_FOR_OBJECT
+                    elif self._goal.kind == "pose":
+                        self._state = PolicyState.PLANNING
+                    else:
+                        self._state = PolicyState.DETECTING
 
             # Process based on state
             if self._state == PolicyState.SHOWING_CAMERA:
@@ -259,11 +403,14 @@ class NavigationPolicy:
                 return self._step_detecting(sensor_data)
 
             elif self._state in (
+                PolicyState.PLANNING,
                 PolicyState.NAVIGATING,
                 PolicyState.TRACKING_OBJECT,
                 PolicyState.ARRIVED,
             ):
-                return self._step_navigating(sensor_data)
+                if self._goal is not None and self._goal.kind == "pose":
+                    return self._step_pose_goal(sensor_data, localized)
+                return self._step_navigating(sensor_data, localized)
 
             elif self._state == PolicyState.LOST:
                 return self._update_status(message="Lost - cannot find object")
@@ -443,7 +590,7 @@ class NavigationPolicy:
         if self._is_sim:
             self.sim_env.set_velocity(0.0, 0.0, 0.0)
         elif self.robot:
-            self.robot.stop()
+            send_velocity(self.robot)
 
     def _step_detecting(self, sensor_data: SensorFrame) -> PolicyStatus:
         """Step in DETECTING state."""
@@ -487,7 +634,11 @@ class NavigationPolicy:
                 message=f"Searching for '{self._goal.object_name}'... ({self._object_not_found_count}/{self._max_object_not_found})",
             )
 
-    def _step_navigating(self, sensor_data: SensorFrame | dict) -> PolicyStatus:
+    def _step_navigating(
+        self,
+        sensor_data: SensorFrame | dict,
+        localized: LocalizedFrame | None = None,
+    ) -> PolicyStatus:
         """Step in NAVIGATING state."""
         if isinstance(sensor_data, dict):
             sensor_data = SensorFrame(
@@ -499,13 +650,14 @@ class NavigationPolicy:
                 imu_samples=sensor_data.get("imu_samples"),
                 odometry=np.asarray(sensor_data.get("odometry", np.zeros(3))),
             )
-        localized = localize_sensor_frame(
-            sensor_data,
-            slam=self.slam,
-            pose_estimator=self.pose_estimator,
-            depth_processor=self.depth_processor,
-            safety=self.safety,
-        )
+        if localized is None:
+            localized = localize_sensor_frame(
+                sensor_data,
+                slam=self.slam,
+                pose_estimator=self.pose_estimator,
+                depth_processor=self.depth_processor,
+                safety=self.safety,
+            )
         rgb = sensor_data.rgb
         depth = sensor_data.depth
         camera_info = sensor_data.camera_info
@@ -545,32 +697,51 @@ class NavigationPolicy:
 
         observed_now = (
             new_detection_result
-            and
-            target is not None
+            and target is not None
             and target.position_3d is not None
             and slam_pose.tracking_status == "OK"
         )
-        robot_pose = fused_pose.position_2d
+        local_robot_pose = fused_pose.position_2d
+        robot_pose = (
+            self.map_navigator.to_map_pose(local_robot_pose)
+            if self.map_navigator is not None
+            else local_robot_pose
+        )
+        status_pose = self._pose_in_active_frame(fused_pose, robot_pose)
         if observed_now:
             object_world = (
                 body_point_to_world(target.position_3d, robot_pose)
                 if target.coordinate_frame == "body"
                 else camera_point_to_world(target.position_3d, slam_pose.to_matrix())
             )
+            if target.coordinate_frame != "body" and self.map_navigator is not None:
+                object_world = self.map_navigator.transform_slam_point(object_world)
             self._observe_object(target, object_world, robot_pose)
         elif not self._goal_is_fresh():
             self._state = PolicyState.LOST
-            if self.robot:
-                self.robot.stop()
+            self._stop_robot()
             return self._update_status(
-                current_pose=fused_pose,
+                current_pose=status_pose,
                 safety_status=safety_status,
                 detections=detections,
                 message="Lost object; world-frame goal expired",
             )
 
+        route_message = None
         if self._goal.approach_pose is None:
             cmd = VelocityCommand()
+        elif self.map_navigator is not None:
+            route = self._map_route(robot_pose, obstacle_info)
+            route_message = route.message
+            if route.failed:
+                self._state = PolicyState.LOST
+                cmd = VelocityCommand()
+            elif route.arrived and observed_now:
+                self._state = PolicyState.ARRIVED
+                cmd = VelocityCommand()
+            else:
+                self._state = PolicyState.NAVIGATING
+                cmd = route.command
         elif observed_now and self._goal_reached(robot_pose):
             self._state = PolicyState.ARRIVED
             cmd = VelocityCommand()
@@ -591,12 +762,107 @@ class NavigationPolicy:
             "holding goal pose" if self._state == PolicyState.ARRIVED else "navigating"
         )
         return self._update_status(
-            current_pose=fused_pose,
+            current_pose=status_pose,
             safety_status=safety_status,
             velocity_command=cmd,
             detections=detections,
-            message=f"{state_text.capitalize()} for '{self._goal.object_name}'",
+            message=route_message
+            or f"{state_text.capitalize()} for '{self._goal.object_name}'",
         )
+
+    def _step_pose_goal(
+        self,
+        sensor_data: SensorFrame,
+        localized: LocalizedFrame | None,
+    ) -> PolicyStatus:
+        """Follow an explicit pose through the same localized safety loop."""
+        if localized is None:
+            localized = localize_sensor_frame(
+                sensor_data,
+                slam=self.slam,
+                pose_estimator=self.pose_estimator,
+                depth_processor=self.depth_processor,
+                safety=self.safety,
+            )
+        if not localized.safety_status.is_safe:
+            self._stop_robot()
+            return self._update_status(
+                state=PolicyState.ERROR,
+                current_pose=localized.fused_pose,
+                safety_status=localized.safety_status,
+                message=f"Safety violation: {localized.safety_status.reason}",
+            )
+        local_pose = localized.fused_pose.position_2d
+        robot_pose = (
+            self.map_navigator.to_map_pose(local_pose)
+            if self.map_navigator is not None
+            else local_pose
+        )
+        status_pose = self._pose_in_active_frame(localized.fused_pose, robot_pose)
+        if self.map_navigator is not None:
+            route = self._map_route(robot_pose, localized.obstacle_info)
+            command = route.command
+            message = route.message
+            state = (
+                PolicyState.LOST
+                if route.failed
+                else PolicyState.ARRIVED if route.arrived else PolicyState.NAVIGATING
+            )
+        else:
+            arrived = self.controller.has_reached_pose(
+                robot_pose,
+                self._goal.approach_pose,
+                yaw_tolerance=self._goal_yaw_tolerance,
+            )
+            command = (
+                VelocityCommand()
+                if arrived
+                else self.controller.compute_goal_velocity(
+                    robot_pose,
+                    self._goal.approach_pose,
+                    localized.obstacle_info,
+                    yaw_tolerance=self._goal_yaw_tolerance,
+                )
+            )
+            state = PolicyState.ARRIVED if arrived else PolicyState.NAVIGATING
+            message = "Arrived at pose goal" if arrived else "Navigating to pose goal"
+        self._state = state
+        send_velocity(self.robot, command)
+        return self._update_status(
+            current_pose=status_pose,
+            safety_status=localized.safety_status,
+            velocity_command=command,
+            message=message,
+        )
+
+    @staticmethod
+    def _pose_in_active_frame(fused_pose: FusedPose, pose_2d: np.ndarray) -> FusedPose:
+        position = np.asarray(fused_pose.position, dtype=float).copy()
+        position[:2] = pose_2d[:2]
+        return FusedPose(
+            position=position,
+            yaw=float(pose_2d[2]),
+            timestamp=fused_pose.timestamp,
+            confidence=fused_pose.confidence,
+            source=(
+                "map_fused"
+                if not np.allclose(pose_2d, fused_pose.position_2d)
+                else fused_pose.source
+            ),
+        )
+
+    def _map_route(self, robot_pose: np.ndarray, obstacle_info: dict) -> MapRouteResult:
+        """Fail closed if fixed-map planning cannot produce a safe command."""
+        try:
+            return self.map_navigator.route(
+                robot_pose,
+                self._goal.approach_pose,
+                self.controller,
+                obstacle_info,
+            )
+        except Exception as exc:
+            logger.exception("Map routing failed")
+            return MapRouteResult(failed=True, message=f"Map routing failed: {exc}")
 
     def stop(self) -> PolicyStatus:
         """Stop the navigation policy."""
@@ -645,8 +911,15 @@ class NavigationPolicy:
             self._state = state
 
         pose = current_pose
-        if pose is None and self.pose_estimator:
-            pose = self.pose_estimator.get_pose()
+        if self.map_navigator is not None and not self.map_navigator.alignment_ready:
+            pose = None
+        else:
+            get_pose = getattr(self.pose_estimator, "get_pose", None)
+            if pose is None and callable(get_pose):
+                pose = get_pose()
+                if pose is not None and self.map_navigator is not None:
+                    map_pose = self.map_navigator.to_map_pose(pose.position_2d)
+                    pose = self._pose_in_active_frame(pose, map_pose)
 
         self._status = PolicyStatus(
             state=self._state,
@@ -667,6 +940,8 @@ class NavigationPolicy:
         self._object_not_found_count = 0
         self._last_detection = None
         self._last_detection_revision = None
+        if self.map_navigator is not None:
+            self.map_navigator.reset()
         self._stop_robot()
         return self._update_status(message="Reset complete")
 
@@ -681,3 +956,25 @@ class NavigationPolicy:
     @property
     def is_running(self) -> bool:
         return self._running
+
+    @property
+    def last_sensor(self) -> SensorFrame | None:
+        return self._last_sensor
+
+    @property
+    def map_alignment_ready(self) -> bool:
+        return self.map_navigator is not None and self.map_navigator.alignment_ready
+
+    @property
+    def grid(self):
+        return self.map_navigator.grid if self.map_navigator is not None else None
+
+    def transform_slam_points(self, points: np.ndarray) -> np.ndarray:
+        if self.map_navigator is None:
+            return np.asarray(points, dtype=float).copy()
+        return self.map_navigator.transform_slam_points(points)
+
+    def render_map(self) -> np.ndarray:
+        if self.map_navigator is None:
+            return np.zeros((480, 640, 3), dtype=np.uint8)
+        return self.map_navigator.render_map()

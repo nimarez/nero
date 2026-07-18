@@ -25,6 +25,8 @@ from nero.interaction import (
 )
 from nero.utils.visualization import Visualization
 from nero.navigation.policy import NavigationPolicy, PolicyState
+from nero.navigation.map_policy import MapNavConfig
+from nero.navigation.global_localization import GlobalLocalizationConfig
 from nero.observability import RosObservabilityPublisher
 
 logger = logging.getLogger(__name__)
@@ -61,6 +63,27 @@ def parse_args() -> argparse.Namespace:
         default="/tmp/nero-navigation.sock",
         help="Robot-local Unix socket used by the socket command source",
     )
+    parser.add_argument(
+        "--map",
+        help="Optional occupancy map; enables map alignment and A* for object goals",
+    )
+    parser.add_argument("--map-yaml", help="YAML metadata for a PNG occupancy map")
+    parser.add_argument(
+        "--initial-pose",
+        nargs=3,
+        type=float,
+        metavar=("X", "Y", "YAW"),
+        help="Known startup pose in the map; omit for depth-scan localization",
+    )
+    parser.add_argument("--map-resolution", type=float, default=0.05)
+    parser.add_argument(
+        "--map-origin", nargs=2, type=float, metavar=("X", "Y"), default=(0.0, 0.0)
+    )
+    parser.add_argument("--map-inflation", type=float, default=0.3)
+    parser.add_argument(
+        "--camera-height", type=float, default=GlobalLocalizationConfig.camera_height
+    )
+    parser.add_argument("--localization-spin-speed", type=float, default=0.3)
     return parser.parse_args()
 
 
@@ -71,11 +94,15 @@ def run_agent(
     slam_options=None,
     object_detector=None,
     command_source=None,
+    map_config=None,
 ) -> None:
     """Run the shared object-following loop with a robot environment adapter."""
     # Initialize navigation policy
     policy = NavigationPolicy(
-        robot=robot, slam_options=slam_options, object_detector=object_detector
+        robot=robot,
+        slam_options=slam_options,
+        object_detector=object_detector,
+        map_config=map_config,
     )
 
     policy.start()
@@ -123,22 +150,18 @@ def run_agent(
                     announced_arrival = False
                     logger.info("Accepted navigation target: %s", target_object)
 
-            # Read the K1's built-in RGB-D stream.
-            try:
-                peek_state = getattr(robot, "peek_state", robot.get_state)
-                state = peek_state(include_images=True)
-                frame = robot.image_to_array(state.rgb)
-                sensor_timestamp = robot.image_timestamp(state.rgb)
-                if telemetry is not None:
-                    telemetry.publish_robot_state(state, robot)
-            except Exception as e:
-                logger.warning(f"Failed to read K1 sensors: {e}")
+            # The policy owns the single synchronized K1 sensor read used by
+            # localization, safety, detection, display, and observability.
+            status = policy.step()
+            sensor = policy.last_sensor
+            if sensor is None:
                 time.sleep(0.01)
                 continue
-
-            # Step policy
-            status = policy.step()
+            frame = sensor.rgb
+            sensor_timestamp = sensor.timestamp
             if telemetry is not None:
+                if sensor.raw_state is not None:
+                    telemetry.publish_robot_state(sensor.raw_state, robot)
                 telemetry.publish_policy(status, sensor_timestamp)
                 if policy.slam is not None:
                     slam_pose = policy.slam.get_current_pose()
@@ -148,7 +171,13 @@ def run_agent(
                         )
                     map_points = policy.slam.get_map_points()
                     if len(map_points):
-                        telemetry.publish_point_cloud(map_points, sensor_timestamp)
+                        if policy.map_navigator is None:
+                            telemetry.publish_point_cloud(map_points, sensor_timestamp)
+                        elif policy.map_alignment_ready:
+                            telemetry.publish_point_cloud(
+                                policy.transform_slam_points(map_points),
+                                sensor_timestamp,
+                            )
 
             # Draw overlay
             frame = viz.draw_navigation_info(
@@ -269,7 +298,26 @@ def main():
         command_source.start_listening()
         command_source.stop_listening()
 
-    run_agent(robot, args, command_source=command_source)
+    map_config = None
+    if args.map:
+        auto_localize = args.initial_pose is None
+        map_config = MapNavConfig(
+            map_path=args.map,
+            yaml_path=args.map_yaml,
+            resolution=args.map_resolution,
+            origin=tuple(args.map_origin),
+            initial_pose=(0.0, 0.0, 0.0) if auto_localize else tuple(args.initial_pose),
+            auto_localize=auto_localize,
+            localization=GlobalLocalizationConfig(camera_height=args.camera_height),
+            localization_spin_speed=args.localization_spin_speed,
+            inflation_radius=args.map_inflation,
+        )
+        logger.info(
+            "Fixed-map mode enabled (%s localization)",
+            "automatic" if auto_localize else "known-pose",
+        )
+
+    run_agent(robot, args, command_source=command_source, map_config=map_config)
 
 
 if __name__ == "__main__":

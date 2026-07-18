@@ -1,5 +1,12 @@
 """Navigation module for map-based and SLAM-based navigation."""
 
+from nero.navigation.global_localization import (
+    GlobalLocalizationConfig,
+    GlobalLocalizationResult,
+    GridLocalizer,
+    depth_to_planar_scan,
+    localize_scan,
+)
 from nero.navigation.map_loader import (
     OccupancyGrid,
     load_occupancy_grid,
@@ -10,12 +17,16 @@ from nero.navigation.map_loader import (
 from nero.navigation.path_planner import Path, astar, follow_path, smooth_path
 from nero.navigation.map_policy import (
     MapNavConfig,
-    MapNavState,
-    MapNavigationPolicy,
-    MapPolicyStatus,
+    MapNavigator,
+    MapRouteResult,
 )
 
 __all__ = [
+    "GlobalLocalizationConfig",
+    "GlobalLocalizationResult",
+    "GridLocalizer",
+    "depth_to_planar_scan",
+    "localize_scan",
     "OccupancyGrid",
     "load_occupancy_grid",
     "pointcloud_to_grid",
@@ -26,7 +37,6 @@ __all__ = [
     "follow_path",
     "smooth_path",
     "MapNavConfig",
-    "MapNavState",
-    "MapNavigationPolicy",
-    "MapPolicyStatus",
+    "MapNavigator",
+    "MapRouteResult",
 ]
