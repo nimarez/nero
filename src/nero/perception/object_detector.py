@@ -4,12 +4,27 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
+import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+COCO80 = tuple(
+    "person,bicycle,car,motorcycle,airplane,bus,train,truck,boat,traffic light,"
+    "fire hydrant,stop sign,parking meter,bench,bird,cat,dog,horse,sheep,cow,"
+    "elephant,bear,zebra,giraffe,backpack,umbrella,handbag,tie,suitcase,frisbee,"
+    "skis,snowboard,sports ball,kite,baseball bat,baseball glove,skateboard,"
+    "surfboard,tennis racket,bottle,wine glass,cup,fork,knife,spoon,bowl,banana,"
+    "apple,sandwich,orange,broccoli,carrot,hot dog,pizza,donut,cake,chair,couch,"
+    "potted plant,bed,dining table,toilet,tv,laptop,mouse,remote,keyboard,"
+    "cell phone,microwave,oven,toaster,sink,refrigerator,book,clock,vase,scissors,"
+    "teddy bear,hair drier,toothbrush".split(",")
+)
 
 
 @dataclass
@@ -47,8 +62,8 @@ class ObjectDetection:
 class ObjectDetector:
     """Detects objects in RGB images and computes their 3D positions.
 
-    Uses the boosteros Detection API when available, with a fallback
-    to simple color/shape-based detection for development.
+    Uses the optional BoosterOS API when present, otherwise OpenCV DNN with a
+    local YOLOv8 COCO model. No network access occurs in the policy loop.
     """
 
     def __init__(
@@ -56,17 +71,23 @@ class ObjectDetector:
         confidence_threshold: float = 0.5,
         depth_threshold_min: float = 0.2,
         depth_threshold_max: float = 5.0,
+        model_path: str | Path | None = None,
     ):
         self.confidence_threshold = confidence_threshold
         self.depth_threshold_min = depth_threshold_min
         self.depth_threshold_max = depth_threshold_max
         self._detection_api = None
+        self._net = None
+        self.model_path = Path(
+            model_path
+            or os.getenv("NERO_OBJECT_MODEL", "config/yolov8n.onnx")
+        )
         self._initialized = False
 
     def initialize(self) -> bool:
         """Initialize detection API.
 
-        Returns True if the boosteros Detection API is available.
+        Returns True if either supported inference backend is available.
         """
         try:
             from boosteros.brain import Detection
@@ -76,9 +97,20 @@ class ObjectDetector:
             logger.info("Detection API initialized")
             return True
         except ImportError:
-            logger.warning("boosteros[brain] not available, using fallback detection")
-            self._initialized = False
-            return False
+            if not self.model_path.is_file():
+                logger.error(
+                    "Object model missing: %s (run scripts/setup_object_detector.sh)",
+                    self.model_path,
+                )
+                return False
+            try:
+                self._net = cv2.dnn.readNetFromONNX(str(self.model_path))
+            except cv2.error as exc:
+                logger.error("Could not load object model %s: %s", self.model_path, exc)
+                return False
+            self._initialized = True
+            logger.info("OpenCV YOLO object detector initialized from %s", self.model_path)
+            return True
 
     def detect(
         self,
@@ -98,8 +130,9 @@ class ObjectDetector:
         """
         if self._initialized and self._detection_api is not None:
             return self._detect_with_api(rgb, depth, camera_info)
-        else:
-            return self._detect_fallback(rgb, depth, camera_info)
+        if self._net is not None:
+            return self._detect_yolo(rgb, depth, camera_info)
+        return []
 
     def _detect_with_api(
         self,
@@ -143,7 +176,7 @@ class ObjectDetector:
             return detections
         except Exception as e:
             logger.error(f"Detection API error: {e}")
-            return self._detect_fallback(rgb, depth, camera_info)
+            return []
 
     def _detect_fallback(
         self,
@@ -159,6 +192,81 @@ class ObjectDetector:
         # Return empty list - no detection without proper API
         logger.debug("Fallback detection: no objects detected")
         return []
+
+    def _detect_yolo(
+        self,
+        rgb: np.ndarray,
+        depth: Optional[np.ndarray],
+        camera_info=None,
+    ) -> list[ObjectDetection]:
+        """Run an Ultralytics YOLOv8 ONNX export with OpenCV DNN."""
+        if self._net is None:
+            return []
+        image = np.asarray(rgb)
+        height, width = image.shape[:2]
+        size = 640
+        scale = min(size / width, size / height)
+        resized_w, resized_h = int(round(width * scale)), int(round(height * scale))
+        resized = cv2.resize(image, (resized_w, resized_h))
+        canvas = np.full((size, size, 3), 114, dtype=np.uint8)
+        pad_x, pad_y = (size - resized_w) // 2, (size - resized_h) // 2
+        canvas[pad_y : pad_y + resized_h, pad_x : pad_x + resized_w] = resized
+        blob = cv2.dnn.blobFromImage(
+            canvas, 1.0 / 255.0, (size, size), swapRB=True, crop=False
+        )
+        self._net.setInput(blob)
+        output = np.asarray(self._net.forward()).squeeze()
+        if output.ndim == 1 and output.size == 4 + len(COCO80):
+            output = output.reshape(4 + len(COCO80), 1)
+        if output.ndim != 2:
+            raise RuntimeError(f"unexpected YOLO output shape: {output.shape}")
+        if output.shape[0] == 4 + len(COCO80):
+            output = output.T
+
+        boxes: list[list[int]] = []
+        scores: list[float] = []
+        class_ids: list[int] = []
+        for row in output:
+            class_scores = row[4 : 4 + len(COCO80)]
+            class_id = int(np.argmax(class_scores))
+            score = float(class_scores[class_id])
+            if score < self.confidence_threshold:
+                continue
+            cx, cy, box_w, box_h = (float(value) for value in row[:4])
+            x = int(round((cx - box_w / 2 - pad_x) / scale))
+            y = int(round((cy - box_h / 2 - pad_y) / scale))
+            w = int(round(box_w / scale))
+            h = int(round(box_h / scale))
+            x, y = max(0, x), max(0, y)
+            w, h = min(width - x, w), min(height - y, h)
+            if w <= 0 or h <= 0:
+                continue
+            boxes.append([x, y, w, h])
+            scores.append(score)
+            class_ids.append(class_id)
+
+        indices = cv2.dnn.NMSBoxes(
+            boxes, scores, self.confidence_threshold, 0.45
+        )
+        detections = []
+        for index in np.asarray(indices).reshape(-1) if len(indices) else []:
+            x, y, w, h = boxes[int(index)]
+            bbox = (x, y, x + w, y + h)
+            position = (
+                self._compute_3d_position(bbox, depth, camera_info)
+                if depth is not None
+                else None
+            )
+            detections.append(
+                ObjectDetection(
+                    label=COCO80[class_ids[int(index)]],
+                    confidence=scores[int(index)],
+                    bbox=bbox,
+                    position_3d=position,
+                    distance=float(np.linalg.norm(position)) if position is not None else 0.0,
+                )
+            )
+        return detections
 
     def find_object(
         self,
@@ -231,10 +339,11 @@ class ObjectDetector:
 
         # Get camera intrinsics
         if camera_info is not None:
-            fx = camera_info.k[0, 0]
-            fy = camera_info.k[1, 1]
-            cx_cam = camera_info.k[0, 2]
-            cy_cam = camera_info.k[1, 2]
+            matrix = np.asarray(camera_info.k, dtype=float).reshape(3, 3)
+            fx = matrix[0, 0]
+            fy = matrix[1, 1]
+            cx_cam = matrix[0, 2]
+            cy_cam = matrix[1, 2]
         else:
             # Default intrinsics for K1
             fx = fy = 216.5

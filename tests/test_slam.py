@@ -94,6 +94,9 @@ def test_stationary_imu_noise_estimator_returns_finite_positive_terms():
 
 def test_sensor_frequency_uses_live_timestamps():
     assert estimate_frequency([index / 25 for index in range(20)], "camera") == pytest.approx(25)
+    # K1 delivery alternates 30 Hz and 15 Hz intervals but averages 20 Hz.
+    alternating = np.cumsum([0.0] + [1 / 30, 1 / 15] * 10).tolist()
+    assert estimate_frequency(alternating, "K1 camera") == pytest.approx(20)
 
 
 def test_booster_device_info_body_is_unwrapped():

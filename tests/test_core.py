@@ -6,7 +6,7 @@ import numpy as np
 
 import nero.agents as agents
 from nero.navigation.controller import VelocityController
-from nero.perception.object_detector import ObjectDetection, ObjectDetector
+from nero.perception.object_detector import COCO80, ObjectDetection, ObjectDetector
 from nero.robot import RobotInterface
 from nero.interaction import (
     K1VoiceCommandSource,
@@ -78,6 +78,50 @@ def test_robot_image_helpers_normalize_k1_images():
         header=SimpleNamespace(stamp=SimpleNamespace(sec=12, nanosec=500_000_000))
     )
     assert RobotInterface.image_timestamp(stamped) == 12.5
+
+
+def test_robot_image_helpers_decode_production_k1_encodings():
+    depth = np.arange(12, dtype=np.uint16).reshape(3, 4)
+    depth_message = SimpleNamespace(
+        encoding="mono16", height=3, width=4, data=depth.tobytes()
+    )
+    np.testing.assert_array_equal(RobotInterface.image_to_array(depth_message), depth)
+
+    # Neutral NV12 encodes a gray image and exercises the K1's exact wire layout.
+    nv12 = np.concatenate(
+        [np.full(4 * 4, 128, np.uint8), np.full(4 * 2, 128, np.uint8)]
+    )
+    rgb_message = SimpleNamespace(
+        encoding="nv12", height=4, width=4, data=nv12.tobytes()
+    )
+    decoded = RobotInterface.image_to_array(rgb_message)
+    assert decoded.shape == (4, 4, 3)
+    assert decoded.dtype == np.uint8
+    assert np.max(decoded) - np.min(decoded) == 0
+
+
+def test_opencv_yolo_backend_decodes_coco_detection_with_depth():
+    class FakeNet:
+        def setInput(self, blob):
+            assert blob.shape == (1, 3, 640, 640)
+
+        def forward(self):
+            output = np.zeros((1, 84, 1), dtype=np.float32)
+            output[0, :4, 0] = [320, 320, 200, 100]
+            output[0, 4 + COCO80.index("chair"), 0] = 0.9
+            return output
+
+    detector = ObjectDetector(confidence_threshold=0.5)
+    detector._net = FakeNet()
+    detections = detector.detect(
+        np.zeros((640, 640, 3), dtype=np.uint8),
+        np.full((640, 640), 1000, dtype=np.uint16),
+    )
+    assert len(COCO80) == 80
+    assert len(detections) == 1
+    assert detections[0].label == "chair"
+    assert detections[0].bbox == (220, 270, 420, 370)
+    assert detections[0].position_3d[2] == 1.0
 
 
 def test_hardware_agent_clis_use_k1_sensors_implicitly(monkeypatch):

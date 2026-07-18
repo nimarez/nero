@@ -110,7 +110,8 @@ def run_agent(
 
             # Read the K1's built-in RGB-D stream.
             try:
-                state = robot.get_state(include_images=True)
+                peek_state = getattr(robot, "peek_state", robot.get_state)
+                state = peek_state(include_images=True)
                 frame = robot.image_to_array(state.rgb)
                 sensor_timestamp = robot.image_timestamp(state.rgb)
                 if telemetry is not None:

@@ -31,14 +31,19 @@ sudo apt-get install libopengl0 libglx0 libglu1-mesa libglib2.0-0 libsm6 libice6
 Run these commands on the robot, with the robot stationary during calibration:
 
 ```bash
+./scripts/setup_booster_studio.sh
+./scripts/setup_object_detector.sh
 uv run nero-setup-orbslam
 uv run nero-k1-calibration --iface lo --duration 60
 ```
 
-The first command downloads and verifies the vocabulary from the official
-ORB-SLAM3 repository. The second reads the live camera resolution, intrinsics,
-delivered frame rate, depth scale, and factory frame geometry from the K1, then
-measures IMU frequency and estimates noise from the stationary sample.
+The first command creates the robot's uv environment with its preinstalled ROS 2
+packages visible. The second downloads and checksum-verifies the COCO object
+detector. The remaining commands verify the ORB vocabulary and read the live
+camera resolution, intrinsics, synchronized RGB-D rate, and 500 Hz low-state IMU,
+then estimate inertial noise from the stationary sample. Firmware without the
+optional camera-metadata RPC uses the production ROS camera calibration plus the
+nominal K1 Geek camera mount, and records that provenance in the output.
 It produces robot-specific files under `config/`; these are intentionally ignored
 by git. Set `BOOSTER_NET_IF` if DDS uses an interface other than `lo`.
 
@@ -61,8 +66,9 @@ uv run nero-k1-calibration --iface lo --duration 60
 uv run nero-setup-orbslam
 ```
 
-The SLAM wrapper subscribes to the K1 IMU itself and synchronizes samples to each
-RGB-D frame. A native inertial frame without IMU samples is marked lost rather
+The physical K1 adapter reads the official low-state IMU and synchronizes samples
+to each exact timestamp-paired RGB-D frame. A native inertial frame without IMU
+samples is marked lost rather
 than silently processed as visual-only SLAM. Linux/K1 initialization is strict:
 missing native libraries, vocabulary, or robot calibration is an error. The
 RGB-D odometry fallback is automatic only on non-Linux development machines.

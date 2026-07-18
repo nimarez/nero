@@ -131,7 +131,11 @@ class NavigationPolicy:
         if not self._is_sim:
             if not HAS_BOOSTEROS:
                 raise RuntimeError("navigation dependencies are unavailable")
-            self.slam = ORBSLAM3Node(config=slam_config, **(slam_options or {}))
+            options = dict(slam_options or {})
+            # Physical and Studio adapters already synchronize IMU samples to
+            # each RGB-D frame. A second SDK subscriber would race that source.
+            options.setdefault("start_imu_source", False)
+            self.slam = ORBSLAM3Node(config=slam_config, **options)
             self.pose_estimator = PoseEstimator()
             self.depth_processor = DepthProcessor()
             self.safety = SafetyMonitor(**(safety_config or {}))
@@ -186,7 +190,10 @@ class NavigationPolicy:
         elif HAS_BOOSTEROS and self.slam:
             self.slam.initialize()
 
-        self.object_detector.initialize()
+        if not self._is_sim and not self.object_detector.initialize():
+            raise RuntimeError(
+                "No live object detector is available; install the configured ONNX model"
+            )
         if self.safety:
             self.safety.reset()
         if self.pose_estimator:

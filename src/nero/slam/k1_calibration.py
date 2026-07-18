@@ -16,7 +16,9 @@ from scipy.spatial.transform import Rotation
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CAMERA_INFO_TOPIC = "rt/booster/camera/color/camera_info"
+DEFAULT_CAMERA_INFO_TOPIC = "/boostercamera/head/rgb/camera_info"
+DEFAULT_RGB_TOPIC = "/boostercamera/head/rgb"
+DEFAULT_DEPTH_TOPIC = "/boostercamera/head/depth"
 K1_GEEK_RESOLUTION = (544, 448)
 K1_GEEK_FPS = 20.0
 K1_GEEK_FOV_DEGREES = (105.0, 94.0)
@@ -164,11 +166,13 @@ class K1Calibration:
             raise ValueError(
                 f"K1 Geek RGB must be {K1_GEEK_RESOLUTION[0]}x{K1_GEEK_RESOLUTION[1]}"
             )
-        if not np.isclose(self.camera_fps, K1_GEEK_FPS):
+        if not np.isclose(self.camera_fps, K1_GEEK_FPS, rtol=0.05):
             raise ValueError(f"K1 Geek RGB must deliver {K1_GEEK_FPS:g} fps")
         if self.depth_width != self.width or self.depth_height != self.height:
             raise ValueError("K1 Geek depth resolution metadata is missing or mismatched")
-        if self.depth_fps is None or not np.isclose(self.depth_fps, K1_GEEK_FPS):
+        if self.depth_fps is None or not np.isclose(
+            self.depth_fps, K1_GEEK_FPS, rtol=0.05
+        ):
             raise ValueError("K1 Geek depth must deliver 20 fps")
         if self.rgb_fov_degrees != list(K1_GEEK_FOV_DEGREES):
             raise ValueError("K1 Geek RGB FOV must be 105x94 degrees")
@@ -296,7 +300,10 @@ def estimate_frequency(timestamps: list[float], sensor: str) -> float:
     intervals = intervals[np.isfinite(intervals) & (intervals > 0)]
     if len(intervals) < 9:
         raise ValueError(f"{sensor} timestamps are not strictly increasing")
-    period = float(np.median(intervals))
+    # Some K1 camera pipelines alternate 33 ms and 67 ms delivery intervals.
+    # Count over the complete span measures their real average rate; a median
+    # would incorrectly report 30 Hz for that 20 Hz stream.
+    period = float((values[-1] - values[0]) / (len(values) - 1))
     if period <= 0 or not np.isfinite(period):
         raise ValueError(f"cannot estimate {sensor} frequency")
     return 1.0 / period
@@ -317,7 +324,14 @@ def probe_k1(
     camera_client.InitWithName(robot_name) if robot_name else camera_client.Init()
     loco_client.InitWithName(robot_name) if robot_name else loco_client.Init()
 
-    camera_catalog = _device_body(json.loads(camera_client.GetCameras().to_json_str()))
+    try:
+        camera_catalog = _device_body(json.loads(camera_client.GetCameras().to_json_str()))
+    except Exception as exc:
+        logger.warning(
+            "Camera metadata RPC is unavailable (%s); probing production ROS topics",
+            exc,
+        )
+        return probe_k1_ros(duration=duration, camera_info_topic=camera_info_topic)
     sensor_catalog = _device_body(json.loads(loco_client.GetSensors().to_json_str()))
     cameras = (
         camera_catalog if isinstance(camera_catalog, list) else camera_catalog.get("cameras", [])
@@ -422,6 +436,128 @@ def probe_k1(
         depth_accuracy_at_1m=0.03,
         depth_min_m=K1_GEEK_DEPTH_RANGE_M[0],
         depth_max_m=K1_GEEK_DEPTH_RANGE_M[1],
+        **noise,
+    )
+
+
+def probe_k1_ros(
+    *,
+    duration: float,
+    camera_info_topic: str = DEFAULT_CAMERA_INFO_TOPIC,
+    rgb_topic: str = DEFAULT_RGB_TOPIC,
+    depth_topic: str = DEFAULT_DEPTH_TOPIC,
+) -> K1Calibration:
+    """Calibrate from the ROS streams shipped on production K1 firmware.
+
+    Production firmware 1.5 exposes calibrated intrinsics and synchronized
+    RGB-D frames via ROS even when the optional CameraClient metadata RPC is
+    absent. The mount transform falls back to Booster's nominal K1 Geek model;
+    the output source field records that distinction explicitly.
+    """
+    try:
+        import rclpy
+        import booster_robotics_sdk_python as booster
+        from sensor_msgs.msg import CameraInfo, Image
+    except ImportError as exc:
+        raise RuntimeError("K1 ROS calibration requires ROS 2 sensor messages") from exc
+
+    owns_rclpy = not rclpy.ok()
+    if owns_rclpy:
+        rclpy.init(args=None)
+    node = rclpy.create_node("nero_k1_calibration")
+    qos = rclpy.qos.QoSProfile(
+        depth=200,
+        reliability=rclpy.qos.ReliabilityPolicy.RELIABLE,
+        history=rclpy.qos.HistoryPolicy.KEEP_LAST,
+    )
+    camera_info: dict[str, Any] = {}
+    rgb_timestamps: list[float] = []
+    depth_timestamps: list[float] = []
+    imu_samples: list[tuple[float, np.ndarray, np.ndarray]] = []
+
+    def on_info(message: Any) -> None:
+        camera_info.update(
+            frame=str(message.header.frame_id), width=int(message.width),
+            height=int(message.height), k=list(message.k), d=list(message.d),
+        )
+
+    def on_image(values: list[float]):
+        def callback(message: Any) -> None:
+            timestamp = _stamp_seconds(message.header.stamp)
+            if not values or timestamp > values[-1]:
+                values.append(timestamp)
+        return callback
+
+    def on_low_state(message: Any) -> None:
+        timestamp = time.time()
+        message = message.imu_state
+        if not imu_samples or timestamp > imu_samples[-1][0]:
+            imu_samples.append(
+                (
+                    timestamp,
+                    np.asarray(message.gyro, dtype=float),
+                    np.asarray(message.acc, dtype=float),
+                )
+            )
+
+    subscriptions = [
+        node.create_subscription(CameraInfo, camera_info_topic, on_info, qos),
+        node.create_subscription(Image, rgb_topic, on_image(rgb_timestamps), qos),
+        node.create_subscription(Image, depth_topic, on_image(depth_timestamps), qos),
+    ]
+    low_state_subscriber = booster.B1LowStateSubscriber(on_low_state)
+    low_state_subscriber.InitChannel()
+    try:
+        logger.info("Keep the K1 completely stationary for %.1f seconds", duration)
+        deadline = time.monotonic() + max(10.0, duration + 10.0)
+        capture_started: float | None = None
+        while time.monotonic() < deadline:
+            rclpy.spin_once(node, timeout_sec=0.05)
+            if camera_info and rgb_timestamps and depth_timestamps and imu_samples:
+                if capture_started is None:
+                    capture_started = time.monotonic()
+                if time.monotonic() - capture_started >= duration:
+                    break
+        missing = [
+            name for name, values in (
+                (camera_info_topic, camera_info), (rgb_topic, rgb_timestamps),
+                (depth_topic, depth_timestamps), ("K1 low-state IMU", imu_samples),
+            ) if not values
+        ]
+        if missing:
+            raise RuntimeError("no live K1 samples received from: " + ", ".join(missing))
+    finally:
+        low_state_subscriber.CloseChannel()
+        for subscription in subscriptions:
+            node.destroy_subscription(subscription)
+        node.destroy_node()
+        if owns_rclpy:
+            rclpy.shutdown()
+
+    noise = estimate_imu_noise(imu_samples)
+    rgb_fps = estimate_frequency(rgb_timestamps, "RGB camera")
+    depth_fps = estimate_frequency(depth_timestamps, "depth camera")
+    nominal_path = Path(__file__).resolve().parents[3] / "config/k1_geek_nominal_calibration.json"
+    nominal = K1Calibration.load(nominal_path)
+    return K1Calibration(
+        camera_frame=camera_info["frame"],
+        imu_frame="body_imu",
+        width=camera_info["width"], height=camera_info["height"],
+        camera_fps=rgb_fps,
+        camera_matrix=[float(value) for value in camera_info["k"]],
+        distortion=[float(value) for value in camera_info["d"]],
+        depth_map_factor=1000.0,
+        camera_rgb=False,
+        tbc=nominal.tbc,
+        source=(
+            "K1 production ROS intrinsics/rates + stationary IMU measurement; "
+            "nominal K1 Geek camera-to-body mount transform"
+        ),
+        shutter_type="global", rgb_fov_degrees=list(K1_GEEK_FOV_DEGREES),
+        depth_width=camera_info["width"], depth_height=camera_info["height"],
+        depth_fps=depth_fps, depth_fov_degrees=list(K1_GEEK_FOV_DEGREES),
+        depth_accuracy_at_1m=0.03,
+        depth_min_m=K1_GEEK_DEPTH_RANGE_M[0], depth_max_m=K1_GEEK_DEPTH_RANGE_M[1],
         **noise,
     )
 
