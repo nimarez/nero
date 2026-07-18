@@ -74,6 +74,7 @@ class K1Calibration:
     imu_frame: str
     width: int
     height: int
+    camera_fps: float
     camera_matrix: list[float]
     distortion: list[float]
     depth_map_factor: float
@@ -94,6 +95,7 @@ class K1Calibration:
         positive = {
             "width": self.width,
             "height": self.height,
+            "camera_fps": self.camera_fps,
             "depth_map_factor": self.depth_map_factor,
             "imu_frequency": self.imu_frequency,
             "imu_noise_gyro": self.imu_noise_gyro,
@@ -103,9 +105,7 @@ class K1Calibration:
         }
         invalid = [name for name, value in positive.items() if float(value) <= 0]
         if invalid:
-            raise ValueError(
-                f"invalid IMU_RGBD calibration fields: {', '.join(invalid)}"
-            )
+            raise ValueError(f"invalid IMU_RGBD calibration fields: {', '.join(invalid)}")
         if not np.all(np.isfinite(np.asarray(self.tbc, dtype=float))):
             raise ValueError("tbc contains non-finite values")
 
@@ -146,7 +146,7 @@ Camera1.p2: {_yaml_real(d[3])}
 Camera1.k3: {_yaml_real(d[4])}
 Camera.width: {self.width}
 Camera.height: {self.height}
-Camera.fps: 30
+Camera.fps: {_yaml_real(self.camera_fps)}
 Camera.RGB: {1 if self.camera_rgb else 0}
 Stereo.ThDepth: 40.0
 Stereo.b: 0.07732
@@ -204,19 +204,11 @@ def estimate_imu_noise(
     block_count = len(samples) // block_size
     if block_count < 2:
         raise ValueError("stationary capture is too short to estimate IMU bias walk")
-    gyro_means = (
-        gyro[: block_count * block_size].reshape(block_count, block_size, 3).mean(1)
-    )
-    acc_means = (
-        accel[: block_count * block_size].reshape(block_count, block_size, 3).mean(1)
-    )
+    gyro_means = gyro[: block_count * block_size].reshape(block_count, block_size, 3).mean(1)
+    acc_means = accel[: block_count * block_size].reshape(block_count, block_size, 3).mean(1)
     block_duration = block_size * dt
-    gyro_walk = float(
-        np.max(np.std(gyro_means, axis=0, ddof=1)) / np.sqrt(block_duration)
-    )
-    acc_walk = float(
-        np.max(np.std(acc_means, axis=0, ddof=1)) / np.sqrt(block_duration)
-    )
+    gyro_walk = float(np.max(np.std(gyro_means, axis=0, ddof=1)) / np.sqrt(block_duration))
+    acc_walk = float(np.max(np.std(acc_means, axis=0, ddof=1)) / np.sqrt(block_duration))
     epsilon = np.finfo(float).eps
     return {
         "imu_frequency": frequency,
@@ -227,6 +219,21 @@ def estimate_imu_noise(
     }
 
 
+def estimate_frequency(timestamps: list[float], sensor: str) -> float:
+    """Estimate a live sensor rate from monotonically increasing timestamps."""
+    if len(timestamps) < 10:
+        raise ValueError(f"at least 10 {sensor} timestamps are required")
+    values = np.asarray(timestamps, dtype=float)
+    intervals = np.diff(values)
+    intervals = intervals[np.isfinite(intervals) & (intervals > 0)]
+    if len(intervals) < 9:
+        raise ValueError(f"{sensor} timestamps are not strictly increasing")
+    period = float(np.median(intervals))
+    if period <= 0 or not np.isfinite(period):
+        raise ValueError(f"cannot estimate {sensor} frequency")
+    return 1.0 / period
+
+
 def probe_k1(
     *, iface: str, robot_name: str | None, duration: float, camera_info_topic: str
 ) -> K1Calibration:
@@ -234,9 +241,7 @@ def probe_k1(
     try:
         import booster_robotics_sdk_python as br
     except ImportError as exc:
-        raise RuntimeError(
-            "the official Booster Python SDK is only available on Linux"
-        ) from exc
+        raise RuntimeError("the official Booster Python SDK is only available on Linux") from exc
 
     br.ChannelFactory.Instance().Init(0, iface)
     camera_client = br.CameraClient()
@@ -247,9 +252,7 @@ def probe_k1(
     camera_catalog = _device_body(json.loads(camera_client.GetCameras().to_json_str()))
     sensor_catalog = _device_body(json.loads(loco_client.GetSensors().to_json_str()))
     cameras = (
-        camera_catalog
-        if isinstance(camera_catalog, list)
-        else camera_catalog.get("cameras", [])
+        camera_catalog if isinstance(camera_catalog, list) else camera_catalog.get("cameras", [])
     )
     if not cameras:
         raise RuntimeError(f"K1 returned no cameras: {camera_catalog}")
@@ -273,10 +276,16 @@ def probe_k1(
     imu = imus[0]
 
     camera_info: dict[str, Any] = {}
+    camera_timestamps: list[float] = []
     imu_samples: list[tuple[float, np.ndarray, np.ndarray]] = []
     info_event = threading.Event()
 
     def on_camera_info(message: Any) -> None:
+        # CameraInfo can be latched or use a different clock domain. Receipt
+        # intervals measure the delivered rate that ORB-SLAM actually sees.
+        timestamp = time.monotonic()
+        if not camera_timestamps or timestamp > camera_timestamps[-1]:
+            camera_timestamps.append(timestamp)
         camera_info.update(
             frame=str(message.header.frame_id),
             width=int(message.width),
@@ -307,36 +316,30 @@ def probe_k1(
         imu_subscriber.CloseChannel()
 
     noise = estimate_imu_noise(imu_samples)
+    camera_fps = estimate_frequency(camera_timestamps, "camera")
     extrinsics = camera.get("extrinsics", {})
     if not all(key in extrinsics for key in ("xyz", "rpy", "parent_frame")):
         raise RuntimeError(f"camera catalog has no usable factory extrinsics: {camera}")
     parent = str(extrinsics["parent_frame"]).lower()
     imu_mount = str(imu.get("mount_position", "body")).lower()
     parent_to_camera = _transform(extrinsics["xyz"], extrinsics["rpy"])
-    if ("body" in parent and "body" in imu_mount) or (
-        "head" in parent and "head" in imu_mount
-    ):
+    if ("body" in parent and "body" in imu_mount) or ("head" in parent and "head" in imu_mount):
         tbc = parent_to_camera
     elif "head" in parent and "body" in imu_mount:
-        body_to_head = _sdk_transform(
-            loco_client.GetFrameTransform(br.Frame.kBody, br.Frame.kHead)
-        )
+        body_to_head = _sdk_transform(loco_client.GetFrameTransform(br.Frame.kBody, br.Frame.kHead))
         tbc = body_to_head @ parent_to_camera
     else:
-        raise RuntimeError(
-            f"cannot compose camera parent {parent!r} with IMU mount {imu_mount!r}"
-        )
+        raise RuntimeError(f"cannot compose camera parent {parent!r} with IMU mount {imu_mount!r}")
 
     depth_scale = float(camera.get("depth_scale", 0.001))
     color = camera.get("color_encoding", {})
-    color_format = str(
-        color.get("format", "RGB8") if isinstance(color, dict) else color
-    ).upper()
+    color_format = str(color.get("format", "RGB8") if isinstance(color, dict) else color).upper()
     return K1Calibration(
         camera_frame=camera_info["frame"],
         imu_frame=str(imu.get("name", imu_mount)),
         width=camera_info["width"],
         height=camera_info["height"],
+        camera_fps=camera_fps,
         camera_matrix=[float(value) for value in camera_info["k"]],
         distortion=[float(value) for value in camera_info["d"]],
         depth_map_factor=1.0 / depth_scale,
@@ -347,23 +350,15 @@ def probe_k1(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Probe K1 calibration for ORB-SLAM3 IMU_RGBD"
-    )
-    parser.add_argument(
-        "--iface", default="lo", help="DDS interface; use lo when running on K1"
-    )
+    parser = argparse.ArgumentParser(description="Probe K1 calibration for ORB-SLAM3 IMU_RGBD")
+    parser.add_argument("--iface", default="lo", help="DDS interface; use lo when running on K1")
     parser.add_argument("--robot-name", default=None)
     parser.add_argument(
         "--duration", type=float, default=60.0, help="stationary IMU capture seconds"
     )
     parser.add_argument("--camera-info-topic", default=DEFAULT_CAMERA_INFO_TOPIC)
-    parser.add_argument(
-        "--output", type=Path, default=Path("config/k1_calibration.json")
-    )
-    parser.add_argument(
-        "--settings", type=Path, default=Path("config/k1_orbslam3_imu_rgbd.yaml")
-    )
+    parser.add_argument("--output", type=Path, default=Path("config/k1_calibration.json"))
+    parser.add_argument("--settings", type=Path, default=Path("config/k1_orbslam3_imu_rgbd.yaml"))
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
     calibration = probe_k1(

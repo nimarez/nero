@@ -9,7 +9,12 @@ import pytest
 
 from nero.mapping.mapping_policy import MappingConfig, MappingPolicy
 from nero.slam.imu_buffer import IMUBuffer, IMUMeasurement
-from nero.slam.k1_calibration import K1Calibration, _device_body, estimate_imu_noise
+from nero.slam.k1_calibration import (
+    K1Calibration,
+    _device_body,
+    estimate_frequency,
+    estimate_imu_noise,
+)
 from nero.slam.orb_slam3_node import ORBSLAM3Node
 import nero.slam.setup_orbslam as setup_orbslam
 from nero.slam.setup_orbslam import check_native_runtime
@@ -21,6 +26,7 @@ def calibration() -> K1Calibration:
         imu_frame="body_imu",
         width=320,
         height=240,
+        camera_fps=27.5,
         camera_matrix=[216.5, 0, 160, 0, 216.5, 120, 0, 0, 1],
         distortion=[0, 0, 0, 0, 0],
         depth_map_factor=1000.0,
@@ -59,6 +65,7 @@ def test_calibration_round_trip_and_orb_settings(tmp_path):
     assert 'File.version: "1.0"' in text
     assert "Camera1.cx: 160.0" in text
     assert "RGBD.DepthMapFactor: 1000.0" in text
+    assert "Camera.fps: 27.5" in text
     assert "IMU.Frequency: 200.0" in text
     assert "IMU.T_b_c1: !!opencv-matrix" in text
     assert "IMU.InsertKFsWhenLost: 0" in text
@@ -73,6 +80,10 @@ def test_stationary_imu_noise_estimator_returns_finite_positive_terms():
     result = estimate_imu_noise(samples)
     assert result["imu_frequency"] == pytest.approx(200)
     assert all(np.isfinite(value) and value > 0 for value in result.values())
+
+
+def test_sensor_frequency_uses_live_timestamps():
+    assert estimate_frequency([index / 25 for index in range(20)], "camera") == pytest.approx(25)
 
 
 def test_booster_device_info_body_is_unwrapped():
@@ -122,9 +133,7 @@ def native_node(tmp_path, monkeypatch):
     vocabulary.write_text("vocabulary")
     calibration_path = tmp_path / "calibration.json"
     calibration().save(calibration_path)
-    module = SimpleNamespace(
-        Sensor=SimpleNamespace(IMU_RGBD="IMU_RGBD"), System=FakeSystem
-    )
+    module = SimpleNamespace(Sensor=SimpleNamespace(IMU_RGBD="IMU_RGBD"), System=FakeSystem)
     monkeypatch.setitem(sys.modules, "orbslam3", module)
     node = ORBSLAM3Node(
         vocab_path=str(vocabulary),
@@ -168,9 +177,7 @@ def test_native_backend_refuses_frame_without_imu(tmp_path, monkeypatch):
     assert node._slam_system.calls == []
 
 
-def test_native_backend_does_not_resubmit_duplicate_camera_timestamp(
-    tmp_path, monkeypatch
-):
+def test_native_backend_does_not_resubmit_duplicate_camera_timestamp(tmp_path, monkeypatch):
     node = native_node(tmp_path, monkeypatch)
     rgb = np.zeros((240, 320, 3), np.uint8)
     depth = np.ones((240, 320), np.uint16)
@@ -264,9 +271,7 @@ def test_vocabulary_installer_verifies_and_extracts_atomically(tmp_path, monkeyp
         "urlopen",
         lambda *args, **kwargs: Response(),
     )
-    monkeypatch.setattr(
-        setup_orbslam, "VOCAB_ARCHIVE_SHA256", hashlib.sha256(archive).hexdigest()
-    )
+    monkeypatch.setattr(setup_orbslam, "VOCAB_ARCHIVE_SHA256", hashlib.sha256(archive).hexdigest())
     destination = tmp_path / "nested" / "ORBvoc.txt"
     assert setup_orbslam.install_vocabulary(destination) == destination.resolve()
     assert destination.read_bytes() == payload

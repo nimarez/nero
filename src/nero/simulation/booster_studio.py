@@ -21,7 +21,7 @@ from scipy.spatial.transform import Rotation
 
 from nero.robot import RobotState
 from nero.perception.object_detector import ObjectDetection, ObjectDetector
-from nero.slam.k1_calibration import K1Calibration
+from nero.slam.k1_calibration import K1Calibration, estimate_frequency
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +95,7 @@ class BoosterStudioRobotInterface:
         self._imu: Any = None
         self._pose = np.zeros(3, dtype=float)
         self._imu_samples: list[tuple[float, ...]] = []
+        self._rgb_timestamps: list[float] = []
         self._detections: list[ObjectDetection] = []
         self._last_frame_timestamp: float | None = None
         self._last_frame_samples: list[tuple[float, ...]] = []
@@ -117,22 +118,13 @@ class BoosterStudioRobotInterface:
             else BoosterStudioTopics.IMU_CANDIDATES
         )
         self._subscriptions = [
-            self._node.create_subscription(
-                CompressedImage, self._topics.rgb, self._on_rgb, 10
-            ),
-            self._node.create_subscription(
-                Image, self._topics.depth, self._on_depth, 10
-            ),
+            self._node.create_subscription(CompressedImage, self._topics.rgb, self._on_rgb, 10),
+            self._node.create_subscription(Image, self._topics.depth, self._on_depth, 10),
             self._node.create_subscription(
                 CameraInfo, self._topics.camera_info, self._on_camera_info, 10
             ),
-            *(
-                self._node.create_subscription(Imu, topic, self._on_imu, 50)
-                for topic in imu_topics
-            ),
-            self._node.create_subscription(
-                Pose2D, self._topics.pose, self._on_pose, 10
-            ),
+            *(self._node.create_subscription(Imu, topic, self._on_imu, 50) for topic in imu_topics),
+            self._node.create_subscription(Pose2D, self._topics.pose, self._on_pose, 10),
             self._node.create_subscription(
                 Detection2DArray,
                 self._topics.detections,
@@ -163,10 +155,12 @@ class BoosterStudioRobotInterface:
         image = cv2.imdecode(np.frombuffer(message.data, np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             return
+        timestamp = time.monotonic()
         with self._ready:
-            self._rgb = SimpleNamespace(
-                data=image, header=message.header, nero_timestamp=time.monotonic()
-            )
+            self._rgb = SimpleNamespace(data=image, header=message.header, nero_timestamp=timestamp)
+            self._rgb_timestamps.append(timestamp)
+            if len(self._rgb_timestamps) > 1000:
+                del self._rgb_timestamps[:-500]
             self._ready.notify_all()
 
     def _on_depth(self, message: Any) -> None:
@@ -291,8 +285,39 @@ class BoosterStudioRobotInterface:
                         "Booster Studio sensor timeout; missing: " + ", ".join(missing)
                     )
                 self._ready.wait(remaining)
+            expected_shape = (self._camera_info.height, self._camera_info.width)
+            if self._rgb.data.shape[:2] != expected_shape:
+                raise RuntimeError(
+                    "Booster Studio RGB dimensions do not match CameraInfo: "
+                    f"{self._rgb.data.shape[:2]} != {expected_shape}"
+                )
+            if self._depth.data.shape != expected_shape:
+                raise RuntimeError(
+                    "Booster Studio depth dimensions do not match CameraInfo: "
+                    f"{self._depth.data.shape} != {expected_shape}"
+                )
+            if self._depth.data.dtype != np.uint16:
+                raise RuntimeError(
+                    "Booster Studio K1 depth must be 16-bit millimetres, got "
+                    f"{self._depth.data.dtype}"
+                )
         self.set_velocity(0.0, 0.0, 0.0)
         self._initialized = True
+
+    def measure_sensor_rates(self, duration: float = 2.0) -> tuple[float, float]:
+        """Measure rendered camera and IMU rates instead of assuming target rates."""
+        start = time.monotonic()
+        with self._ready:
+            self._ready.wait_for(
+                lambda: time.monotonic() >= start + duration,
+                timeout=duration + 0.5,
+            )
+            rgb_times = [value for value in self._rgb_timestamps if value >= start]
+            imu_times = [sample[6] for sample in self._imu_samples if sample[6] >= start]
+        return (
+            estimate_frequency(rgb_times, "simulated camera"),
+            estimate_frequency(imu_times, "simulated IMU"),
+        )
 
     @property
     def robot_info(self) -> Any:
@@ -308,8 +333,7 @@ class BoosterStudioRobotInterface:
                     sample
                     for sample in self._imu_samples
                     if (
-                        self._last_frame_timestamp is None
-                        or sample[6] > self._last_frame_timestamp
+                        self._last_frame_timestamp is None or sample[6] > self._last_frame_timestamp
                     )
                     and sample[6] <= frame_timestamp
                 ]
@@ -339,9 +363,7 @@ class BoosterStudioRobotInterface:
 
     @staticmethod
     def image_timestamp(image: Any) -> float:
-        return float(
-            getattr(image, "nero_timestamp", BoosterStudioRobotInterface._stamp(image))
-        )
+        return float(getattr(image, "nero_timestamp", BoosterStudioRobotInterface._stamp(image)))
 
     def speak(self, text: str) -> None:
         print(f"\n[SIMULATED K1 SPEAKER] {text}", flush=True)
@@ -367,24 +389,29 @@ class BoosterStudioRobotInterface:
             self._node.destroy_node()
 
 
-def write_booster_studio_calibration(camera_info: Any, path: Path) -> K1Calibration:
+def write_booster_studio_calibration(
+    camera_info: Any,
+    path: Path,
+    *,
+    camera_fps: float,
+    imu_frequency: float,
+) -> K1Calibration:
     """Create IMU_RGBD settings from live intrinsics and the K1 simulator MJCF."""
     body_to_camera = np.eye(4)
-    body_to_camera[:3, :3] = Rotation.from_euler(
-        "xyz", [0.0, -1.5708, -1.5708]
-    ).as_matrix()
+    body_to_camera[:3, :3] = Rotation.from_euler("xyz", [0.0, -1.5708, -1.5708]).as_matrix()
     body_to_camera[:3, 3] = [0.0669, 0.0, 0.3559]
     calibration = K1Calibration(
         camera_frame=str(camera_info.header.frame_id),
         imu_frame="imu_link",
         width=int(camera_info.width),
         height=int(camera_info.height),
+        camera_fps=camera_fps,
         camera_matrix=np.asarray(camera_info.k).reshape(-1).tolist(),
         distortion=list(camera_info.d),
         depth_map_factor=1000.0,
         camera_rgb=False,
         tbc=body_to_camera.tolist(),
-        imu_frequency=200.0,
+        imu_frequency=imu_frequency,
         imu_noise_gyro=0.005,
         imu_noise_acc=0.01,
         imu_gyro_walk=0.0001,

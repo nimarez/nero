@@ -136,10 +136,14 @@ def test_booster_studio_calibration_uses_live_intrinsics(tmp_path):
         d=[0.0] * 5,
     )
     output = tmp_path / "calibration.json"
-    calibration = write_booster_studio_calibration(camera_info, output)
+    calibration = write_booster_studio_calibration(
+        camera_info, output, camera_fps=25.0, imu_frequency=424.0
+    )
     assert output.is_file()
     assert calibration.camera_rgb is False
     assert calibration.imu_frame == "imu_link"
+    assert calibration.camera_fps == 25.0
+    assert calibration.imu_frequency == 424.0
     assert calibration.camera_matrix[0] == 216.5
     np.testing.assert_allclose(np.asarray(calibration.tbc)[:3, 3], [0.0669, 0, 0.3559])
 
@@ -150,9 +154,7 @@ def test_booster_studio_image_helpers():
         data=np.arange(12).reshape(2, 2, 3),
         header=SimpleNamespace(stamp=stamp),
     )
-    np.testing.assert_array_equal(
-        BoosterStudioRobotInterface.image_to_array(image), image.data
-    )
+    np.testing.assert_array_equal(BoosterStudioRobotInterface.image_to_array(image), image.data)
     assert BoosterStudioRobotInterface.image_timestamp(image) == 4.25
 
 
@@ -171,9 +173,7 @@ def test_booster_studio_detection_coordinates_feed_shared_controller():
         size_x=20.0,
         size_y=10.0,
     )
-    robot._on_detections(
-        SimpleNamespace(detections=[SimpleNamespace(results=[result], bbox=bbox)])
-    )
+    robot._on_detections(SimpleNamespace(detections=[SimpleNamespace(results=[result], bbox=bbox)]))
     detection = robot.get_detections()[0]
     assert detection.label == "Ball"
     assert detection.bbox == (90, 75, 110, 85)
@@ -202,9 +202,7 @@ def test_living_room_scene_is_well_formed_and_has_collision_content():
     assert len(root.findall(".//worldbody/geom[@type='box']")) == 3
 
     extension_root = ET.parse(SCENE_DIR / "living_room_K1.extensions.xml").getroot()
-    extension_names = {
-        item.attrib["name"] for item in extension_root.findall("extension_process")
-    }
+    extension_names = {item.attrib["name"] for item in extension_root.findall("extension_process")}
     assert extension_names == {
         "detection_extension",
         "rgb_publisher_extension",
@@ -233,9 +231,7 @@ def test_room_activation_is_reversible_and_does_not_overwrite_backup(tmp_path):
 
     install_room(sim_root, activate=True)
     scene_backup = default_scene.with_name(default_scene.name + BACKUP_SUFFIX)
-    extensions_backup = default_extensions.with_name(
-        default_extensions.name + BACKUP_SUFFIX
-    )
+    extensions_backup = default_extensions.with_name(default_extensions.name + BACKUP_SUFFIX)
     assert scene_backup.read_text() == original_scene
     assert extensions_backup.read_text() == original_extensions
     assert "Nero living room K1" in default_scene.read_text()

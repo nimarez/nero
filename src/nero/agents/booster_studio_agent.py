@@ -54,11 +54,19 @@ def main() -> None:
     settings_path = Path("config/booster_studio_k1_imu_rgbd.yaml")
     try:
         robot.initialize()
+        camera_fps, imu_frequency = robot.measure_sensor_rates()
         calibration = write_booster_studio_calibration(
-            robot.get_camera_info(), calibration_path
+            robot.get_camera_info(),
+            calibration_path,
+            camera_fps=camera_fps,
+            imu_frequency=imu_frequency,
         )
         calibration.write_orbslam_settings(settings_path)
-        logger.info("Booster Studio RGB-D, CameraInfo, IMU, and pose streams are live")
+        logger.info(
+            "Booster Studio RGB-D %.1f Hz and IMU %.1f Hz streams are live",
+            camera_fps,
+            imu_frequency,
+        )
         run_agent(
             robot,
             args,

@@ -36,8 +36,9 @@ uv run nero-k1-calibration --iface lo --duration 60
 ```
 
 The first command downloads and verifies the vocabulary from the official
-ORB-SLAM3 repository. The second reads the live camera intrinsics and factory
-frame geometry from the K1, then estimates IMU noise from the stationary sample.
+ORB-SLAM3 repository. The second reads the live camera resolution, intrinsics,
+delivered frame rate, depth scale, and factory frame geometry from the K1, then
+measures IMU frequency and estimates noise from the stationary sample.
 It produces robot-specific files under `config/`; these are intentionally ignored
 by git. Set `BOOSTER_NET_IF` if DDS uses an interface other than `lo`.
 
@@ -85,6 +86,9 @@ the simulator's live RGB, 16-bit depth, CameraInfo, IMU, and localization topics
 synchronizes RGB-D and IMU on a shared receipt-time clock, derives simulator
 calibration from live intrinsics plus the K1 MJCF camera mount, and sends velocity
 through the official Booster locomotion client on `127.0.0.1`.
+It verifies that RGB, depth, and CameraInfo dimensions agree, requires the K1
+simulator's 16-bit millimetre depth format, and measures rendered camera and IMU
+rates before generating the ORB-SLAM settings.
 
 The default single-robot topics match Booster Studio's installed K1 simulator.
 For a named/multi-robot scene, override them with `--rgb-topic`, `--depth-topic`,
@@ -106,9 +110,10 @@ uv run nero-setup-booster-room --activate
 ```
 
 Activation also changes the disposable simulator from its default shared-memory
-motion transport to its supported ROS transport. This makes the simulated K1's
-high-rate IMU available to Nero as `booster/ros2_k2_imu/robot1`; the original
-container setting is backed up and restored together with the scene.
+motion transport to its supported ROS transport. Nero automatically consumes the
+K1 IMU from `/imu/data` or the legacy robot-specific topic, depending on which
+one the installed Studio version publishes. The original container setting is
+backed up and restored together with the scene.
 
 Then restart the virtual robot, or switch away from and back to the empty K1
 scene. The room contains walls, a couch, chairs, a coffee table, cabinets,
