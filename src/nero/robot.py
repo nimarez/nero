@@ -185,7 +185,3 @@ class RobotInterface:
         """Clean up resources."""
         self.stop()
         logger.info("Robot interface closed")
-
-
-# Alias for backward compatibility with map_nav_agent
-RobotWrapper = RobotInterface

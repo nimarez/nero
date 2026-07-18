@@ -24,7 +24,7 @@ from nero.navigation import (
     MapNavState,
     MapNavigationPolicy,
 )
-from nero.robot import RobotWrapper
+from nero.robot import RobotInterface
 from nero.utils.camera_stream import CameraStream
 
 logger = logging.getLogger(__name__)
@@ -115,7 +115,7 @@ def main() -> None:
 
     # Initialize robot
     try:
-        robot = RobotWrapper()
+        robot = RobotInterface()
         robot.initialize()
         logger.info("Robot connected and initialized in walk mode")
     except Exception as e:
