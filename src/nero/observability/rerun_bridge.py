@@ -20,6 +20,30 @@ from .topics import ObservabilityTopics
 logger = logging.getLogger(__name__)
 
 
+def create_default_blueprint(rrb: Any) -> Any:
+    """Create a deterministic dashboard with the live camera visible immediately."""
+    camera = "world/robot/camera"
+    return rrb.Blueprint(
+        rrb.Grid(
+            rrb.Spatial2DView(
+                origin=camera,
+                contents=[f"{camera}/rgb", f"{camera}/rgb/detections"],
+                name="K1 RGB",
+            ),
+            rrb.Spatial2DView(
+                origin=camera,
+                contents=[f"{camera}/depth"],
+                name="K1 Depth",
+            ),
+            rrb.Spatial3DView(origin="world", name="Robot, SLAM, and Goals"),
+            rrb.TimeSeriesView(origin="metrics", name="Sensors and Commands"),
+            grid_columns=2,
+        ),
+        auto_views=False,
+        collapse_panels=False,
+    )
+
+
 def image_message_to_array(message: Any) -> np.ndarray:
     encoding = str(message.encoding).lower()
     if encoding in {"bgr8", "rgb8"}:
@@ -363,6 +387,7 @@ def main() -> None:
         return
     try:
         import rerun as rr
+        import rerun.blueprint as rrb
         import rclpy
         from rclpy.executors import ExternalShutdownException
     except ImportError as exc:
@@ -382,6 +407,11 @@ def main() -> None:
         calibration_path = Path("config/k1_geek_nominal_calibration.json")
     calibration = K1Calibration.load(calibration_path)
     bridge = RerunRosBridge(recording, body_to_camera=np.asarray(calibration.tbc))
+    recording.send_blueprint(
+        create_default_blueprint(rrb),
+        make_active=True,
+        make_default=True,
+    )
     logger.info(
         "Rerun bridge subscribed to: %s",
         ", ".join(bridge.subscription_topics),
