@@ -6,7 +6,9 @@ import logging
 import os
 import queue
 import re
+import socket
 import threading
+from pathlib import Path
 from typing import Any, Callable, Protocol
 
 logger = logging.getLogger(__name__)
@@ -46,6 +48,97 @@ class TerminalCommandSource:
 
     def close(self) -> None:
         return None
+
+
+class UnixSocketCommandSource:
+    """Receive deliberate object commands over a robot-local Unix socket."""
+
+    accepts_bare_object_names = True
+
+    def __init__(self, path: str | Path = "/tmp/nero-navigation.sock") -> None:
+        self.path = Path(path)
+        self._server: socket.socket | None = None
+        self._client: socket.socket | None = None
+        self._closed = False
+
+    def _open_server(self) -> None:
+        if self._server is not None:
+            return
+        if self.path.exists():
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                probe.connect(str(self.path))
+            except OSError:
+                self.path.unlink()
+            else:
+                raise RuntimeError(f"command socket is already in use: {self.path}")
+            finally:
+                probe.close()
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            server.bind(str(self.path))
+            os.chmod(self.path, 0o600)
+            server.listen(4)
+            server.settimeout(0.25)
+        except Exception:
+            server.close()
+            try:
+                self.path.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+        self._server = server
+        logger.info("Navigation command socket ready at %s", self.path)
+
+    def start_listening(self) -> None:
+        if self._closed:
+            raise RuntimeError("navigation command socket is closed")
+        self._open_server()
+
+    def read_command(self, prompt: str) -> str:
+        if self._server is None:
+            raise RuntimeError("navigation command socket is not listening")
+        logger.debug(prompt.rstrip())
+        if self._client is None:
+            try:
+                self._client, _ = self._server.accept()
+                self._client.settimeout(1.0)
+            except socket.timeout:
+                return ""
+        try:
+            payload = self._client.recv(4096)
+        except socket.timeout:
+            return ""
+        if not payload:
+            self.stop_listening()
+            return ""
+        command = payload.decode("utf-8", errors="replace").splitlines()[0].strip()
+        if command:
+            try:
+                self._client.sendall(b"accepted\n")
+            except OSError:
+                pass
+        return command
+
+    def stop_listening(self) -> None:
+        if self._client is not None:
+            try:
+                self._client.close()
+            finally:
+                self._client = None
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.stop_listening()
+        if self._server is not None:
+            self._server.close()
+            self._server = None
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 class K1VoiceCommandSource:

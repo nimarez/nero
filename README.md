@@ -91,9 +91,20 @@ export BOOSTER_NET_IF=lo
 uv run nero-orb-slam --no-display
 ```
 
-Say `go to the chair`, or enter it at the terminal if the current robot agent does
-not expose LUI ASR. Unrelated speech is ignored. The LUI speaker must be available
-because Nero announces an accepted command before movement. Nero stops when the
+From this repository on the Mac, open the command terminal and live Rerun viewer
+with one command:
+
+```bash
+uv run nero-command
+```
+
+Enter an open-vocabulary object name such as `chair` at the `object>` prompt. The
+command uses your normal SSH authentication, starts a live-only telemetry bridge
+on the robot, and removes that bridge when the terminal exits. It does not create
+a Rerun recording. Use `quit` to close both the prompt and the viewer, or pass
+`--no-rerun` to leave visualization off.
+
+The robot announces an accepted command before movement. Nero stops when the
 target track expires, a safety check fails, SLAM loses the required state, or the
 process receives an interrupt.
 
@@ -109,6 +120,7 @@ All commands run through uv:
 | Command | Purpose |
 |---|---|
 | `uv run nero-orb-slam` | Spoken/typed object navigation on a real K1 |
+| `uv run nero-command` | Mac object-command prompt plus live K1 Rerun viewer |
 | `uv run nero-sim --demo` | Fast deterministic in-process policy test |
 | `uv run nero-booster-studio` | Full policy on a Booster Studio virtual K1 |
 | `uv run nero-sim-benchmark` | Compare native SLAM with simulator truth |

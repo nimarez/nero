@@ -21,6 +21,7 @@ from nero.interaction import (
     K1VoiceCommandSource,
     NavigationTargetListener,
     TerminalCommandSource,
+    UnixSocketCommandSource,
 )
 from nero.utils.visualization import Visualization
 from nero.navigation.policy import NavigationPolicy, PolicyState
@@ -48,6 +49,17 @@ def parse_args() -> argparse.Namespace:
         "--no-ros-observability",
         action="store_true",
         help="Disable normalized /nero ROS 2 telemetry topics",
+    )
+    parser.add_argument(
+        "--command-source",
+        choices=("socket", "terminal", "voice"),
+        default="socket",
+        help="Human command transport (default: robot-local socket for nero-command)",
+    )
+    parser.add_argument(
+        "--command-socket",
+        default="/tmp/nero-navigation.sock",
+        help="Robot-local Unix socket used by the socket command source",
     )
     return parser.parse_args()
 
@@ -186,10 +198,23 @@ def run_agent(
                 except RuntimeError as e:
                     logger.warning(f"Could not announce arrival: {e}")
                 announced_arrival = True
-                if not args.no_display:
+                if args.no_display:
+                    policy.reset()
+                    target_object = None
+                    announced_arrival = False
+                    target_listener.start()
+                    logger.info("Ready for another object command")
+                else:
                     logger.info(
                         "Press 'r' to reset and find another object, 'q' to quit"
                     )
+
+            if status.state == PolicyState.LOST and target_object is not None:
+                logger.info("Target lost; ready for another object command")
+                policy.reset()
+                target_object = None
+                announced_arrival = False
+                target_listener.start()
 
             # Maintain loop rate
             elapsed = time.time() - loop_start
@@ -233,20 +258,16 @@ def main():
         logger.error(f"Failed to connect to K1 robot: {e}")
         raise SystemExit(1) from e
 
-    command_source = None
-    try:
+    if args.command_source == "socket":
+        command_source = UnixSocketCommandSource(args.command_socket)
+    elif args.command_source == "terminal":
+        command_source = TerminalCommandSource()
+    else:
         command_source = K1VoiceCommandSource()
         # Verify that the robot-side LUI service is actually reachable. The SDK
         # client and DDS topic can initialize even when that service is absent.
         command_source.start_listening()
         command_source.stop_listening()
-    except Exception as exc:
-        if command_source is not None:
-            command_source.close()
-        logger.warning(
-            "K1 ASR is unavailable (%s); falling back to terminal directions", exc
-        )
-        command_source = TerminalCommandSource()
 
     run_agent(robot, args, command_source=command_source)
 

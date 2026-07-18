@@ -1,4 +1,7 @@
 import math
+import os
+import socket
+import stat
 import sys
 import threading
 import time
@@ -14,6 +17,7 @@ from nero.interaction import (
     K1VoiceCommandSource,
     NavigationTargetListener,
     TerminalCommandSource,
+    UnixSocketCommandSource,
     parse_go_to_command,
     request_navigation_target,
     safe_stand_off_distance,
@@ -277,6 +281,33 @@ def test_terminal_accepts_a_bare_object_name(monkeypatch):
         SimpleNamespace(speak=lambda _: None), TerminalCommandSource()
     ) == "red chair"
     assert prompts == ["Object to follow (for example, 'chair'): "]
+
+
+def test_unix_socket_command_source_accepts_object_and_is_private():
+    socket_path = f"/tmp/nero-test-{os.getpid()}-{time.time_ns()}.sock"
+    commands = UnixSocketCommandSource(socket_path)
+    commands.start_listening()
+    assert stat.S_IMODE(os.stat(socket_path).st_mode) == 0o600
+
+    result = []
+    listener = threading.Thread(
+        target=lambda: result.append(
+            request_navigation_target(
+                SimpleNamespace(speak=lambda _: None), commands
+            )
+        )
+    )
+    listener.start()
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.connect(socket_path)
+    client.sendall(b"red chair\n")
+    assert client.recv(128) == b"accepted\n"
+    listener.join(timeout=2)
+    client.close()
+    commands.close()
+
+    assert result == ["red chair"]
+    assert not os.path.exists(socket_path)
 
 
 def test_unavailable_speaker_does_not_discard_terminal_target(monkeypatch):
