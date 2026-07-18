@@ -258,13 +258,41 @@ class MapNavigationPolicy:
         local_pose = np.asarray(local_pose, dtype=float)
         if self._local_origin is None:
             self._local_origin = local_pose.copy()
-        dx, dy = local_pose[:2] - self._local_origin[:2]
-        delta_yaw = self._normalize_angle(local_pose[2] - self._local_origin[2])
-        x0, y0, yaw0 = self._config.initial_pose
-        c, s = math.cos(yaw0), math.sin(yaw0)
+        transform = self.slam_to_map_transform
+        position = transform[:2, :2] @ local_pose[:2] + transform[:2, 2]
+        yaw_offset = math.atan2(transform[1, 0], transform[0, 0])
         return np.array(
-            [x0 + c * dx - s * dy, y0 + s * dx + c * dy, self._normalize_angle(yaw0 + delta_yaw)]
+            [position[0], position[1], self._normalize_angle(local_pose[2] + yaw_offset)]
         )
+
+    @property
+    def slam_to_map_transform(self) -> np.ndarray:
+        """Return the planar rigid transform from the live SLAM frame to the map."""
+        if self._local_origin is None:
+            raise RuntimeError("SLAM-to-map alignment is not initialized")
+        x0, y0, yaw0 = self._config.initial_pose
+        yaw_offset = self._normalize_angle(yaw0 - self._local_origin[2])
+        c, s = math.cos(yaw_offset), math.sin(yaw_offset)
+        rotation = np.array([[c, -s], [s, c]])
+        translation = np.array([x0, y0]) - rotation @ self._local_origin[:2]
+        transform = np.eye(3)
+        transform[:2, :2] = rotation
+        transform[:2, 2] = translation
+        return transform
+
+    def transform_slam_points(self, points: np.ndarray) -> np.ndarray:
+        """Transform SLAM XYZ map points into the published ROS map frame."""
+        points = np.asarray(points, dtype=float)
+        if points.ndim != 2 or points.shape[1] != 3:
+            raise ValueError("points must have shape (N, 3)")
+        transform = self.slam_to_map_transform
+        transformed = points.copy()
+        transformed[:, :2] = points[:, :2] @ transform[:2, :2].T + transform[:2, 2]
+        return transformed
+
+    @property
+    def map_alignment_ready(self) -> bool:
+        return self._local_origin is not None
 
     def _fail(self, state: MapNavState, message: str, **kwargs) -> MapPolicyStatus:
         self._state = state

@@ -82,8 +82,29 @@ def test_map_policy_uses_shared_localization_and_map_frame_alignment():
     assert robot.commands[-1][0] > 0
 
     second = policy.step()
-    np.testing.assert_allclose(second.pose, [2.0, 4.0, np.pi / 2], atol=1e-7)
+    yaw_offset = np.pi / 2 - 0.2
+    np.testing.assert_allclose(
+        second.pose,
+        [2.0 + np.cos(yaw_offset), 3.0 + np.sin(yaw_offset), np.pi / 2],
+        atol=1e-7,
+    )
     assert second.state == MapNavState.NAVIGATING
+
+
+def test_slam_map_points_use_the_same_non_identity_frame_alignment():
+    policy, _ = _policy()
+    policy.set_goal(2.0, 5.0, np.pi / 2)
+    policy.step()
+
+    points = np.array([[10, 20, 1], [11, 20, 2]])
+    transformed = policy.transform_slam_points(points)
+    yaw_offset = np.pi / 2 - 0.2
+    np.testing.assert_allclose(transformed[0], [2.0, 3.0, 1.0], atol=1e-7)
+    np.testing.assert_allclose(
+        transformed[1],
+        [2.0 + np.cos(yaw_offset), 3.0 + np.sin(yaw_offset), 2.0],
+        atol=1e-7,
+    )
 
 
 def test_map_policy_stops_on_safety_violation():

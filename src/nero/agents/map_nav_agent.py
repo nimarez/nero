@@ -126,8 +126,10 @@ def main() -> None:
                 if slam_pose is not None:
                     telemetry.publish_tracking(slam_pose.tracking_status, slam_pose.num_map_points)
                 map_points = policy.slam.get_map_points()
-                if len(map_points):
-                    telemetry.publish_point_cloud(map_points, sensor.timestamp)
+                if len(map_points) and policy.map_alignment_ready:
+                    telemetry.publish_point_cloud(
+                        policy.transform_slam_points(map_points), sensor.timestamp
+                    )
 
             # Print state
             pose = status.pose
