@@ -168,6 +168,7 @@ def test_booster_studio_topics_match_installed_k1_simulator():
     assert topics.pose == "/soccer/sim/localization/robot_pose"
     assert topics.clock == "/clock"
     assert topics.odom == "/odom"
+    assert topics.joints == "/joint_states"
     assert topics.detections == "/soccer/sim/vision/detections"
 
 

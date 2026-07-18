@@ -1,8 +1,9 @@
 """Booster Studio K1 sensor and locomotion adapter.
 
 This module is imported only inside Booster Studio's Linux virtual robot terminal.
-It consumes the simulator's ROS 2 RGB-D, CameraInfo, IMU, and pose topics while
-sending motion through the same official Booster locomotion client used on a K1.
+It consumes the simulator's ROS 2 RGB-D, CameraInfo, IMU, odometry, joint, and
+pose topics while sending motion through the same official Booster locomotion
+client used on a K1.
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ class BoosterStudioTopics:
     pose: str = "/soccer/sim/localization/robot_pose"
     clock: str = "/clock"
     odom: str = "/odom"
+    joints: str = "/joint_states"
     detections: str = "/soccer/sim/vision/detections"
 
 
@@ -80,7 +82,13 @@ class BoosterStudioRobotInterface:
             from geometry_msgs.msg import Pose2D
             from nav_msgs.msg import Odometry
             from rosgraph_msgs.msg import Clock
-            from sensor_msgs.msg import CameraInfo, CompressedImage, Image, Imu
+            from sensor_msgs.msg import (
+                CameraInfo,
+                CompressedImage,
+                Image,
+                Imu,
+                JointState,
+            )
             from vision_msgs.msg import Detection2DArray
             from booster_robotics_sdk_python import B1LocoClient, ChannelFactory
         except ImportError as exc:
@@ -105,6 +113,7 @@ class BoosterStudioRobotInterface:
         self._pose_samples: list[tuple[float, np.ndarray]] = []
         self._sim_time: float | None = None
         self._odom: Any = None
+        self._joints: Any = None
         self._imu_samples: list[tuple[float, ...]] = []
         self._orientation_samples: list[tuple[float, np.ndarray]] = []
         self._rgb_timestamps: list[float] = []
@@ -156,6 +165,9 @@ class BoosterStudioRobotInterface:
             ),
             self._node.create_subscription(
                 Odometry, self._topics.odom, self._on_odom, 10
+            ),
+            self._node.create_subscription(
+                JointState, self._topics.joints, self._on_joints, 10
             ),
             self._node.create_subscription(
                 Detection2DArray,
@@ -356,6 +368,10 @@ class BoosterStudioRobotInterface:
                 timestamp=time.monotonic(),
             )
             self._ready.notify_all()
+
+    def _on_joints(self, message: Any) -> None:
+        with self._lock:
+            self._joints = message
 
     def _ground_truth_pose_locked(self, timestamp: float) -> np.ndarray:
         if not self._pose_samples:
@@ -558,6 +574,7 @@ class BoosterStudioRobotInterface:
                 mode="walk",
                 imu=synchronized_imu,
                 odom=self._odom,
+                joints=self._joints,
                 rgb=self._rgb if include_images else None,
                 depth=self._depth if include_images else None,
                 camera_info=self._camera_info,

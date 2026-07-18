@@ -226,13 +226,29 @@ Hardware, Studio, mapping, and benchmark runtimes publish normalized telemetry:
 
 | Namespace | Contents |
 |---|---|
-| `/nero/sensors` | RGB, metric depth, CameraInfo, IMU |
+| `/nero/sensors` | RGB, metric depth, CameraInfo, IMU, odometry, joint states |
 | `/nero/slam` | Pose, path, tracking state, map points |
 | `/nero/navigation` | Requested detections, object/goal poses, status, velocity |
 | `/nero/reference` | Simulator-only truth for visualization and benchmarks |
 
 Control never consumes `/nero/reference`. Pass `--no-ros-observability` to a
 supported agent to disable publication.
+
+On a ROS-equipped machine with a desktop, one command subscribes to every Nero
+topic and opens Rerun:
+
+```bash
+uv run --extra viz nero-rerun
+```
+
+The bridge plots RGB, metric depth, camera calibration, IMU orientation/rates,
+odometry, every available joint position/velocity/effort, SLAM pose/path/map,
+detections, goals, commands, and simulator reference data. Print the exact
+subscription contract without requiring ROS or Rerun to be installed:
+
+```bash
+uv run nero-rerun --print-topics
+```
 
 On the macOS host, start the viewer:
 
@@ -258,7 +274,9 @@ To record without a viewer:
 uv run --extra viz nero-rerun --save output/nero.rrd
 ```
 
-Rerun is an optional uv extra and is not installed in the headless robot runtime.
+With no sink option, `nero-rerun` spawns a local viewer. Use `--connect` for the
+split robot-to-workstation setup or `--save` for a recording. Rerun is an optional
+uv extra and is not installed in the headless robot runtime.
 
 ## Why not `booster_deploy`?
 

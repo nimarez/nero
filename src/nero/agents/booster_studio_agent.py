@@ -31,6 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pose-topic", default=BoosterStudioTopics.pose)
     parser.add_argument("--clock-topic", default=BoosterStudioTopics.clock)
     parser.add_argument("--odom-topic", default=BoosterStudioTopics.odom)
+    parser.add_argument("--joints-topic", default=BoosterStudioTopics.joints)
     parser.add_argument("--detections-topic", default=BoosterStudioTopics.detections)
     parser.add_argument("--no-display", action="store_true")
     parser.add_argument("--no-ros-observability", action="store_true")
@@ -59,6 +60,7 @@ def main() -> None:
         pose=args.pose_topic,
         clock=args.clock_topic,
         odom=args.odom_topic,
+        joints=args.joints_topic,
         detections=args.detections_topic,
     )
     calibration_source = args.sensor_calibration

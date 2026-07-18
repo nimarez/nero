@@ -23,16 +23,10 @@ logger = logging.getLogger(__name__)
 def image_message_to_array(message: Any) -> np.ndarray:
     encoding = str(message.encoding).lower()
     if encoding in {"bgr8", "rgb8"}:
-        array = np.frombuffer(message.data, np.uint8).reshape(
-            message.height, message.width, 3
-        )
+        array = np.frombuffer(message.data, np.uint8).reshape(message.height, message.width, 3)
         return array[..., ::-1].copy() if encoding == "bgr8" else array.copy()
     if encoding in {"mono8", "8uc1"}:
-        return (
-            np.frombuffer(message.data, np.uint8)
-            .reshape(message.height, message.width)
-            .copy()
-        )
+        return np.frombuffer(message.data, np.uint8).reshape(message.height, message.width).copy()
     if encoding in {"mono16", "16uc1"}:
         dtype = np.dtype(">u2" if message.is_bigendian else "<u2")
         return (
@@ -85,8 +79,8 @@ class RerunRosBridge:
         import rerun as rr
         import rclpy
         from geometry_msgs.msg import PointStamped, PoseStamped, Twist
-        from nav_msgs.msg import Path as RosPath
-        from sensor_msgs.msg import CameraInfo, Image, Imu, PointCloud2
+        from nav_msgs.msg import Odometry, Path as RosPath
+        from sensor_msgs.msg import CameraInfo, Image, Imu, JointState, PointCloud2
         from std_msgs.msg import String
         from vision_msgs.msg import Detection2DArray
 
@@ -94,55 +88,37 @@ class RerunRosBridge:
         self._recording = recording
         self._topics = topics or ObservabilityTopics()
         self._node = rclpy.create_node("nero_rerun_bridge")
-        self._subscriptions = []
         sensor_qos = rclpy.qos.qos_profile_sensor_data
         subscribe = self._node.create_subscription
-        self._subscriptions.extend(
-            [
-                subscribe(Image, self._topics.rgb, self._on_rgb, sensor_qos),
-                subscribe(Image, self._topics.depth, self._on_depth, sensor_qos),
-                subscribe(
-                    CameraInfo, self._topics.camera_info, self._on_camera_info, 1
-                ),
-                subscribe(Imu, self._topics.imu, self._on_imu, sensor_qos),
-                subscribe(PoseStamped, self._topics.pose, self._on_pose, 10),
-                subscribe(RosPath, self._topics.path, self._on_path, 1),
-                subscribe(
-                    PointCloud2, self._topics.map_points, self._on_map, sensor_qos
-                ),
-                subscribe(String, self._topics.tracking, self._on_tracking, 10),
-                subscribe(
-                    Detection2DArray,
-                    self._topics.detections,
-                    self._on_detections,
-                    sensor_qos,
-                ),
-                subscribe(String, self._topics.status, self._on_status, 10),
-                subscribe(Twist, self._topics.command, self._on_command, 10),
-                subscribe(PoseStamped, self._topics.goal_pose, self._on_goal_pose, 10),
-                subscribe(
-                    PointStamped,
-                    self._topics.object_position,
-                    self._on_object_position,
-                    10,
-                ),
-                subscribe(
-                    PoseStamped,
-                    self._topics.reference_pose,
-                    self._on_reference_pose,
-                    10,
-                ),
-                subscribe(
-                    RosPath, self._topics.reference_path, self._on_reference_path, 1
-                ),
-                subscribe(
-                    PointCloud2,
-                    self._topics.reference_map,
-                    self._on_reference_map,
-                    sensor_qos,
-                ),
-            ]
-        )
+        specs = [
+            (Image, self._topics.rgb, self._on_rgb, sensor_qos),
+            (Image, self._topics.depth, self._on_depth, sensor_qos),
+            (CameraInfo, self._topics.camera_info, self._on_camera_info, 1),
+            (Imu, self._topics.imu, self._on_imu, sensor_qos),
+            (Odometry, self._topics.odometry, self._on_odometry, sensor_qos),
+            (JointState, self._topics.joint_states, self._on_joint_states, sensor_qos),
+            (PoseStamped, self._topics.pose, self._on_pose, 10),
+            (RosPath, self._topics.path, self._on_path, 1),
+            (PointCloud2, self._topics.map_points, self._on_map, sensor_qos),
+            (String, self._topics.tracking, self._on_tracking, 10),
+            (Detection2DArray, self._topics.detections, self._on_detections, sensor_qos),
+            (String, self._topics.status, self._on_status, 10),
+            (Twist, self._topics.command, self._on_command, 10),
+            (PoseStamped, self._topics.goal_pose, self._on_goal_pose, 10),
+            (PointStamped, self._topics.object_position, self._on_object_position, 10),
+            (PoseStamped, self._topics.reference_pose, self._on_reference_pose, 10),
+            (RosPath, self._topics.reference_path, self._on_reference_path, 1),
+            (PointCloud2, self._topics.reference_map, self._on_reference_map, sensor_qos),
+        ]
+        self._subscription_topics = tuple(spec[1] for spec in specs)
+        expected_topics = set(vars(self._topics).values())
+        if set(self._subscription_topics) != expected_topics:
+            missing = expected_topics - set(self._subscription_topics)
+            extra = set(self._subscription_topics) - expected_topics
+            raise RuntimeError(
+                f"Rerun topic contract mismatch; missing={sorted(missing)}, extra={sorted(extra)}"
+            )
+        self._subscriptions = [subscribe(*spec) for spec in specs]
         recording.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
         transform = np.eye(4) if body_to_camera is None else np.asarray(body_to_camera)
         if transform.shape != (4, 4):
@@ -157,6 +133,10 @@ class RerunRosBridge:
     @property
     def node(self) -> Any:
         return self._node
+
+    @property
+    def subscription_topics(self) -> tuple[str, ...]:
+        return self._subscription_topics
 
     def _time(self, message: Any) -> None:
         self._recording.set_time_nanos("ros_time", _timestamp_ns(message))
@@ -175,9 +155,7 @@ class RerunRosBridge:
         self._time(message)
         depth = image_message_to_array(message)
         meter = 1000.0 if depth.dtype == np.uint16 else 1.0
-        self._recording.log(
-            "world/robot/camera/depth", self._rr.DepthImage(depth, meter=meter)
-        )
+        self._recording.log("world/robot/camera/depth", self._rr.DepthImage(depth, meter=meter))
 
     def _on_camera_info(self, message: Any) -> None:
         self._time(message)
@@ -202,6 +180,40 @@ class RerunRosBridge:
                 f"metrics/imu/linear_acceleration/{axis}",
                 self._rr.Scalar(float(getattr(message.linear_acceleration, axis))),
             )
+        orientation = message.orientation
+        quaternion = [orientation.x, orientation.y, orientation.z, orientation.w]
+        if np.linalg.norm(quaternion) > 0:
+            roll, pitch, yaw = Rotation.from_quat(quaternion).as_euler("xyz")
+            for name, value in zip(("roll", "pitch", "yaw"), (roll, pitch, yaw)):
+                self._recording.log(
+                    f"metrics/imu/orientation/{name}", self._rr.Scalar(float(value))
+                )
+
+    def _on_odometry(self, message: Any) -> None:
+        self._time(message)
+        position = message.pose.pose.position
+        orientation = message.pose.pose.orientation
+        quaternion = [orientation.x, orientation.y, orientation.z, orientation.w]
+        yaw = (
+            Rotation.from_quat(quaternion).as_euler("xyz")[2]
+            if np.linalg.norm(quaternion) > 0
+            else 0.0
+        )
+        for name, value in (("x", position.x), ("y", position.y), ("yaw", yaw)):
+            self._recording.log(f"metrics/odometry/{name}", self._rr.Scalar(float(value)))
+
+    def _on_joint_states(self, message: Any) -> None:
+        self._time(message)
+        names = list(message.name)
+        for field in ("position", "velocity", "effort"):
+            values = list(getattr(message, field, []))
+            for index, value in enumerate(values):
+                name = names[index] if index < len(names) else f"joint_{index}"
+                safe_name = str(name).replace("/", "_").replace(" ", "_")
+                self._recording.log(
+                    f"metrics/joints/{safe_name}/{field}",
+                    self._rr.Scalar(float(value)),
+                )
 
     def _log_pose(self, message: Any, entity: str) -> None:
         self._time(message)
@@ -229,9 +241,7 @@ class RerunRosBridge:
         point = message.point
         self._recording.log(
             "world/navigation/object",
-            self._rr.Points3D(
-                [[point.x, point.y, point.z]], colors=[255, 80, 80], radii=0.08
-            ),
+            self._rr.Points3D([[point.x, point.y, point.z]], colors=[255, 80, 80], radii=0.08),
         )
 
     def _log_path(self, message: Any, entity: str, color: list[int]) -> None:
@@ -241,9 +251,7 @@ class RerunRosBridge:
             for pose in message.poses
         ]
         if len(points) >= 2:
-            self._recording.log(
-                entity, self._rr.LineStrips3D([points], colors=color, radii=0.01)
-            )
+            self._recording.log(entity, self._rr.LineStrips3D([points], colors=color, radii=0.01))
 
     def _on_path(self, message: Any) -> None:
         self._log_path(message, "world/slam/trajectory", [0, 200, 255])
@@ -271,9 +279,7 @@ class RerunRosBridge:
             centers.append([position.x, position.y])
             sizes.append([detection.bbox.size_x, detection.bbox.size_y])
             result = detection.results[0] if detection.results else None
-            labels.append(
-                result.hypothesis.class_id if result is not None else "object"
-            )
+            labels.append(result.hypothesis.class_id if result is not None else "object")
         self._recording.log(
             "world/robot/camera/rgb/detections",
             self._rr.Boxes2D(centers=centers, sizes=sizes, labels=labels),
@@ -294,9 +300,7 @@ class RerunRosBridge:
             data = json.loads(message.data)
         except json.JSONDecodeError:
             data = {"status": message.data}
-        self._recording.log(
-            "status/tracking", self._rr.TextLog(str(data.get("status", "unknown")))
-        )
+        self._recording.log("status/tracking", self._rr.TextLog(str(data.get("status", "unknown"))))
         if "map_points" in data:
             self._recording.log(
                 "metrics/slam/map_points", self._rr.Scalar(float(data["map_points"]))
@@ -310,9 +314,7 @@ class RerunRosBridge:
             "angular_z": message.angular.z,
         }
         for name, value in values.items():
-            self._recording.log(
-                f"metrics/command/{name}", self._rr.Scalar(float(value))
-            )
+            self._recording.log(f"metrics/command/{name}", self._rr.Scalar(float(value)))
 
 
 def parse_args() -> argparse.Namespace:
@@ -323,12 +325,8 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("NERO_RERUN_URL"),
         help="Rerun viewer address, e.g. host.docker.internal:9876",
     )
-    sink.add_argument(
-        "--save", type=Path, help="Write a .rrd recording instead of streaming"
-    )
-    sink.add_argument(
-        "--spawn", action="store_true", help="Spawn a local native viewer"
-    )
+    sink.add_argument("--save", type=Path, help="Write a .rrd recording instead of streaming")
+    sink.add_argument("--spawn", action="store_true", help="Spawn a local native viewer")
     parser.add_argument(
         "--sensor-calibration",
         type=Path,
@@ -336,27 +334,34 @@ def parse_args() -> argparse.Namespace:
         help="K1 calibration used for the body-to-camera transform",
     )
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument(
+        "--print-topics",
+        action="store_true",
+        help="Print the complete ROS subscription contract and exit",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO)
+    if args.print_topics:
+        for name, topic in vars(ObservabilityTopics()).items():
+            print(f"{name}: {topic}")
+        return
     try:
         import rerun as rr
         import rclpy
         from rclpy.executors import ExternalShutdownException
     except ImportError as exc:
-        raise SystemExit(
-            "Install the visualization extra with: uv sync --extra viz"
-        ) from exc
+        raise SystemExit("Install the visualization extra with: uv sync --extra viz") from exc
 
     rclpy.init(args=None)
     recording = rr.new_recording("nero_k1", make_default=False)
     if args.save:
         args.save.parent.mkdir(parents=True, exist_ok=True)
         recording.save(str(args.save))
-    elif args.spawn:
+    elif args.spawn or not args.connect:
         recording.spawn()
     else:
         recording.connect(args.connect or "127.0.0.1:9876")
@@ -365,7 +370,10 @@ def main() -> None:
         calibration_path = Path("config/k1_geek_nominal_calibration.json")
     calibration = K1Calibration.load(calibration_path)
     bridge = RerunRosBridge(recording, body_to_camera=np.asarray(calibration.tbc))
-    logger.info("Rerun bridge subscribed to /nero/*")
+    logger.info(
+        "Rerun bridge subscribed to: %s",
+        ", ".join(bridge.subscription_topics),
+    )
     try:
         rclpy.spin(bridge.node)
     except (KeyboardInterrupt, ExternalShutdownException):

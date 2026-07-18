@@ -52,8 +52,15 @@ class RosObservabilityPublisher:
     ) -> None:
         import rclpy
         from geometry_msgs.msg import PointStamped, PoseStamped, Twist
-        from nav_msgs.msg import Path
-        from sensor_msgs.msg import CameraInfo, Image, Imu, PointCloud2, PointField
+        from nav_msgs.msg import Odometry, Path
+        from sensor_msgs.msg import (
+            CameraInfo,
+            Image,
+            Imu,
+            JointState,
+            PointCloud2,
+            PointField,
+        )
         from std_msgs.msg import String
         from vision_msgs.msg import Detection2DArray
 
@@ -73,6 +80,8 @@ class RosObservabilityPublisher:
             "CameraInfo": CameraInfo,
             "Image": Image,
             "Imu": Imu,
+            "Odometry": Odometry,
+            "JointState": JointState,
             "PointCloud2": PointCloud2,
             "PointField": PointField,
             "String": String,
@@ -82,10 +91,12 @@ class RosObservabilityPublisher:
         self._publishers = {
             "rgb": self._node.create_publisher(Image, self._topics.rgb, sensor_qos),
             "depth": self._node.create_publisher(Image, self._topics.depth, sensor_qos),
-            "camera_info": self._node.create_publisher(
-                CameraInfo, self._topics.camera_info, 1
-            ),
+            "camera_info": self._node.create_publisher(CameraInfo, self._topics.camera_info, 1),
             "imu": self._node.create_publisher(Imu, self._topics.imu, sensor_qos),
+            "odometry": self._node.create_publisher(Odometry, self._topics.odometry, sensor_qos),
+            "joint_states": self._node.create_publisher(
+                JointState, self._topics.joint_states, sensor_qos
+            ),
             "pose": self._node.create_publisher(PoseStamped, self._topics.pose, 10),
             "path": self._node.create_publisher(Path, self._topics.path, 1),
             "map_points": self._node.create_publisher(
@@ -97,18 +108,14 @@ class RosObservabilityPublisher:
             ),
             "status": self._node.create_publisher(String, self._topics.status, 10),
             "command": self._node.create_publisher(Twist, self._topics.command, 10),
-            "goal_pose": self._node.create_publisher(
-                PoseStamped, self._topics.goal_pose, 10
-            ),
+            "goal_pose": self._node.create_publisher(PoseStamped, self._topics.goal_pose, 10),
             "object_position": self._node.create_publisher(
                 PointStamped, self._topics.object_position, 10
             ),
             "reference_pose": self._node.create_publisher(
                 PoseStamped, self._topics.reference_pose, 10
             ),
-            "reference_path": self._node.create_publisher(
-                Path, self._topics.reference_path, 1
-            ),
+            "reference_path": self._node.create_publisher(Path, self._topics.reference_path, 1),
             "reference_map": self._node.create_publisher(
                 PointCloud2, self._topics.reference_map, sensor_qos
             ),
@@ -139,9 +146,7 @@ class RosObservabilityPublisher:
         message = self._types["PoseStamped"]()
         self._header(message, timestamp, self._map_frame)
         transform = np.asarray(matrix, dtype=float)
-        message.pose.position.x, message.pose.position.y, message.pose.position.z = (
-            transform[:3, 3]
-        )
+        message.pose.position.x, message.pose.position.y, message.pose.position.z = transform[:3, 3]
         quaternion = Rotation.from_matrix(transform[:3, :3]).as_quat()
         (
             message.pose.orientation.x,
@@ -188,9 +193,7 @@ class RosObservabilityPublisher:
             info_msg.d = list(getattr(info, "d", []))
             info_msg.r = np.eye(3).reshape(-1).tolist()
             info_msg.p = (
-                np.hstack((np.asarray(info.k).reshape(3, 3), np.zeros((3, 1))))
-                .reshape(-1)
-                .tolist()
+                np.hstack((np.asarray(info.k).reshape(3, 3), np.zeros((3, 1)))).reshape(-1).tolist()
             )
             self._publishers["camera_info"].publish(info_msg)
 
@@ -216,6 +219,31 @@ class RosObservabilityPublisher:
             ) = state.linear_acceleration
             self._publishers["imu"].publish(imu_msg)
 
+        if state.odom is not None:
+            odometry = self._types["Odometry"]()
+            self._header(odometry, timestamp, "odom")
+            odometry.child_frame_id = "base_link"
+            x, y, yaw = np.asarray(state.position_2d, dtype=float)
+            odometry.pose.pose.position.x = float(x)
+            odometry.pose.pose.position.y = float(y)
+            quaternion = Rotation.from_euler("z", float(yaw)).as_quat()
+            (
+                odometry.pose.pose.orientation.x,
+                odometry.pose.pose.orientation.y,
+                odometry.pose.pose.orientation.z,
+                odometry.pose.pose.orientation.w,
+            ) = quaternion
+            self._publishers["odometry"].publish(odometry)
+
+        if state.joints is not None:
+            joints = self._types["JointState"]()
+            self._header(joints, timestamp, "base_link")
+            joints.name = list(getattr(state.joints, "name", []))
+            joints.position = list(getattr(state.joints, "position", []))
+            joints.velocity = list(getattr(state.joints, "velocity", []))
+            joints.effort = list(getattr(state.joints, "effort", []))
+            self._publishers["joint_states"].publish(joints)
+
     def publish_policy(self, status: Any, timestamp: float) -> None:
         state_name = getattr(getattr(status, "state", None), "value", "unknown")
         status_message = self._types["String"]()
@@ -223,9 +251,7 @@ class RosObservabilityPublisher:
             {
                 "state": state_name,
                 "message": getattr(status, "message", ""),
-                "goal": getattr(
-                    getattr(status, "current_goal", None), "object_name", None
-                ),
+                "goal": getattr(getattr(status, "current_goal", None), "object_name", None),
                 "tracking_confidence": getattr(
                     getattr(status, "current_pose", None), "confidence", None
                 ),
@@ -251,9 +277,7 @@ class RosObservabilityPublisher:
         elif getattr(status, "pose", None) is not None:
             planar_pose = np.asarray(status.pose, dtype=float)
             matrix = np.eye(4)
-            matrix[:3, :3] = Rotation.from_euler(
-                "z", float(planar_pose[2])
-            ).as_matrix()
+            matrix[:3, :3] = Rotation.from_euler("z", float(planar_pose[2])).as_matrix()
             matrix[:2, 3] = planar_pose[:2]
             self.publish_pose(matrix, timestamp)
         goal = getattr(status, "current_goal", None)
@@ -262,13 +286,9 @@ class RosObservabilityPublisher:
             approach = getattr(status, "goal_pose", None)
         if approach is not None:
             goal_matrix = np.eye(4)
-            goal_matrix[:3, :3] = Rotation.from_euler(
-                "z", float(approach[2])
-            ).as_matrix()
+            goal_matrix[:3, :3] = Rotation.from_euler("z", float(approach[2])).as_matrix()
             goal_matrix[:2, 3] = np.asarray(approach[:2], dtype=float)
-            self._publishers["goal_pose"].publish(
-                self._pose_message(goal_matrix, timestamp)
-            )
+            self._publishers["goal_pose"].publish(self._pose_message(goal_matrix, timestamp))
         object_position = getattr(goal, "object_position_world", None)
         if object_position is not None:
             point = self._types["PointStamped"]()
@@ -348,9 +368,7 @@ class RosObservabilityPublisher:
         finite = np.asarray(points, dtype=float).reshape(-1, 3)
         finite = finite[np.all(np.isfinite(finite), axis=1)]
         _point_cloud_xyz(message, finite)
-        self._publishers["reference_map" if reference else "map_points"].publish(
-            message
-        )
+        self._publishers["reference_map" if reference else "map_points"].publish(message)
 
     def close(self) -> None:
         if self._owns_node:

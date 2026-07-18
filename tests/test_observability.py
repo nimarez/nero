@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import sys
 
 import numpy as np
 import pytest
@@ -6,20 +7,156 @@ import pytest
 from nero.observability.rerun_bridge import (
     RerunRosBridge,
     image_message_to_array,
+    main as rerun_main,
     pointcloud2_to_xyz,
 )
-from nero.observability.ros_publisher import _point_cloud_xyz, _seconds_to_stamp
+from nero.observability.ros_publisher import (
+    RosObservabilityPublisher,
+    _point_cloud_xyz,
+    _seconds_to_stamp,
+)
 from nero.observability.topics import ObservabilityTopics
 
 
 def test_observability_topics_are_stable_and_namespaced():
     topics = ObservabilityTopics()
     assert topics.rgb == "/nero/sensors/rgb"
+    assert topics.odometry == "/nero/sensors/odometry"
+    assert topics.joint_states == "/nero/sensors/joint_states"
     assert topics.pose == "/nero/slam/pose"
     assert topics.command == "/nero/navigation/cmd_vel"
     assert topics.goal_pose == "/nero/navigation/goal_pose"
     assert topics.object_position == "/nero/navigation/object_position"
     assert topics.reference_map == "/nero/reference/map_points"
+    values = list(vars(topics).values())
+    assert len(values) == len(set(values))
+    assert all(topic.startswith("/nero/") for topic in values)
+
+
+def test_rerun_topic_contract_is_printable_without_ros_or_rerun(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["nero-rerun", "--print-topics"])
+    rerun_main()
+    output = capsys.readouterr().out
+    assert "rgb: /nero/sensors/rgb" in output
+    assert "odometry: /nero/sensors/odometry" in output
+    assert "joint_states: /nero/sensors/joint_states" in output
+
+
+def test_odometry_and_joint_callbacks_log_sensor_metrics():
+    class FakeRerun:
+        Scalar = float
+
+    class FakeRecording:
+        def __init__(self):
+            self.entities = []
+
+        def set_time_nanos(self, timeline, timestamp):
+            pass
+
+        def log(self, entity, value):
+            self.entities.append(entity)
+
+    bridge = RerunRosBridge.__new__(RerunRosBridge)
+    bridge._rr = FakeRerun()
+    bridge._recording = FakeRecording()
+    header = SimpleNamespace(stamp=SimpleNamespace(sec=1, nanosec=0))
+    orientation = SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0)
+    position = SimpleNamespace(x=1.0, y=2.0, z=0.0)
+    bridge._on_odometry(
+        SimpleNamespace(
+            header=header,
+            pose=SimpleNamespace(pose=SimpleNamespace(position=position, orientation=orientation)),
+        )
+    )
+    bridge._on_joint_states(
+        SimpleNamespace(
+            header=header,
+            name=["left/hip"],
+            position=[0.1],
+            velocity=[0.2],
+            effort=[0.3],
+        )
+    )
+    assert "metrics/odometry/x" in bridge._recording.entities
+    assert "metrics/odometry/yaw" in bridge._recording.entities
+    assert "metrics/joints/left_hip/position" in bridge._recording.entities
+    assert "metrics/joints/left_hip/velocity" in bridge._recording.entities
+
+
+def test_robot_state_publishes_normalized_odometry_and_joints():
+    def header():
+        return SimpleNamespace(stamp=SimpleNamespace(sec=0, nanosec=0), frame_id="")
+
+    def vector():
+        return SimpleNamespace(x=0.0, y=0.0, z=0.0)
+
+    def image_message():
+        return SimpleNamespace(header=header())
+
+    def imu_message():
+        return SimpleNamespace(
+            header=header(),
+            orientation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=0.0),
+            angular_velocity=vector(),
+            linear_acceleration=vector(),
+        )
+
+    def odometry_message():
+        pose = SimpleNamespace(
+            position=vector(),
+            orientation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=0.0),
+        )
+        return SimpleNamespace(header=header(), child_frame_id="", pose=SimpleNamespace(pose=pose))
+
+    def joint_message():
+        return SimpleNamespace(header=header(), name=[], position=[], velocity=[], effort=[])
+
+    class Capture:
+        def __init__(self):
+            self.messages = []
+
+        def publish(self, message):
+            self.messages.append(message)
+
+    captures = {name: Capture() for name in ("rgb", "depth", "imu", "odometry", "joint_states")}
+    publisher = RosObservabilityPublisher.__new__(RosObservabilityPublisher)
+    publisher._last_sensor_timestamp = None
+    publisher._camera_frame = "camera"
+    publisher._types = {
+        "Image": image_message,
+        "Imu": imu_message,
+        "Odometry": odometry_message,
+        "JointState": joint_message,
+    }
+    publisher._publishers = captures
+
+    raw_joints = SimpleNamespace(name=["left_hip"], position=[0.1], velocity=[0.2], effort=[0.3])
+    state = SimpleNamespace(
+        rgb=np.zeros((2, 3, 3), dtype=np.uint8),
+        depth=np.ones((2, 3), dtype=np.uint16),
+        camera_info=None,
+        imu=object(),
+        odom=object(),
+        joints=raw_joints,
+        orientation_rpy=np.array([0.0, 0.0, 0.4]),
+        angular_velocity=np.array([0.1, 0.2, 0.3]),
+        linear_acceleration=np.array([1.0, 2.0, 3.0]),
+        position_2d=np.array([4.0, 5.0, 0.6]),
+    )
+    robot = SimpleNamespace(
+        image_timestamp=lambda image: 12.5,
+        image_to_array=lambda image: image,
+    )
+    publisher.publish_robot_state(state, robot)
+
+    odometry = captures["odometry"].messages[0]
+    assert odometry.header.frame_id == "odom"
+    assert odometry.child_frame_id == "base_link"
+    assert odometry.pose.pose.position.x == 4.0
+    assert odometry.pose.pose.position.y == 5.0
+    joints = captures["joint_states"].messages[0]
+    assert joints.name == ["left_hip"]
+    assert joints.position == [0.1]
 
 
 def test_seconds_to_stamp_normalizes_rounding():
@@ -115,20 +252,29 @@ def test_rerun_callbacks_create_a_real_recording():
             header=header,
             angular_velocity=vector,
             linear_acceleration=vector,
+            orientation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
         )
     )
     position = SimpleNamespace(x=1.0, y=2.0, z=0.0)
     orientation = SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0)
     pose = SimpleNamespace(position=position, orientation=orientation)
     pose_stamped = SimpleNamespace(header=header, pose=pose)
+    bridge._on_odometry(SimpleNamespace(header=header, pose=SimpleNamespace(pose=pose)))
+    bridge._on_joint_states(
+        SimpleNamespace(
+            header=header,
+            name=["left_hip"],
+            position=[0.1],
+            velocity=[0.2],
+            effort=[0.3],
+        )
+    )
     bridge._on_pose(pose_stamped)
     bridge._on_reference_pose(pose_stamped)
     bridge._on_goal_pose(pose_stamped)
     bridge._on_object_position(SimpleNamespace(header=header, point=position))
     bridge._on_path(SimpleNamespace(header=header, poses=[pose_stamped, pose_stamped]))
-    bridge._on_reference_path(
-        SimpleNamespace(header=header, poses=[pose_stamped, pose_stamped])
-    )
+    bridge._on_reference_path(SimpleNamespace(header=header, poses=[pose_stamped, pose_stamped]))
 
     cloud = SimpleNamespace(
         header=header,

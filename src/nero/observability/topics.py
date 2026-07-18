@@ -11,6 +11,8 @@ class ObservabilityTopics:
     depth: str = "/nero/sensors/depth"
     camera_info: str = "/nero/sensors/camera_info"
     imu: str = "/nero/sensors/imu"
+    odometry: str = "/nero/sensors/odometry"
+    joint_states: str = "/nero/sensors/joint_states"
     pose: str = "/nero/slam/pose"
     path: str = "/nero/slam/path"
     map_points: str = "/nero/slam/map_points"
