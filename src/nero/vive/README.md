@@ -4,32 +4,47 @@ External 6-DoF pose tracking at ~280 Hz, sub-centimetre, **independent of
 ORB-SLAM3**. Useful as a ground-truth reference for SLAM evaluation, and as a
 live 3D view in Rerun.
 
+Distinct from `nero.observability.rerun_bridge`, which visualises the robot's own
+ROS 2 sensor topics. This module adds an *external* position reference the robot
+cannot produce itself.
+
 ---
 
 ## Quick start
 
-Assumes the one-time setup below is already done (libsurvive built, tracker
-plugged in, Rerun venv created).
+Assumes libsurvive is built and a tracker is plugged in (see setup below).
 
-**1 — On your laptop, start the Rerun viewer:**
+**1 — Install the viewer extra:**
+
+```bash
+uv sync --extra viz          # installs rerun-sdk 0.22.1
+```
+
+**2 — On your laptop, start the Rerun viewer:**
 
 ```bash
 rerun --port 9876
 ```
 
-**2 — Open a reverse tunnel to the host the tracker is wired to:**
+> The viewer must be **the same version as the SDK (0.22.1)**. A newer viewer
+> will not talk to a 0.22.1 stream.
+
+**3 — Open a reverse tunnel to the host the tracker is wired to:**
 
 ```bash
 ssh -R 9876:localhost:9876 user@host
 ```
 
-**3 — In that shell on the host, stream poses:**
+**4 — In that shell on the host, stream poses:**
 
 ```bash
-export PYTHONPATH=/path/to/nero/src:$HOME/src/libsurvive/bindings/python
+export PYTHONPATH=$HOME/src/libsurvive/bindings/python
 export LD_LIBRARY_PATH=$HOME/src/libsurvive/bin
-~/venvs/vive/bin/python -m nero.vive.rerun_stream --lighthouse-count 1
+uv run nero-vive-rerun --lighthouse-count 1
 ```
+
+`pysurvive` ships inside the libsurvive source tree rather than on PyPI, so those
+two env vars are required even though `rerun` now comes from the project venv.
 
 You should see, and the same poses appear in the viewer:
 
@@ -41,11 +56,46 @@ INFO nero.vive.rerun_stream: logged 100 poses | WW0 at x=-0.430 y=+0.664 z=+0.07
 base station, `world/trails/WW0` its path. The scene is only ~1 m across — use
 the viewport's recenter control if it looks empty.
 
-> **Why not `uv run nero-vive-rerun`?** The console script is registered, but
-> `rerun-sdk` is *not* a nero dependency: it requires numpy>=2, which conflicts
-> with this project's numpy<2 pin. Rerun therefore lives in its own virtualenv
-> (`~/venvs/vive`) and is reached via `PYTHONPATH`, leaving nero's environment
-> untouched. See "Rerun / numpy" below.
+## Raspberry Pi → jscore UDP pose transport
+
+For the robot-mounted controller, libsurvive runs on the Raspberry Pi and sends
+poses over the private `NERA-WIFI` link. This avoids USB/IP and keeps the optical
+tracking loop beside the controller.
+
+On `jscore` (`10.77.0.1`), start the receiver:
+
+```bash
+uv run nero-vive-udp-receive --bind 10.77.0.1 --port 43100 --json
+```
+
+On the Pi, with this repo and libsurvive installed:
+
+```bash
+export PYTHONPATH=$PWD/src:$HOME/src/libsurvive/bindings/python
+export LD_LIBRARY_PATH=$HOME/src/libsurvive/bin
+uv run nero-vive-udp-send --host 10.77.0.1 --port 43100 --lighthouse-count 1
+```
+
+Each datagram is versioned JSON and contains:
+
+```json
+{
+  "version": 1,
+  "sequence": 123,
+  "timestamp": 1750000000.25,
+  "controller_id": "WW0",
+  "position": [0.1, 0.2, 0.3],
+  "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
+  "linear_velocity": [0.0, 0.0, 0.0],
+  "angular_velocity": [0.0, 0.0, 0.0],
+  "tracking_valid": true
+}
+```
+
+Units are metres, m/s, and rad/s. `timestamp` is Unix time on the Pi at receipt.
+The receiver reports sequence gaps and end-to-end latency, and projects each
+sample into the shared planar `RobotPose {x, y, yaw, t}` contract. A pose older
+than 150 ms is treated as invalid even if its last packet said it was valid.
 
 ---
 
@@ -67,8 +117,6 @@ a cable), `WM0` wireless watchman, `TR0` Vive Tracker, `LH0`/`LH1` base stations
 
 ## One-time setup
 
-`pysurvive` ships inside the libsurvive source tree, not on PyPI:
-
 ```bash
 sudo apt install -y build-essential cmake zlib1g-dev libx11-dev \
   libusb-1.0-0-dev freeglut3-dev liblapacke-dev libopenblas-dev
@@ -78,13 +126,6 @@ cd ~/src/libsurvive && make
 # USB permissions, else the device is invisible to a non-root user
 sudo cp ./useful_files/81-vive.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
-```
-
-A separate venv for the Rerun tooling (kept out of nero's environment):
-
-```bash
-python3 -m venv ~/venvs/vive
-~/venvs/vive/bin/pip install "rerun-sdk>=0.34,<0.35" numpy
 ```
 
 ## Verify tracking before involving Rerun
@@ -104,26 +145,14 @@ Both flags must read `1`:
 If `PositionSet=0`, hold the device still and visible and re-run with
 `--force-calibrate` for 30–60 s.
 
-## Rerun / numpy
-
-`rerun-sdk` >= 0.24 requires `numpy>=2`; nero pins `numpy<2.0.0` for its compiled
-`orbslam3-python` / `booster-robotics-sdk-python` wheels. The newest rerun-sdk
-that resolves against numpy 1.x is **0.23.1**.
-
-Rather than downgrade Rerun or loosen a pin protecting the SLAM stack, the viewer
-tooling runs from its own virtualenv. `rerun_stream.py` imports `rerun` lazily, so
-this package stays importable in nero's environment either way.
-
-The pin's origin is undocumented and may be stale — both compiled wheels were
-observed to install *and* import cleanly under numpy 2.5.1 on Python 3.12/x86_64.
-Confirming that on the K1 itself (Python 3.10, ARM64, running ORB-SLAM3 rather
-than merely importing it) would allow dropping the pin and depending on Rerun
-directly.
-
 ## Gotchas
 
 - **Nothing in Rerun, no error** — the streamer probably died on its first pose.
   Run in the foreground; data only flows once `logged N poses` prints.
+- **Viewer version mismatch** — the viewer must be 0.22.1, matching the pinned
+  SDK. Rerun's Python API also churns between releases: `set_time_sequence` here
+  is spelled `set_time(..., sequence=)` in >=0.23, and `Transform3D(axis_length=)`
+  exists in 0.22 but was removed later.
 - **`Transform3D` draws nothing on its own** — it is only a transform; geometry
   must be logged *under* that entity to be visible.
 - **Trails smear** — log them in world space, not under the moving entity.

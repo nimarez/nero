@@ -45,6 +45,8 @@ nero-rerun = "nero.observability.rerun_bridge:main"
 nero-command = "nero.remote_command:main"
 nero-command-relay = "nero.remote_command:relay_main"
 nero-vive-rerun = "nero.vive.rerun_stream:main"
+nero-vive-udp-send = "nero.vive.udp_transport:publisher_main"
+nero-vive-udp-receive = "nero.vive.udp_transport:receiver_main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

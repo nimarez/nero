@@ -10,5 +10,13 @@ package is importable without libsurvive built or the ``eval`` group installed.
 from __future__ import annotations
 
 from nero.vive.pose_source import PoseSource, TimedPose, VivePoseSource
+from nero.vive.udp_transport import PosePacket, PoseUdpPublisher, PoseUdpReceiver
 
-__all__ = ["PoseSource", "TimedPose", "VivePoseSource"]
+__all__ = [
+    "PosePacket",
+    "PoseSource",
+    "PoseUdpPublisher",
+    "PoseUdpReceiver",
+    "TimedPose",
+    "VivePoseSource",
+]
