@@ -193,7 +193,13 @@ class MapNavigator:
                     failed=True, message="No collision-free path to goal"
                 )
             self._current_path = (
-                smooth_path(path, self._grid) if self.config.path_smoothing else path
+                smooth_path(
+                    path,
+                    self._grid,
+                    inflation_radius=self.config.inflation_radius,
+                )
+                if self.config.path_smoothing
+                else path
             )
 
         if controller.has_reached_pose(

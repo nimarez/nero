@@ -130,9 +130,9 @@ def main() -> None:
         logger.info("Robot and shared IMU-RGBD navigation runtime initialized")
     except Exception as e:
         logger.error(f"Failed to connect to K1 robot: {e}")
-        if policy is not None:
+        if policy is not None and policy.is_running:
             policy.stop()
-        elif robot is not None:
+        if robot is not None:
             robot.stop()
         sys.exit(1)
 

@@ -190,34 +190,38 @@ class NavigationPolicy:
         Initializes all components and transitions to SHOWING_CAMERA state.
         """
         logger.info(f"Starting navigation policy (sim={self._is_sim})")
-        self._running = True
+        self._running = False
         self._start_time = time.time()
 
-        # Initialize components
-        if self.map_navigator is not None and self.map_navigator.grid is None:
-            self.map_navigator.load_map()
-        if self._is_sim:
-            self.sim_env.initialize()
-        elif self.robot:
-            initialize_sensor_navigation(
-                self.robot, self.slam, self.pose_estimator, self.safety
-            )
-        elif self.slam:
-            self.slam.initialize()
+        try:
+            if self.map_navigator is not None and self.map_navigator.grid is None:
+                self.map_navigator.load_map()
+            if self._is_sim:
+                self.sim_env.initialize()
+            elif self.robot:
+                initialize_sensor_navigation(
+                    self.robot, self.slam, self.pose_estimator, self.safety
+                )
+            elif self.slam:
+                self.slam.initialize()
 
-        if (
-            not self._is_sim
-            and self.object_detector is not None
-            and not self.object_detector.initialize()
-        ):
-            raise RuntimeError(
-                "No live object detector is available; install the configured model"
-            )
-        if self.safety:
-            self.safety.reset()
-        if self.pose_estimator:
-            self.pose_estimator.reset()
+            if (
+                not self._is_sim
+                and self.object_detector is not None
+                and not self.object_detector.initialize()
+            ):
+                raise RuntimeError(
+                    "No live object detector is available; install the configured model"
+                )
+            if self.safety:
+                self.safety.reset()
+            if self.pose_estimator:
+                self.pose_estimator.reset()
+        except Exception:
+            self._cleanup_components()
+            raise
 
+        self._running = True
         self._state = PolicyState.SHOWING_CAMERA
         self._update_status(message="Camera stream ready. Waiting for object name...")
         return self._status
@@ -370,9 +374,12 @@ class NavigationPolicy:
                     )
                 if not aligned:
                     self._state = PolicyState.LOCALIZING
+                    obstacle_blocked = localized.obstacle_info.get(
+                        "has_obstacle", False
+                    )
                     spin_speed = (
                         self.map_navigator.config.localization_spin_speed
-                        if self._goal is not None
+                        if self._goal is not None and not obstacle_blocked
                         else 0.0
                     )
                     command = VelocityCommand(angular_z=spin_speed)
@@ -381,7 +388,11 @@ class NavigationPolicy:
                         current_pose=localized.fused_pose,
                         safety_status=localized.safety_status,
                         velocity_command=command,
-                        message=detail,
+                        message=(
+                            f"{detail}; localization spin blocked by nearby obstacle"
+                            if obstacle_blocked and self._goal is not None
+                            else detail
+                        ),
                     )
                 if self._state == PolicyState.LOCALIZING:
                     if self._goal is None:
@@ -870,20 +881,27 @@ class NavigationPolicy:
         self._running = False
         self._state = PolicyState.IDLE
 
-        # Stop robot
-        self._stop_robot()
-
-        if self.slam:
-            self.slam.shutdown()
-
-        close_detector = getattr(self.object_detector, "close", None)
-        if callable(close_detector):
-            close_detector()
-        if self.sim_env:
-            self.sim_env.stop()
+        self._cleanup_components()
 
         self._update_status(message="Stopped")
         return self._status
+
+    def _cleanup_components(self) -> None:
+        """Best-effort cleanup, including partially initialized startup."""
+        cleanup = [self._stop_robot]
+        shutdown_slam = getattr(self.slam, "shutdown", None)
+        if callable(shutdown_slam):
+            cleanup.append(shutdown_slam)
+        close_detector = getattr(self.object_detector, "close", None)
+        if callable(close_detector):
+            cleanup.append(close_detector)
+        if self.sim_env:
+            cleanup.append(self.sim_env.stop)
+        for action in cleanup:
+            try:
+                action()
+            except Exception:
+                logger.exception("Navigation component cleanup failed")
 
     def _get_sensor_data(self) -> Optional[SensorFrame]:
         """Get latest sensor data from robot."""

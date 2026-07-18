@@ -45,6 +45,7 @@ def test_occupancy_grid_coordinates_costs_and_radius():
     assert grid.is_occupied(-1, 0)
     assert grid.get_cost(-1, 0) == float("inf")
     grid.data[2, 2] = -1
+    assert grid.is_occupied(2, 2)
     assert grid.get_cost(2, 2) == 50
 
 
@@ -108,6 +109,48 @@ def test_astar_smoothing_visibility_and_following():
     grid.data[:, 2] = 100
     assert astar(grid, (0, 0), (5, 0), allow_diagonal=False) is None
     assert not line_of_sight(grid, (0, 0), (5, 0))
+
+
+def test_planner_fails_closed_on_unknown_space():
+    grid = free_grid(size=7)
+    grid.data[:, 3] = -1
+
+    assert astar(grid, (1, 2), (5, 2), inflation_radius=0) is None
+    assert not line_of_sight(grid, (1, 2), (5, 2))
+
+
+def test_smoothing_preserves_planner_inflation_clearance():
+    grid = free_grid(size=12, resolution=0.1)
+    grid.data[4:8, 5:7] = 100
+    path = astar(grid, (0.1, 0.1), (1.0, 1.0), inflation_radius=0.2)
+
+    assert path is not None
+    smoothed = smooth_path(path, grid, inflation_radius=0.2)
+    for start, end in zip(smoothed.waypoints, smoothed.waypoints[1:]):
+        assert line_of_sight(grid, start, end, inflation_radius=0.2)
+
+
+def test_astar_heuristic_uses_the_same_metric_units_as_path_cost():
+    rng = np.random.default_rng(1)
+    data = (rng.random((30, 30)) < 0.27).astype(np.int8) * 100
+    data[0, :] = data[-1, :] = data[:, 0] = data[:, -1] = 100
+    data[1, 1] = data[28, 28] = 0
+    pixel_grid = OccupancyGrid(data, 1.0, (0.0, 0.0), 30, 30)
+    metric_grid = OccupancyGrid(data, 0.1, (0.0, 0.0), 30, 30)
+
+    pixel_path = astar(
+        pixel_grid,
+        pixel_grid.pixel_to_world(1, 1),
+        pixel_grid.pixel_to_world(28, 28),
+    )
+    metric_path = astar(
+        metric_grid,
+        metric_grid.pixel_to_world(1, 1),
+        metric_grid.pixel_to_world(28, 28),
+    )
+
+    assert pixel_path is not None and metric_path is not None
+    assert metric_path.cost / metric_grid.resolution == pytest.approx(pixel_path.cost)
 
 
 def test_depth_preprocessing_obstacles_clear_path_and_ground_plane():

@@ -46,22 +46,29 @@ class OccupancyGrid:
         return (x, y)
 
     def is_occupied(self, x: float, y: float, radius: float = 0.0) -> bool:
-        """Check if a world position is occupied."""
+        """Check if a world position is unsafe to traverse.
+
+        Unknown cells are deliberately treated as occupied. A fixed-map robot
+        must fail closed instead of planning through space the map has not
+        observed.
+        """
         px, py = self.world_to_pixel(x, y)
         if px < 0 or px >= self.width or py < 0 or py >= self.height:
             return True  # Out of bounds = occupied
 
         if radius > 0:
             # Check area around point
-            r_px = int(radius / self.resolution)
+            # Round outward so floating-point truncation can never make the
+            # realized clearance smaller than the configured robot radius.
+            r_px = int(np.ceil(radius / self.resolution))
             y_min = max(0, py - r_px)
             y_max = min(self.height, py + r_px + 1)
             x_min = max(0, px - r_px)
             x_max = min(self.width, px + r_px + 1)
             region = self.data[y_min:y_max, x_min:x_max]
-            return np.any(region == 100)
+            return np.any(region != 0)
 
-        return self.data[py, px] == 100
+        return self.data[py, px] != 0
 
     def get_cost(self, x: float, y: float) -> float:
         """Get traversal cost at a world position."""
@@ -205,9 +212,9 @@ def pointcloud_to_grid(
     selected = height >= height_threshold
     if max_height is not None:
         selected &= height <= max_height
-    pixels = np.floor((plane[selected] - np.asarray(origin, dtype=float)) / resolution).astype(
-        np.int64
-    )
+    pixels = np.floor(
+        (plane[selected] - np.asarray(origin, dtype=float)) / resolution
+    ).astype(np.int64)
     in_bounds = (
         (pixels[:, 0] >= 0)
         & (pixels[:, 0] < grid_pixels)

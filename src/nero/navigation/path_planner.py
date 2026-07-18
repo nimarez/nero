@@ -73,7 +73,7 @@ def get_neighbors(
     for dx, dy, cost in moves:
         nx, ny = px + dx, py + dy
         if 0 <= nx < grid.width and 0 <= ny < grid.height:
-            if grid.data[ny, nx] != 100:  # Not occupied
+            if grid.data[ny, nx] == 0:  # Known free space only
                 neighbors.append((nx, ny, cost))
 
     return neighbors
@@ -112,7 +112,10 @@ def astar(
 
     # A* search
     start_node = PathNode(
-        start_px, start_py, 0.0, heuristic((start_px, start_py), (goal_px, goal_py))
+        start_px,
+        start_py,
+        0.0,
+        heuristic((start_px, start_py), (goal_px, goal_py)) * grid.resolution,
     )
     open_set: list[PathNode] = [start_node]
     closed_set: set[tuple[int, int]] = set()
@@ -163,7 +166,7 @@ def astar(
 
             if new_g < g_scores.get((nx, ny), float("inf")):
                 g_scores[(nx, ny)] = new_g
-                h = heuristic((nx, ny), (goal_px, goal_py))
+                h = heuristic((nx, ny), (goal_px, goal_py)) * grid.resolution
                 neighbor = PathNode(nx, ny, new_g, h, parent=current)
                 heapq.heappush(open_set, neighbor)
 
@@ -175,6 +178,7 @@ def smooth_path(
     path: Path,
     grid: OccupancyGrid,
     max_iterations: int = 100,
+    inflation_radius: float = 0.0,
 ) -> Path:
     """Smooth a path by removing unnecessary waypoints.
 
@@ -196,6 +200,7 @@ def smooth_path(
                 grid,
                 path.waypoints[current_idx],
                 path.waypoints[next_idx],
+                inflation_radius=inflation_radius,
             ):
                 smoothed.append(path.waypoints[next_idx])
                 current_idx = next_idx
@@ -213,6 +218,7 @@ def line_of_sight(
     start: tuple[float, float],
     end: tuple[float, float],
     step_size: float = 0.05,
+    inflation_radius: float = 0.0,
 ) -> bool:
     """Check if there's a clear line of sight between two points."""
     dx = end[0] - start[0]
@@ -227,7 +233,7 @@ def line_of_sight(
         t = i / max(steps, 1)
         x = start[0] + dx * t
         y = start[1] + dy * t
-        if grid.is_occupied(x, y):
+        if grid.is_occupied(x, y, radius=inflation_radius):
             return False
 
     return True

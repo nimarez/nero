@@ -86,12 +86,14 @@ def localize_sensor_frame(
         imu_rpy=sensor.imu_rpy,
         timestamp=sensor.timestamp,
     )
-    safety_status = safety.check_safety(
-        imu_rpy=sensor.imu_rpy,
-        slam_tracking=slam_pose.tracking_status == "OK",
-    )
     depth_m = depth_processor.preprocess(sensor.depth)
     obstacle_info = depth_processor.detect_obstacles(depth_m)
+    # Tracking readiness is handled as a recoverable navigation state by the
+    # policy. Physical hazards remain emergency-stop conditions here.
+    safety_status = safety.check_safety(
+        imu_rpy=sensor.imu_rpy,
+        obstacle_distance=float(obstacle_info.get("min_distance", float("inf"))),
+    )
     return LocalizedFrame(
         sensor=sensor,
         slam_pose=slam_pose,

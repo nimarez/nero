@@ -105,7 +105,14 @@ def run_agent(
         map_config=map_config,
     )
 
-    policy.start()
+    try:
+        policy.start()
+    except Exception:
+        try:
+            robot.stop()
+        except Exception:
+            logger.exception("Robot cleanup failed after policy startup error")
+        raise
     telemetry = RosObservabilityPublisher.try_create(
         enabled=not getattr(args, "no_ros_observability", False)
     )

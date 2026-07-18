@@ -5,6 +5,7 @@ import numpy as np
 from nero.navigation.map_loader import OccupancyGrid
 from nero.navigation.map_policy import MapNavConfig
 from nero.navigation.policy import NavigationPolicy, PolicyState
+from nero.navigation.safety import SafetyMonitor
 from nero.perception.object_detector import ObjectDetection
 from nero.slam.orb_slam3_node import SLAMPose
 from nero.slam.pose_estimator import FusedPose
@@ -199,6 +200,24 @@ def test_auto_localization_does_not_move_before_a_goal(monkeypatch):
     assert robot.commands[-1] == (0.0, 0.0, 0.0)
 
 
+def test_auto_localization_does_not_spin_near_an_obstacle(monkeypatch):
+    policy, robot = _policy()
+    policy.map_navigator.config.auto_localize = True
+    policy.depth_processor.detect_obstacles = lambda depth: {
+        "has_obstacle": True,
+        "min_distance": 0.1,
+        "center_clear": False,
+    }
+    policy.map_navigator.update_alignment = lambda *args: (False, "pending")
+    policy.set_pose_goal(2.0, 5.0, np.pi / 2)
+
+    status = policy.step()
+
+    assert status.state == PolicyState.LOCALIZING
+    assert robot.commands[-1] == (0.0, 0.0, 0.0)
+    assert "spin blocked" in status.message
+
+
 def test_scan_accumulation_round_trips_through_session_frame():
     policy, _ = _policy()
     scan = np.array([[1.0, 0.0], [2.0, 0.5], [0.5, -1.0]])
@@ -228,6 +247,49 @@ def test_map_policy_stops_on_safety_violation():
     policy.set_pose_goal(2.0, 5.0)
     status = policy.step()
     assert status.state == PolicyState.ERROR
+    assert robot.commands[-1] == (0.0, 0.0, 0.0)
+
+
+def test_slam_bootstrap_remains_recoverable_past_tracking_timeout():
+    policy, robot = _policy()
+    lost_pose = SLAMPose(
+        position=np.zeros(3),
+        orientation=np.array([0.0, 0.0, 0.0, 1.0]),
+        tracking_status="LOST",
+    )
+    policy.slam.track_frame = lambda *args, **kwargs: lost_pose
+    policy.safety = SafetyMonitor(max_tracking_lost_time=0.0)
+
+    first = policy.step()
+    second = policy.step()
+
+    assert first.state == PolicyState.LOCALIZING
+    assert second.state == PolicyState.LOCALIZING
+    assert robot.commands[-1] == (0.0, 0.0, 0.0)
+
+
+def test_failed_startup_cleans_up_partial_robot_and_slam_initialization():
+    events = []
+
+    class StartupRobot(RecordingRobot):
+        def initialize(self):
+            events.append("robot initialized")
+
+        def get_camera_info(self):
+            return object()
+
+    robot = StartupRobot()
+    policy = NavigationPolicy(robot=robot, enable_object_detection=False)
+    policy.slam = SimpleNamespace(
+        initialize=lambda camera_info: (_ for _ in ()).throw(RuntimeError("bad slam")),
+        shutdown=lambda: events.append("slam shutdown"),
+    )
+
+    with np.testing.assert_raises_regex(RuntimeError, "bad slam"):
+        policy.start()
+
+    assert not policy.is_running
+    assert "slam shutdown" in events
     assert robot.commands[-1] == (0.0, 0.0, 0.0)
 
 
