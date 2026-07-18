@@ -206,6 +206,54 @@ def run(out_json, out_ply, proj_res=(1920, 1080), monitor_x=1920, grid_res=0.05)
     print(f"\nwrote {out_json} + occupancy grid{' + ' + out_ply if cloud else ''}")
 
 
+# ---------------------------------------------------------------- robot tracker -> foot offset
+def _find_tracker(openvr, vr):
+    for i in range(openvr.k_unMaxTrackedDeviceCount):
+        if vr.getTrackedDeviceClass(i) == openvr.TrackedDeviceClass_GenericTracker:
+            return i
+    return None
+
+
+def _device_forward_yaw(openvr, vr, idx, R):
+    poses = vr.getDeviceToAbsoluteTrackingPose(
+        openvr.TrackingUniverseStanding, 0, openvr.k_unMaxTrackedDeviceCount)
+    m = poses[idx].mDeviceToAbsoluteTracking
+    fwd_world = np.array([-m[0][2], -m[1][2], -m[2][2]])   # OpenVR device forward = -Z
+    f = np.asarray(R, float).T @ fwd_world
+    return math.atan2(f[1], f[0])
+
+
+def apply_robot_offset(tx, ty, tyaw, off):
+    """Tracker floor pose (x, y, yaw) -> robot FOOT-CENTER pose (x, y, yaw)."""
+    ryaw = (tyaw - off["yaw_offset"] + math.pi) % (2 * math.pi) - math.pi
+    c, s = math.cos(ryaw), math.sin(ryaw)
+    fx = tx - (c * off["dx"] - s * off["dy"])
+    fy = ty - (s * off["dx"] + c * off["dy"])
+    return fx, fy, ryaw
+
+
+def robot_offset(out_json, calib_json):
+    """Calibrate the back-strap tracker -> foot-center offset. Face the robot along floor +X first."""
+    openvr, vr = _openvr_setup()
+    calib = json.load(open(calib_json))
+    R = np.array(calib["floor_R"]); O = np.array(calib["floor_O"])
+    tr = _find_tracker(openvr, vr); ct = _find_controller(openvr, vr)
+    if tr is None or ct is None:
+        print("Need BOTH a tracker (on the robot's back strap) and a controller (in hand).")
+        return
+    print("Stand the K1 upright, tracker on its back strap, FACING the floor +X axis.")
+    input("Press ENTER to read the tracker...")
+    tpos = to_floor(R, O, _device_pos(openvr, vr, tr))
+    tyaw = _device_forward_yaw(openvr, vr, tr, R)
+    foot = to_floor(R, O, capture_point(openvr, vr, ct, "Touch the floor at the MIDPOINT of the robot's feet"))
+    off = {"dx": float(tpos[0] - foot[0]), "dy": float(tpos[1] - foot[1]), "dz": float(tpos[2]),
+           "yaw_offset": float(tyaw),
+           "note": "robot_foot_pose = apply_robot_offset(tracker_x, tracker_y, tracker_yaw, this)"}
+    json.dump(off, open(out_json, "w"), indent=2)
+    openvr.shutdown()
+    print(f"wrote {out_json}: dx={off['dx']:.3f} dy={off['dy']:.3f} dz={off['dz']:.3f} yaw_off={off['yaw_offset']:.3f}")
+
+
 # ---------------------------------------------------------------- self-test (no hardware)
 def _selftest():
     ok = True
@@ -244,6 +292,16 @@ def _selftest():
     n = sum(1 for _ in open(p))
     print(f"PLY export: {n} lines (7 header + 3 verts = 10)"); ok &= n == 10
 
+    # 5) robot tracker->foot offset round-trip
+    off = {"dx": -0.15, "dy": 0.05, "yaw_offset": 0.3, "dz": 0.9}
+    foot_true, ryaw_true = (1.0, 2.0), 0.5
+    c, s = math.cos(ryaw_true), math.sin(ryaw_true)
+    tx = foot_true[0] + c * off["dx"] - s * off["dy"]
+    ty = foot_true[1] + s * off["dx"] + c * off["dy"]
+    fx, fy, ryaw = apply_robot_offset(tx, ty, ryaw_true + off["yaw_offset"], off)
+    e5 = math.hypot(fx - foot_true[0], fy - foot_true[1]) + abs(ryaw - ryaw_true)
+    print(f"robot-offset round-trip error: {e5 * 1000:.4f} mm"); ok &= e5 < 1e-9
+
     print("SELFTEST:", "PASS" if ok else "FAIL")
     return ok
 
@@ -252,6 +310,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--run", action="store_true")
+    ap.add_argument("--robot-offset", action="store_true", help="calibrate the back-strap tracker -> foot offset")
+    ap.add_argument("--calib", default="calib/room_calib.json", help="room calib to load for --robot-offset")
     ap.add_argument("--out", default="calib/room_calib.json")
     ap.add_argument("--ply", default="calib/room_cloud.ply")
     ap.add_argument("--proj-w", type=int, default=1920)
@@ -260,12 +320,17 @@ def main():
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
+    if a.robot_offset:
+        import os
+        os.makedirs("calib", exist_ok=True)
+        robot_offset("calib/robot_offset.json", a.calib)
+        return
     if a.run:
         import os
         os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
         run(a.out, a.ply, proj_res=(a.proj_w, a.proj_h), monitor_x=a.monitor_x)
     else:
-        print("nothing to do; pass --selftest or --run")
+        print("nothing to do; pass --selftest, --run, or --robot-offset")
 
 
 if __name__ == "__main__":
