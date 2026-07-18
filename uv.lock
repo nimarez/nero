@@ -235,6 +235,7 @@ dev = [
     { name = "pytest", specifier = ">=7.0" },
     { name = "ruff", specifier = ">=0.1.0" },
 ]
+eval = []
 
 [[package]]
 name = "numpy"
@@ -274,8 +275,8 @@ name = "orbslam3-python"
 version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", marker = "sys_platform != 'darwin'" },
-    { name = "opencv-python", marker = "sys_platform != 'darwin'" },
+    { name = "numpy" },
+    { name = "opencv-python" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d2/67/3c9d223e695fab6727df0c353cb68a43cd6ff9b779fef825cc7df079d5cf/orbslam3_python-2.0.0-cp310-cp310-manylinux_2_28_aarch64.whl", hash = "sha256:1ef2983f49303825c50ace647f877c434d97a6b28e66a82d131ee0beaf840d67", size = 24062250, upload-time = "2025-10-17T15:38:58.215Z" },
