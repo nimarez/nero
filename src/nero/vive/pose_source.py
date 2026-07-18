@@ -33,6 +33,7 @@ class TimedPose:
     timestamp: float
     position: np.ndarray  # (3,) metres: x, y, z
     quaternion_xyzw: np.ndarray  # (4,) x, y, z, w
+    tracking_valid: bool = True
 
 
 class PoseSource(Protocol):

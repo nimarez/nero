@@ -115,6 +115,19 @@ controller, and telemetry processes can read that file without owning the UDP
 socket. It includes the full packet, a planar `robot_pose`, and transport latency
 and sequence-loss diagnostics.
 
+To run the native Rerun UI on your laptop while the Pi publisher and POS receiver
+keep exclusive ownership of the live hardware/UDP socket:
+
+```bash
+# Laptop, from this repository (the SSH alias `pos` must work):
+uv sync --extra viz
+uv run nero-vive-rerun --ssh-host pos --spawn
+```
+
+This opens Rerun locally and subscribes to the existing POS endpoint over SSH.
+No extra lab-network port is exposed, and the visualization cannot interfere
+with libsurvive on the Pi.
+
 ---
 
 ## Hardware
