@@ -41,6 +41,7 @@ class RobotState:
     rgb: Optional[AnyImage] = None
     depth: Optional[AnyImage] = None
     camera_info: Optional[CameraInfo] = None
+    imu_samples: Optional[list[tuple[float, ...]]] = None
 
     @property
     def position_2d(self) -> np.ndarray:

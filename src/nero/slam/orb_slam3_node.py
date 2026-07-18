@@ -214,6 +214,11 @@ class ORBSLAM3Node:
             raise RuntimeError("initialize() must be called before track_frame()")
         ts = time.time() if timestamp is None else float(timestamp)
         with self._lock:
+            if (
+                self._last_frame_timestamp is not None
+                and ts <= self._last_frame_timestamp
+            ):
+                return self._current_pose or self._lost_pose(ts)
             self._frame_count += 1
             if self._use_fallback:
                 pose = self._track_fallback(rgb, depth, ts)

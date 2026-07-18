@@ -69,7 +69,12 @@ def test_robot_image_helpers_normalize_k1_images():
 
 
 def test_hardware_agent_clis_use_k1_sensors_implicitly(monkeypatch):
-    from nero.agents import map_nav_agent, mapping_agent, orb_slam_agent
+    from nero.agents import (
+        booster_studio_agent,
+        map_nav_agent,
+        mapping_agent,
+        orb_slam_agent,
+    )
 
     monkeypatch.setattr(sys, "argv", ["nero-orb-slam"])
     orb_args = orb_slam_agent.parse_args()
@@ -90,6 +95,11 @@ def test_hardware_agent_clis_use_k1_sensors_implicitly(monkeypatch):
     assert not hasattr(map_nav_args, "camera")
     assert not hasattr(map_nav_args, "depth_camera")
     assert not hasattr(map_nav_args, "robot_serial")
+
+    monkeypatch.setattr(sys, "argv", ["nero-booster-studio"])
+    studio_args = booster_studio_agent.parse_args()
+    assert not hasattr(studio_args, "object")
+    assert not hasattr(studio_args, "target_distance")
 
 
 def test_detection_announcement_requires_explicit_confirmation():

@@ -168,6 +168,19 @@ def test_native_backend_refuses_frame_without_imu(tmp_path, monkeypatch):
     assert node._slam_system.calls == []
 
 
+def test_native_backend_does_not_resubmit_duplicate_camera_timestamp(
+    tmp_path, monkeypatch
+):
+    node = native_node(tmp_path, monkeypatch)
+    rgb = np.zeros((240, 320, 3), np.uint8)
+    depth = np.ones((240, 320), np.uint16)
+    imu = [IMUMeasurement(1.0, (0, 0, 9.81), (0, 0, 0))]
+    first = node.track_frame(rgb, depth, imu_data=imu, timestamp=1.0)
+    duplicate = node.track_frame(rgb, depth, imu_data=imu, timestamp=1.0)
+    assert duplicate is first
+    assert len(node._slam_system.calls) == 1
+
+
 def test_native_backend_honors_enhanced_result_failure(tmp_path, monkeypatch):
     vocabulary = tmp_path / "ORBvoc.txt"
     vocabulary.write_text("vocabulary")

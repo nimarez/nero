@@ -79,7 +79,7 @@ class MapManager:
             # Approximate area as bounding box
             dx = positions[:, 0].max() - positions[:, 0].min()
             dy = positions[:, 1].max() - positions[:, 1].min()
-            area = dx * dy
+            area = float(dx * dy)
         else:
             area = 0.0
 
@@ -104,7 +104,9 @@ class MapManager:
         with open(map_path, "w") as f:
             json.dump(asdict(saved_map), f, indent=2)
 
-        logger.info(f"Map '{name}' saved to {map_path} ({len(trajectory)} poses, {area:.1f} m²)")
+        logger.info(
+            f"Map '{name}' saved to {map_path} ({len(trajectory)} poses, {area:.1f} m²)"
+        )
         return str(map_path)
 
     def load_map(self, name: str) -> Optional[SavedMap]:

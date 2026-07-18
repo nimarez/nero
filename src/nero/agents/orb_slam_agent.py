@@ -42,31 +42,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main():
-    """Main entry point for ORB-SLAM agent."""
-    args = parse_args()
-
-    # Setup logging
-    log_level = logging.DEBUG if args.debug else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
-
-    logger.info("Starting Nero ORB-SLAM Agent")
-    logger.info("Sensors: K1 built-in RGB-D camera")
-
-    # Initialize robot
-    try:
-        robot = RobotInterface()
-        robot.initialize()
-        logger.info("Robot connected and initialized in walk mode")
-    except Exception as e:
-        logger.error(f"Failed to connect to K1 robot: {e}")
-        raise SystemExit(1) from e
-
+def run_agent(
+    robot, args: argparse.Namespace, *, slam_options=None, object_detector=None
+) -> None:
+    """Run the shared object-following loop with a robot environment adapter."""
     # Initialize navigation policy
-    policy = NavigationPolicy(robot=robot)
+    policy = NavigationPolicy(
+        robot=robot, slam_options=slam_options, object_detector=object_detector
+    )
 
     policy.start()
 
@@ -229,6 +212,30 @@ def main():
         if not args.no_display:
             cv2.destroyAllWindows()
         logger.info("Shutdown complete")
+
+
+def main():
+    """Main entry point for ORB-SLAM agent."""
+    args = parse_args()
+
+    log_level = logging.DEBUG if args.debug else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+    logger.info("Starting Nero ORB-SLAM Agent")
+    logger.info("Sensors: K1 built-in RGB-D camera")
+
+    try:
+        robot = RobotInterface()
+        robot.initialize()
+        logger.info("Robot connected and initialized in walk mode")
+    except Exception as e:
+        logger.error(f"Failed to connect to K1 robot: {e}")
+        raise SystemExit(1) from e
+
+    run_agent(robot, args)
 
 
 if __name__ == "__main__":

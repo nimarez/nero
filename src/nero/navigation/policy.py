@@ -102,6 +102,8 @@ class NavigationPolicy:
         robot=None,  # RobotInterface (real robot)
         sim_env=None,  # SimEnvironment (simulation)
         slam_config=None,
+        slam_options=None,
+        object_detector=None,
         navigation_config=None,
         safety_config=None,
     ):
@@ -112,7 +114,7 @@ class NavigationPolicy:
 
         # Components (only initialized for real robot mode)
         if HAS_BOOSTEROS and not self._is_sim:
-            self.slam = ORBSLAM3Node(config=slam_config)
+            self.slam = ORBSLAM3Node(config=slam_config, **(slam_options or {}))
             self.pose_estimator = PoseEstimator()
             self.depth_processor = DepthProcessor()
             self.safety = SafetyMonitor(**(safety_config or {}))
@@ -122,7 +124,7 @@ class NavigationPolicy:
             self.depth_processor = None
             self.safety = None
 
-        self.object_detector = ObjectDetector()
+        self.object_detector = object_detector or ObjectDetector()
         self.controller = VelocityController(**(navigation_config or {}))
 
         # State
@@ -445,7 +447,10 @@ class NavigationPolicy:
 
         # Update SLAM
         slam_pose = self.slam.track_frame(
-            rgb, depth, timestamp=sensor_data.get("timestamp")
+            rgb,
+            depth,
+            imu_data=sensor_data.get("imu_samples"),
+            timestamp=sensor_data.get("timestamp"),
         )
 
         # Update pose estimator
@@ -523,12 +528,13 @@ class NavigationPolicy:
         if self.robot:
             self.robot.set_velocity(cmd.linear_x, cmd.linear_y, cmd.angular_z)
 
+        distance_text = f"{target.distance:.2f}" if target else "unknown"
         return self._update_status(
             current_pose=fused_pose,
             safety_status=safety_status,
             velocity_command=cmd,
             detections=detections,
-            message=f"Navigating to '{self._goal.object_name}' ({target.distance if target else 'unknown':.2f}m)",
+            message=f"Navigating to '{self._goal.object_name}' ({distance_text}m)",
         )
 
     def stop(self) -> PolicyStatus:
@@ -562,6 +568,7 @@ class NavigationPolicy:
                 "timestamp": self.robot.image_timestamp(state.rgb),
                 "camera_info": state.camera_info,
                 "imu_rpy": state.orientation_rpy,
+                "imu_samples": getattr(state, "imu_samples", None),
                 "odometry": state.position_2d,
             }
         except Exception as e:

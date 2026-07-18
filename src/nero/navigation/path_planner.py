@@ -73,9 +73,7 @@ def get_neighbors(
     for dx, dy, cost in moves:
         nx, ny = px + dx, py + dy
         if 0 <= nx < grid.width and 0 <= ny < grid.height:
-            # Flip y for grid access
-            ny_grid = grid.height - 1 - ny
-            if grid.data[ny_grid, nx] != 100:  # Not occupied
+            if grid.data[ny, nx] != 100:  # Not occupied
                 neighbors.append((nx, ny, cost))
 
     return neighbors

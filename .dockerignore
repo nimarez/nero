@@ -1,0 +1,15 @@
+.git
+.venv
+.pytest_cache
+.ruff_cache
+__pycache__
+**/__pycache__
+*.py[cod]
+**/*.py[cod]
+*.egg-info
+build
+dist
+output
+config/ORBvoc.txt
+config/k1_calibration.json
+config/k1_orbslam3_imu_rgbd.yaml

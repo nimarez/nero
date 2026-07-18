@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class OccupancyGrid:
     """2D occupancy grid map."""
+
     data: np.ndarray  # 2D array: 0=free, 100=occupied, -1=unknown
     resolution: float  # meters per pixel
     origin: tuple[float, float]  # (x, y) of pixel (0, 0) in world coords
@@ -66,7 +67,7 @@ class OccupancyGrid:
         """Get traversal cost at a world position."""
         px, py = self.world_to_pixel(x, y)
         if px < 0 or px >= self.width or py < 0 or py >= self.height:
-            return float('inf')
+            return float("inf")
         val = self.data[py, px]
         if val == -1:
             return 50  # Unknown = medium cost
@@ -93,17 +94,21 @@ def load_occupancy_grid(
         OccupancyGrid object
     """
     map_path = Path(map_path)
+    ros_thresholds = False
 
     # Load YAML metadata if provided
     if yaml_path is not None:
         import yaml
+
         with open(yaml_path) as f:
             meta = yaml.safe_load(f)
         resolution = meta.get("resolution", resolution)
-        origin = tuple(meta.get("origin", list(origin)))
-        threshold = meta.get("occupied_thresh", threshold)
+        origin_values = meta.get("origin", list(origin))
+        origin = (float(origin_values[0]), float(origin_values[1]))
+        occupied_thresh = float(meta.get("occupied_thresh", 0.65))
         free_thresh = meta.get("free_thresh", 0.25)
         negate = meta.get("negate", 0)
+        ros_thresholds = True
 
     if map_path.suffix == ".npy":
         data = np.load(map_path)
@@ -122,7 +127,13 @@ def load_occupancy_grid(
     # Convert to occupancy values
     data = np.full(gray.shape, -1, dtype=np.int8)  # Default unknown
 
-    if negate:
+    if ros_thresholds:
+        occupancy = gray.astype(np.float32) / 255.0
+        if not negate:
+            occupancy = 1.0 - occupancy
+        free_mask = occupancy < free_thresh
+        occ_mask = occupancy > occupied_thresh
+    elif negate:
         # Dark = free, light = occupied
         free_mask = gray < (threshold - free_thresh * 255)
         occ_mask = gray > threshold
@@ -131,7 +142,7 @@ def load_occupancy_grid(
         free_mask = gray > (255 - threshold + free_thresh * 255)
         occ_mask = gray < (255 - threshold)
 
-    data[free_mask] = 0   # Free
+    data[free_mask] = 0  # Free
     data[occ_mask] = 100  # Occupied
 
     return OccupancyGrid(
@@ -197,8 +208,8 @@ def save_grid_as_png(grid: OccupancyGrid, path: str | Path) -> None:
 
     # Convert to image: 0=white (free), 100=black (occupied), -1=gray (unknown)
     img = np.full((grid.height, grid.width), 205, dtype=np.uint8)  # Gray for unknown
-    img[grid.data == 0] = 254   # White for free
-    img[grid.data == 100] = 0   # Black for occupied
+    img[grid.data == 0] = 254  # White for free
+    img[grid.data == 100] = 0  # Black for occupied
 
     Image.fromarray(img).save(path)
     logger.info(f"Saved occupancy grid to {path}")
@@ -207,6 +218,7 @@ def save_grid_as_png(grid: OccupancyGrid, path: str | Path) -> None:
 def save_grid_yaml(grid: OccupancyGrid, path: str | Path) -> None:
     """Save grid metadata as YAML (ROS-style)."""
     import yaml
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 

@@ -32,6 +32,7 @@ target-version = "py310"
 [project.scripts]
 nero-orb-slam = "nero.agents.orb_slam_agent:main"
 nero-sim = "nero.agents.sim_agent:main"
+nero-booster-studio = "nero.agents.booster_studio_agent:main"
 nero-mapping = "nero.agents.mapping_agent:main"
 nero-map-nav = "nero.agents.map_nav_agent:main"
 nero-pc2map = "nero.utils.pointcloud_converter:main"

@@ -70,7 +70,7 @@ class PoseEstimator:
         Returns:
             FusedPose estimate
         """
-        ts = timestamp or time.time()
+        ts = time.time() if timestamp is None else timestamp
         self._last_update_time = ts
 
         # Store latest readings
@@ -82,7 +82,10 @@ class PoseEstimator:
             self._last_imu_rpy = np.array(imu_rpy)
 
         # Determine which sources are available
-        has_slam = self._last_slam_pose is not None and self._last_slam_pose.tracking_status == "OK"
+        has_slam = (
+            self._last_slam_pose is not None
+            and self._last_slam_pose.tracking_status == "OK"
+        )
         has_odom = self._last_odom_pose is not None
         has_imu = self._last_imu_rpy is not None
 
@@ -98,7 +101,7 @@ class PoseEstimator:
             odom_pos = self._last_odom_pose[:2]
             position_2d = self.slam_weight * slam_pos + self.odom_weight * odom_pos
             # Normalize weights
-            position_2d /= (self.slam_weight + self.odom_weight)
+            position_2d /= self.slam_weight + self.odom_weight
             confidence = 0.9
         elif has_slam:
             position_2d = self._last_slam_pose.position[:2]
@@ -109,8 +112,9 @@ class PoseEstimator:
 
         # Compute fused yaw
         if has_imu and has_odom:
-            yaw = (1 - self.imu_orientation_weight) * self._last_odom_pose[2] + \
-                  self.imu_orientation_weight * self._last_imu_rpy[2]
+            yaw = (1 - self.imu_orientation_weight) * self._last_odom_pose[
+                2
+            ] + self.imu_orientation_weight * self._last_imu_rpy[2]
         elif has_imu:
             yaw = self._last_imu_rpy[2]
         elif has_odom:
@@ -131,7 +135,9 @@ class PoseEstimator:
             yaw=yaw,
             timestamp=ts,
             confidence=confidence,
-            source="fused" if has_slam and has_odom else ("slam" if has_slam else "odom"),
+            source=(
+                "fused" if has_slam and has_odom else ("slam" if has_slam else "odom")
+            ),
         )
 
         return self._fused_pose
