@@ -42,6 +42,24 @@ class SLAMPose:
         matrix[:3, 3] = self.position
         return matrix
 
+    def camera_to_body(self, tbc: np.ndarray) -> "SLAMPose":
+        """Convert the world camera pose to the world body/IMU pose.
+
+        ``tbc`` is the ORB-SLAM3 ``T_b_c1`` calibration: the camera pose in
+        the body frame.  Therefore ``T_w_b = T_w_c @ inverse(T_b_c)``.
+        """
+        transform = np.asarray(tbc, dtype=float)
+        if transform.shape != (4, 4):
+            raise ValueError("tbc must be a 4x4 transform")
+        twb = self.to_matrix() @ np.linalg.inv(transform)
+        return SLAMPose(
+            position=twb[:3, 3].copy(),
+            orientation=Rotation.from_matrix(twb[:3, :3]).as_quat(),
+            timestamp=self.timestamp,
+            tracking_status=self.tracking_status,
+            num_map_points=self.num_map_points,
+        )
+
 
 @dataclass
 class SLAMConfig:
@@ -133,6 +151,21 @@ class ORBSLAM3Node:
     @property
     def using_native(self) -> bool:
         return not self._use_fallback
+
+    @property
+    def tbc(self) -> np.ndarray:
+        """Return the calibrated camera pose in the body/IMU frame."""
+        if self._calibration is None:
+            return np.eye(4)
+        return np.asarray(self._calibration.tbc, dtype=float)
+
+    @property
+    def calibration(self) -> K1Calibration | None:
+        return self._calibration
+
+    def body_pose(self, camera_pose: SLAMPose) -> SLAMPose:
+        """Convert an ORB camera pose into the robot body frame."""
+        return camera_pose.camera_to_body(self.tbc)
 
     def initialize(self, camera_info: Any = None) -> bool:
         if camera_info is not None:
@@ -273,7 +306,9 @@ class ORBSLAM3Node:
             process = self._slam_system.process_image_rgbd_inertial
         result = process(image, depth_image, timestamp, imu)
         if result is not None and hasattr(result, "success"):
-            if not bool(result.success) or not bool(result.is_valid):
+            success = result.success() if callable(result.success) else result.success
+            valid = result.is_valid() if callable(result.is_valid) else result.is_valid
+            if not bool(success) or not bool(valid):
                 logger.warning("ORB-SLAM3 rejected IMU_RGBD frame %.6f", timestamp)
                 return self._lost_pose(timestamp)
             state_value = result.state
@@ -399,6 +434,22 @@ class ORBSLAM3Node:
 
     def get_map_points_count(self) -> int:
         return self._map_points_count
+
+    def get_map_points(self) -> np.ndarray:
+        """Return the currently tracked native map points when exposed by the binding."""
+        if self._use_fallback or self._slam_system is None:
+            return np.empty((0, 3), dtype=np.float32)
+        getter = getattr(self._slam_system, "get_tracked_mappoints", None)
+        if getter is None:
+            return np.empty((0, 3), dtype=np.float32)
+        points = getter()
+        if points is None:
+            return np.empty((0, 3), dtype=np.float32)
+        values = np.asarray(points, dtype=np.float32)
+        if values.size == 0:
+            return np.empty((0, 3), dtype=np.float32)
+        values = values.reshape(-1, values.shape[-1])[:, :3]
+        return values[np.all(np.isfinite(values), axis=1)]
 
     def get_keyframe_count(self) -> int:
         return self._keyframe_count

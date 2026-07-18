@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Protocol
 
 import numpy as np
 
@@ -70,6 +70,30 @@ class RobotState:
         if self.imu is None:
             return np.array([0.0, 0.0, 0.0])
         return np.array(self.imu.linear_acceleration)
+
+
+class RobotAdapter(Protocol):
+    """Transport-neutral sensor, interaction, and locomotion boundary.
+
+    Policies depend on this contract, while the real K1 and Booster Studio are
+    free to source state from the vendor SDK or ROS 2 respectively.
+    """
+
+    def initialize(self) -> None: ...
+
+    def get_state(self, include_images: bool = True) -> RobotState: ...
+
+    def get_camera_info(self) -> Any: ...
+
+    def image_to_array(self, image: Any) -> np.ndarray: ...
+
+    def image_timestamp(self, image: Any) -> float: ...
+
+    def set_velocity(self, vx: float, vy: float, vyaw: float) -> None: ...
+
+    def speak(self, text: str) -> None: ...
+
+    def stop(self) -> None: ...
 
 
 class RobotInterface:

@@ -1,11 +1,15 @@
 import time
 import threading
+from pathlib import Path
 
+import cv2
 import numpy as np
+import pytest
 import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 
 from nero.navigation.policy import NavigationPolicy, PolicyState
+from nero.slam.k1_calibration import K1Calibration, estimate_frequency
 from nero.simulation.booster_studio import (
     BoosterStudioRobotInterface,
     BoosterStudioTopics,
@@ -16,6 +20,7 @@ from nero.simulation.mock_robot import MockRobot
 from nero.simulation.sim_camera import CameraMode, SimCamera
 from nero.simulation.booster_studio_room import (
     BACKUP_SUFFIX,
+    CALIBRATED_MODEL_NAME,
     SCENE_DIR,
     configure_ros_transport,
     find_sim_root,
@@ -124,6 +129,8 @@ def test_booster_studio_topics_match_installed_k1_simulator():
         "/booster/ros2_k2_imu/robot1",
     )
     assert topics.pose == "/soccer/sim/localization/robot_pose"
+    assert topics.clock == "/clock"
+    assert topics.odom == "/odom"
     assert topics.detections == "/soccer/sim/vision/detections"
 
 
@@ -148,6 +155,25 @@ def test_booster_studio_calibration_uses_live_intrinsics(tmp_path):
     np.testing.assert_allclose(np.asarray(calibration.tbc)[:3, 3], [0.0669, 0, 0.3559])
 
 
+def test_booster_studio_calibration_preserves_real_k1_extrinsics(tmp_path):
+    reference = K1Calibration.load(Path("config/k1_geek_nominal_calibration.json"))
+    camera_info = SimpleNamespace(
+        header=SimpleNamespace(frame_id="/rgbd_camera_frame"),
+        width=reference.width,
+        height=reference.height,
+        k=reference.camera_matrix,
+        d=reference.distortion,
+    )
+    calibration = write_booster_studio_calibration(
+        camera_info,
+        tmp_path / "calibration.json",
+        camera_fps=reference.camera_fps,
+        imu_frequency=reference.imu_frequency,
+        reference_calibration=reference,
+    )
+    np.testing.assert_allclose(calibration.tbc, reference.tbc)
+
+
 def test_booster_studio_image_helpers():
     stamp = SimpleNamespace(sec=4, nanosec=250_000_000)
     image = SimpleNamespace(
@@ -156,6 +182,177 @@ def test_booster_studio_image_helpers():
     )
     np.testing.assert_array_equal(BoosterStudioRobotInterface.image_to_array(image), image.data)
     assert BoosterStudioRobotInterface.image_timestamp(image) == 4.25
+    assert BoosterStudioRobotInterface.image_source_timestamp(image) == 4.25
+
+
+def _adapter_without_ros():
+    robot = BoosterStudioRobotInterface.__new__(BoosterStudioRobotInterface)
+    robot._lock = threading.Lock()
+    robot._ready = threading.Condition(robot._lock)
+    robot._rgb = None
+    robot._depth = None
+    robot._pending_rgb = {}
+    robot._pending_depth = {}
+    robot._rgb_timestamps = []
+    robot._frame_tokens = 1.0
+    robot._last_source_frame_timestamp = None
+    robot._pose = np.zeros(3)
+    robot._pose_samples = []
+    robot._sim_time = None
+    robot._odom = None
+    robot._imu = None
+    robot._imu_samples = []
+    robot._orientation_samples = []
+    robot._expected_calibration = None
+    return robot
+
+
+def _header_at(seconds: int, nanoseconds: int = 0):
+    return SimpleNamespace(
+        stamp=SimpleNamespace(sec=seconds, nanosec=nanoseconds),
+        frame_id="rgbd_camera_frame",
+    )
+
+
+def test_booster_studio_only_commits_exact_rgb_depth_pairs():
+    robot = _adapter_without_ros()
+    rgb = np.full((2, 3, 3), 127, dtype=np.uint8)
+    ok, encoded = cv2.imencode(".jpg", rgb)
+    assert ok
+    robot._on_rgb(SimpleNamespace(data=encoded.tobytes(), header=_header_at(1)))
+    robot._on_depth(
+        SimpleNamespace(
+            data=np.ones((2, 3), np.uint16).tobytes(),
+            header=_header_at(2),
+            encoding="16UC1",
+            height=2,
+            width=3,
+            is_bigendian=False,
+        )
+    )
+    assert robot._rgb is None
+    assert robot._depth is None
+
+    robot._on_depth(
+        SimpleNamespace(
+            data=np.full((2, 3), 1234, np.uint16).tobytes(),
+            header=_header_at(1),
+            encoding="16UC1",
+            height=2,
+            width=3,
+            is_bigendian=False,
+        )
+    )
+    assert robot._rgb.header.stamp.sec == robot._depth.header.stamp.sec == 1
+    np.testing.assert_array_equal(robot._depth.data, 1234)
+    assert robot.image_timestamp(robot._rgb) == robot.image_timestamp(robot._depth)
+
+
+def test_booster_studio_bounds_unmatched_image_queues():
+    robot = _adapter_without_ros()
+    ok, encoded = cv2.imencode(".jpg", np.zeros((2, 3, 3), dtype=np.uint8))
+    assert ok
+    for stamp in range(12):
+        robot._on_rgb(
+            SimpleNamespace(data=encoded.tobytes(), header=_header_at(stamp))
+        )
+    assert len(robot._pending_rgb) == 10
+    assert min(robot._pending_rgb) == 2_000_000_000
+
+
+def test_booster_studio_delivers_synchronized_pairs_at_geek_rate(monkeypatch):
+    robot = _adapter_without_ros()
+    robot._expected_calibration = K1Calibration.load(
+        Path("config/k1_geek_nominal_calibration.json")
+    )
+    for index in range(31):
+        receipt = index / 30.0
+        stamp = index
+        seconds = int(receipt)
+        nanoseconds = int(round((receipt - seconds) * 1_000_000_000))
+        header = _header_at(seconds, nanoseconds)
+        rgb = SimpleNamespace(data=np.zeros((2, 3, 3)), header=header)
+        depth = SimpleNamespace(data=np.full((2, 3), 1000, np.uint16), header=header)
+        robot._pending_rgb[stamp] = (rgb, receipt)
+        robot._pending_depth[stamp] = depth
+        monkeypatch.setattr("nero.simulation.booster_studio.time.monotonic", lambda r=receipt: r)
+        with robot._ready:
+            robot._commit_synchronized_frame(stamp)
+    assert len(robot._rgb_timestamps) == 21
+    assert estimate_frequency(robot._rgb_timestamps, "camera") == pytest.approx(20.0)
+
+
+def test_booster_studio_rate_measurement_uses_simulation_clock(monkeypatch):
+    robot = _adapter_without_ros()
+    robot._rgb_timestamps = [12.0]
+    robot._imu_samples = [(0.0, 0.0, 9.81, 0.0, 0.0, 0.0, 12.0)]
+    monotonic_values = iter((10_000.0, 10_002.0))
+    monkeypatch.setattr(
+        "nero.simulation.booster_studio.time.monotonic",
+        lambda: next(monotonic_values),
+    )
+
+    def wait_for(_predicate, timeout):
+        assert timeout == pytest.approx(2.5)
+        robot._rgb_timestamps.extend(12.05 + index * 0.05 for index in range(11))
+        robot._imu_samples.extend(
+            (0.0, 0.0, 9.81, 0.0, 0.0, 0.0, 12.002 + index * 0.002)
+            for index in range(11)
+        )
+        return True
+
+    monkeypatch.setattr(robot._ready, "wait_for", wait_for)
+    camera_fps, imu_fps = robot.measure_sensor_rates()
+    assert camera_fps == pytest.approx(20.0)
+    assert imu_fps == pytest.approx(500.0)
+
+
+def test_booster_studio_interpolates_ground_truth_across_yaw_wrap():
+    robot = _adapter_without_ros()
+    robot._pose_samples = [
+        (10.0, np.array([0.0, 0.0, np.deg2rad(179.0)])),
+        (12.0, np.array([2.0, 4.0, np.deg2rad(-179.0)])),
+    ]
+    pose = robot._ground_truth_pose_locked(11.0)
+    np.testing.assert_allclose(pose[:2], [1.0, 2.0])
+    assert abs(abs(pose[2]) - np.pi) < 1e-6
+
+
+def test_booster_studio_stamps_reference_pose_in_simulation_time():
+    robot = _adapter_without_ros()
+    robot._on_clock(
+        SimpleNamespace(clock=SimpleNamespace(sec=7, nanosec=500_000_000))
+    )
+    robot._on_pose(SimpleNamespace(x=1.0, y=2.0, theta=0.3))
+    assert robot._pose_samples[0][0] == 7.5
+    np.testing.assert_allclose(robot.get_ground_truth_pose(7.5), [1.0, 2.0, 0.3])
+
+
+def test_booster_studio_stamps_imu_in_simulation_time_and_deduplicates():
+    robot = _adapter_without_ros()
+    robot._on_clock(SimpleNamespace(clock=SimpleNamespace(sec=8, nanosec=250_000_000)))
+    vector = SimpleNamespace(x=0.0, y=0.0, z=0.0)
+    imu = SimpleNamespace(
+        orientation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
+        angular_velocity=vector,
+        linear_acceleration=SimpleNamespace(x=0.0, y=0.0, z=9.81),
+    )
+    robot._on_imu(imu)
+    robot._on_imu(imu)
+    assert len(robot._imu_samples) == 1
+    assert robot._imu_samples[0][6] == 8.25
+    assert len(robot._orientation_samples) == 1
+
+
+def test_booster_studio_interpolates_imu_orientation_at_camera_time():
+    robot = _adapter_without_ros()
+    robot._orientation_samples = [
+        (1.0, np.deg2rad([10.0, 20.0, 179.0])),
+        (3.0, np.deg2rad([30.0, 40.0, -179.0])),
+    ]
+    orientation = robot._orientation_locked(2.0)
+    np.testing.assert_allclose(np.rad2deg(orientation[:2]), [20.0, 30.0])
+    assert abs(abs(orientation[2]) - np.pi) < 1e-6
 
 
 def test_booster_studio_detection_coordinates_feed_shared_controller():
@@ -186,7 +383,10 @@ def _fake_booster_sim(tmp_path):
     mjcf = root / "mjcf"
     mjcf.mkdir(parents=True)
     (mjcf / "assets").mkdir()
-    (mjcf / "K1_22dof.xml").write_text("<mujoco/>")
+    (mjcf / "K1_22dof.xml").write_text(
+        "<mujoco><worldbody><camera name='rgbd_camera' fovy='58' "
+        "resolution='320 240'/></worldbody></mujoco>"
+    )
     (mjcf / "default_pitch_K1.xml").write_text("<mujoco model='original'/>")
     (mjcf / "default_pitch_K1.extensions.xml").write_text("<extensions/>")
     return root
@@ -218,6 +418,12 @@ def test_room_installer_stages_assets_without_changing_default(tmp_path):
     assert scene.is_file()
     assert extensions.is_file()
     assert len(list((sim_root / "mjcf" / "assets" / "nero_room").glob("*.obj"))) == 8
+    calibrated_model = sim_root / "mjcf" / CALIBRATED_MODEL_NAME
+    camera = ET.parse(calibrated_model).getroot().find(".//camera")
+    assert camera is not None
+    assert camera.attrib["resolution"] == "544 448"
+    assert float(camera.attrib["fovy"]) == 94.0
+    assert CALIBRATED_MODEL_NAME in scene.read_text()
     assert (sim_root / "mjcf" / "default_pitch_K1.xml").read_text() == original
     assert find_sim_root(sim_root) == sim_root
 
@@ -261,11 +467,11 @@ def test_room_activation_enables_ros_imu_transport_and_restores_it(tmp_path):
     assert container_env.read_text() == original
 
 
-def test_room_activation_refuses_to_modify_signed_app_bundle(tmp_path):
+def test_room_installer_refuses_to_modify_signed_app_bundle(tmp_path):
     sim_root = _fake_booster_sim(tmp_path / "Booster Studio.app" / "Contents")
     try:
-        install_room(sim_root, activate=True)
+        install_room(sim_root)
     except PermissionError as exc:
         assert "signed macOS application bundle" in str(exc)
     else:
-        raise AssertionError("signed app activation should have been rejected")
+        raise AssertionError("signed app modification should have been rejected")

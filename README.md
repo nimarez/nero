@@ -88,13 +88,23 @@ The run wrapper sources Studio's ROS 2 environment, then executes
 The Booster Studio command runs the same object detection, spoken announcement,
 human confirmation, `IMU_RGBD` SLAM, obstacle processing, navigation, and safety
 policy used by `nero-orb-slam`. Only the environment adapter changes. It consumes
-the simulator's live RGB, 16-bit depth, CameraInfo, IMU, and localization topics,
+the simulator's live RGB, 16-bit depth, CameraInfo, IMU, and odometry topics,
 synchronizes RGB-D and IMU on a shared receipt-time clock, derives simulator
 calibration from live intrinsics plus the K1 MJCF camera mount, and sends velocity
 through the official Booster locomotion client on `127.0.0.1`.
+The simulator localization topic is isolated as benchmark-only ground truth; it
+is never exposed to the navigation policy as odometry.
 It verifies that RGB, depth, and CameraInfo dimensions agree, requires the K1
 simulator's 16-bit millimetre depth format, and measures rendered camera and IMU
 rates before generating the ORB-SLAM settings.
+
+The staged Geek sensor profile is 544x448 RGB and depth at 20 fps, global shutter,
+105x94 degree RGB/depth field of view, and a 0.5-6 m depth range. Scene activation
+creates a vendor-model copy with that resolution and vertical FOV. Studio's
+container relay has no host-renderer control channel, so Nero deterministically
+decimates exact synchronized RGB-D pairs to the delivered 20 fps contract and
+rejects a source that is too slow. A calibration captured from the real robot
+takes precedence over the nominal profile.
 
 The default single-robot topics match Booster Studio's installed K1 simulator.
 For a named/multi-robot scene, override them with `--rgb-topic`, `--depth-topic`,
@@ -103,6 +113,61 @@ Object names and target
 distances remain intentionally absent from the CLI: detections are live, the
 simulated speaker announces each candidate in the terminal, and a human confirms
 before motion begins.
+
+### Sim-reference benchmark
+
+With the furnished scene visible and the virtual K1 in WALK mode, run the native
+localization and mapping benchmark from its terminal:
+
+```bash
+./scripts/run_booster_benchmark.sh
+```
+
+The conservative built-in trajectory always stops in a `finally` block. Reports
+land in `output/sim_benchmark/` and include tracking coverage, rigid-SE(2)-aligned
+ATE and RPE, yaw error, metric scale drift, and symmetric point-cloud geometry
+scores. Alignment never rescales the trajectory, so RGB-D scale errors remain
+visible. The simulator reference pose is used only by this evaluator.
+
+### Policy and ROS boundary
+
+Navigation and mapping policies depend on Nero's transport-neutral `RobotAdapter`.
+The physical K1 implementation uses the high-level vendor walking controller; the
+Studio implementation supplies the same contract from ROS 2 sensor/state topics
+and sends body-velocity commands through `B1LocoClient`. Nero intentionally does
+not run `booster_deploy` beside that controller: its joint-space policy loop enters
+custom control mode and publishes motor targets, so it is an alternative gait
+backend rather than a sensor/navigation framework. It can be added later behind
+the same adapter if a custom locomotion policy is required.
+
+### ROS 2 and Rerun observability
+
+The hardware, Studio, mapping, and benchmark runtimes publish a common ROS 2
+observability contract by default. Sensors live under `/nero/sensors`, fused
+SLAM pose/path/map data under `/nero/slam`, detections and commands under
+`/nero/navigation`, and simulator-only truth under `/nero/reference`. The
+reference namespace is visualization and benchmark data only; policies never
+consume it. Pass `--no-ros-observability` to an agent to disable this layer.
+
+Start the viewer on the macOS host:
+
+```bash
+./scripts/run_rerun_viewer.sh
+```
+
+Then start the bridge in a Booster Studio terminal:
+
+```bash
+./scripts/run_rerun_bridge.sh
+```
+
+Run `nero-booster-studio`, `nero-mapping`, or `nero-sim-benchmark` in another
+Studio terminal. Rerun will show synchronized RGB and metric depth, intrinsics,
+IMU plots, estimated and reference transforms/paths/map points, detections,
+tracking and navigation status, and velocity commands. To record without a live
+viewer, run `uv run --extra viz nero-rerun --save output/nero.rrd` inside the
+ROS environment. The Rerun dependency is an optional uv extra so headless robot
+runtimes do not install visualization packages.
 
 ### Furnished-room scene
 

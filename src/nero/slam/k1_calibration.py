@@ -17,6 +17,10 @@ from scipy.spatial.transform import Rotation
 logger = logging.getLogger(__name__)
 
 DEFAULT_CAMERA_INFO_TOPIC = "rt/booster/camera/color/camera_info"
+K1_GEEK_RESOLUTION = (544, 448)
+K1_GEEK_FPS = 20.0
+K1_GEEK_FOV_DEGREES = (105.0, 94.0)
+K1_GEEK_DEPTH_RANGE_M = (0.5, 6.0)
 
 
 def _yaml_real(value: float) -> str:
@@ -86,6 +90,15 @@ class K1Calibration:
     imu_gyro_walk: float
     imu_acc_walk: float
     source: str = "K1 runtime + stationary IMU measurement"
+    shutter_type: str = "global"
+    rgb_fov_degrees: list[float] | None = None
+    depth_width: int | None = None
+    depth_height: int | None = None
+    depth_fps: float | None = None
+    depth_fov_degrees: list[float] | None = None
+    depth_accuracy_at_1m: float | None = None
+    depth_min_m: float | None = None
+    depth_max_m: float | None = None
 
     def validate(self) -> None:
         if len(self.camera_matrix) != 9:
@@ -108,6 +121,61 @@ class K1Calibration:
             raise ValueError(f"invalid IMU_RGBD calibration fields: {', '.join(invalid)}")
         if not np.all(np.isfinite(np.asarray(self.tbc, dtype=float))):
             raise ValueError("tbc contains non-finite values")
+        matrix = np.asarray(self.camera_matrix, dtype=float).reshape(3, 3)
+        if not np.all(np.isfinite(matrix)) or matrix[0, 0] <= 0 or matrix[1, 1] <= 0:
+            raise ValueError("camera_matrix must contain finite positive focal lengths")
+        rotation = np.asarray(self.tbc, dtype=float)[:3, :3]
+        if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-5) or not np.isclose(
+            np.linalg.det(rotation), 1.0, atol=1e-5
+        ):
+            raise ValueError("tbc rotation must be a proper orthonormal matrix")
+        if self.shutter_type.lower() != "global":
+            raise ValueError("K1 Geek calibration must use its global shutter")
+        if self.depth_width is not None and self.depth_width <= 0:
+            raise ValueError("depth_width must be positive")
+        if self.depth_height is not None and self.depth_height <= 0:
+            raise ValueError("depth_height must be positive")
+        if self.depth_fps is not None and self.depth_fps <= 0:
+            raise ValueError("depth_fps must be positive")
+        if self.depth_width is not None and self.depth_width != self.width:
+            raise ValueError("K1 Geek RGB and depth widths must match")
+        if self.depth_height is not None and self.depth_height != self.height:
+            raise ValueError("K1 Geek RGB and depth heights must match")
+        if self.depth_fps is not None and not np.isclose(self.depth_fps, self.camera_fps):
+            raise ValueError("K1 Geek RGB and depth frame rates must match")
+        for name, fov in (
+            ("rgb_fov_degrees", self.rgb_fov_degrees),
+            ("depth_fov_degrees", self.depth_fov_degrees),
+        ):
+            if fov is not None and (
+                len(fov) != 2 or any(not 0 < float(value) < 180 for value in fov)
+            ):
+                raise ValueError(f"{name} must contain horizontal and vertical angles")
+        if self.depth_accuracy_at_1m is not None and not 0 < self.depth_accuracy_at_1m < 1:
+            raise ValueError("depth_accuracy_at_1m must be a fractional error")
+        if self.depth_min_m is not None and self.depth_max_m is not None:
+            if not 0 < self.depth_min_m < self.depth_max_m:
+                raise ValueError("invalid K1 depth operating range")
+
+    def validate_geek_profile(self) -> None:
+        """Require the delivered sensor contract published for the K1 Geek."""
+        self.validate()
+        if (self.width, self.height) != K1_GEEK_RESOLUTION:
+            raise ValueError(
+                f"K1 Geek RGB must be {K1_GEEK_RESOLUTION[0]}x{K1_GEEK_RESOLUTION[1]}"
+            )
+        if not np.isclose(self.camera_fps, K1_GEEK_FPS):
+            raise ValueError(f"K1 Geek RGB must deliver {K1_GEEK_FPS:g} fps")
+        if self.depth_width != self.width or self.depth_height != self.height:
+            raise ValueError("K1 Geek depth resolution metadata is missing or mismatched")
+        if self.depth_fps is None or not np.isclose(self.depth_fps, K1_GEEK_FPS):
+            raise ValueError("K1 Geek depth must deliver 20 fps")
+        if self.rgb_fov_degrees != list(K1_GEEK_FOV_DEGREES):
+            raise ValueError("K1 Geek RGB FOV must be 105x94 degrees")
+        if self.depth_fov_degrees != list(K1_GEEK_FOV_DEGREES):
+            raise ValueError("K1 Geek depth FOV must be 105x94 degrees")
+        if (self.depth_min_m, self.depth_max_m) != K1_GEEK_DEPTH_RANGE_M:
+            raise ValueError("K1 Geek depth range must be 0.5-6 m")
 
     def save(self, path: Path) -> Path:
         self.validate()
@@ -345,6 +413,15 @@ def probe_k1(
         depth_map_factor=1.0 / depth_scale,
         camera_rgb="BGR" not in color_format,
         tbc=tbc.tolist(),
+        shutter_type="global",
+        rgb_fov_degrees=list(K1_GEEK_FOV_DEGREES),
+        depth_width=camera_info["width"],
+        depth_height=camera_info["height"],
+        depth_fps=camera_fps,
+        depth_fov_degrees=list(K1_GEEK_FOV_DEGREES),
+        depth_accuracy_at_1m=0.03,
+        depth_min_m=K1_GEEK_DEPTH_RANGE_M[0],
+        depth_max_m=K1_GEEK_DEPTH_RANGE_M[1],
         **noise,
     )
 
@@ -367,6 +444,7 @@ def main() -> None:
         duration=args.duration,
         camera_info_topic=args.camera_info_topic,
     )
+    calibration.validate_geek_profile()
     calibration.save(args.output)
     calibration.write_orbslam_settings(args.settings)
     print(f"K1 calibration saved: {args.output}")

@@ -14,15 +14,18 @@ dependencies = [
     "orbslam3-python==2.0.0; sys_platform == 'linux'",
 ]
 
+[project.optional-dependencies]
+viz = ["rerun-sdk==0.22.1"]
+
 [dependency-groups]
 dev = [
-    "pytest>=7.0",
+    "pytest>=7.0,<8.0",
     "black>=23.0",
     "ruff>=0.1.0",
 ]
 
 [build-system]
-requires = ["uv_build>=0.9.22,<0.10"]
+requires = ["uv_build>=0.9.22,<0.12"]
 build-backend = "uv_build"
 
 [tool.ruff]
@@ -33,12 +36,14 @@ target-version = "py310"
 nero-orb-slam = "nero.agents.orb_slam_agent:main"
 nero-sim = "nero.agents.sim_agent:main"
 nero-booster-studio = "nero.agents.booster_studio_agent:main"
+nero-sim-benchmark = "nero.agents.sim_benchmark_agent:main"
 nero-mapping = "nero.agents.mapping_agent:main"
 nero-map-nav = "nero.agents.map_nav_agent:main"
 nero-pc2map = "nero.utils.pointcloud_converter:main"
 nero-k1-calibration = "nero.slam.k1_calibration:main"
 nero-setup-orbslam = "nero.slam.setup_orbslam:main"
 nero-setup-booster-room = "nero.simulation.booster_studio_room:main"
+nero-rerun = "nero.observability.rerun_bridge:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -20,7 +20,8 @@ import numpy as np
 from nero.perception.object_detector import ObjectDetector, ObjectDetection
 from nero.navigation.controller import VelocityController, VelocityCommand
 
-# Optional imports for real robot usage
+# These modules are hardware-independent. The vendor SDK is isolated inside the
+# injected robot adapter, so policies work unchanged with ROS simulation.
 try:
     from nero.perception.depth_processor import DepthProcessor
     from nero.slam.orb_slam3_node import ORBSLAM3Node, SLAMPose
@@ -112,8 +113,11 @@ class NavigationPolicy:
         self.sim_env = sim_env
         self._is_sim = sim_env is not None
 
-        # Components (only initialized for real robot mode)
-        if HAS_BOOSTEROS and not self._is_sim:
+        # Components are required for every sensor-backed robot adapter. The
+        # lightweight in-process SimEnvironment has its own synthetic path.
+        if not self._is_sim:
+            if not HAS_BOOSTEROS:
+                raise RuntimeError("navigation dependencies are unavailable")
             self.slam = ORBSLAM3Node(config=slam_config, **(slam_options or {}))
             self.pose_estimator = PoseEstimator()
             self.depth_processor = DepthProcessor()
@@ -454,8 +458,9 @@ class NavigationPolicy:
         )
 
         # Update pose estimator
+        body_slam_pose = self.slam.body_pose(slam_pose)
         fused_pose = self.pose_estimator.update(
-            slam_pose=slam_pose,
+            slam_pose=body_slam_pose,
             odom_pose=odom,
             imu_rpy=imu_rpy,
         )

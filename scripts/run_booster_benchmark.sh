@@ -7,8 +7,6 @@ if [[ ! -f "$ros_setup" ]]; then
     exit 1
 fi
 
-# Booster Studio installs rclpy and its native libraries in the ROS prefix.
-# Sourcing this is required even when uv can see ordinary system packages.
 source "$ros_setup"
 set -u
-exec uv run nero-booster-studio "$@"
+exec uv run nero-sim-benchmark "$@"

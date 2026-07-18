@@ -20,6 +20,7 @@ from nero.robot import RobotInterface
 from nero.interaction import announce_and_confirm, deduce_target_distance
 from nero.utils.visualization import Visualization
 from nero.navigation.policy import NavigationPolicy, PolicyState
+from nero.observability import RosObservabilityPublisher
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable debug logging",
     )
+    parser.add_argument(
+        "--no-ros-observability",
+        action="store_true",
+        help="Disable normalized /nero ROS 2 telemetry topics",
+    )
     return parser.parse_args()
 
 
@@ -52,6 +58,9 @@ def run_agent(
     )
 
     policy.start()
+    telemetry = RosObservabilityPublisher.try_create(
+        enabled=not getattr(args, "no_ros_observability", False)
+    )
 
     # Signal handler
     shutdown_event = False
@@ -83,6 +92,9 @@ def run_agent(
                 state = robot.get_state(include_images=True)
                 frame = robot.image_to_array(state.rgb)
                 depth = robot.image_to_array(state.depth)
+                sensor_timestamp = robot.image_timestamp(state.rgb)
+                if telemetry is not None:
+                    telemetry.publish_robot_state(state, robot)
             except Exception as e:
                 logger.warning(f"Failed to read K1 sensors: {e}")
                 time.sleep(0.01)
@@ -99,6 +111,9 @@ def run_agent(
                 detections = policy.object_detector.detect(
                     frame, depth, state.camera_info
                 )
+                if telemetry is not None:
+                    telemetry.publish_detections(detections, sensor_timestamp)
+                    telemetry.publish_policy(status, sensor_timestamp)
                 now = time.monotonic()
                 for detection in detections:
                     object_name = detection.label.lower()
@@ -143,6 +158,17 @@ def run_agent(
 
             # Step policy
             status = policy.step()
+            if telemetry is not None:
+                telemetry.publish_policy(status, sensor_timestamp)
+                if policy.slam is not None:
+                    slam_pose = policy.slam.get_current_pose()
+                    if slam_pose is not None:
+                        telemetry.publish_tracking(
+                            slam_pose.tracking_status, slam_pose.num_map_points
+                        )
+                    map_points = policy.slam.get_map_points()
+                    if len(map_points):
+                        telemetry.publish_point_cloud(map_points, sensor_timestamp)
 
             # Draw overlay
             frame = viz.draw_navigation_info(
@@ -209,6 +235,8 @@ def run_agent(
         logger.info("Shutting down...")
         policy.stop()
         robot.stop()
+        if telemetry is not None:
+            telemetry.close()
         if not args.no_display:
             cv2.destroyAllWindows()
         logger.info("Shutdown complete")

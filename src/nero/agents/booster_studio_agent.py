@@ -14,6 +14,7 @@ from nero.simulation.booster_studio import (
     BoosterStudioTopics,
     write_booster_studio_calibration,
 )
+from nero.slam.k1_calibration import K1Calibration
 
 logger = logging.getLogger(__name__)
 
@@ -28,9 +29,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera-info-topic", default=BoosterStudioTopics.camera_info)
     parser.add_argument("--imu-topic", default=BoosterStudioTopics.imu)
     parser.add_argument("--pose-topic", default=BoosterStudioTopics.pose)
+    parser.add_argument("--clock-topic", default=BoosterStudioTopics.clock)
+    parser.add_argument("--odom-topic", default=BoosterStudioTopics.odom)
     parser.add_argument("--detections-topic", default=BoosterStudioTopics.detections)
     parser.add_argument("--no-display", action="store_true")
+    parser.add_argument("--no-ros-observability", action="store_true")
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument(
+        "--sensor-calibration",
+        type=Path,
+        default=Path("config/k1_calibration.json"),
+        help="Calibration captured on the real K1 Geek",
+    )
     return parser.parse_args()
 
 
@@ -47,19 +57,36 @@ def main() -> None:
         camera_info=args.camera_info_topic,
         imu=args.imu_topic,
         pose=args.pose_topic,
+        clock=args.clock_topic,
+        odom=args.odom_topic,
         detections=args.detections_topic,
     )
-    robot = BoosterStudioRobotInterface(topics=topics, robot_name=args.robot_name)
+    calibration_source = args.sensor_calibration
+    if not calibration_source.is_file():
+        calibration_source = Path("config/k1_geek_nominal_calibration.json")
+        logger.warning(
+            "Real K1 calibration is absent; using the nominal Geek profile at %s",
+            calibration_source,
+        )
+    expected_calibration = K1Calibration.load(calibration_source)
+    expected_calibration.validate_geek_profile()
+    robot = BoosterStudioRobotInterface(
+        topics=topics,
+        robot_name=args.robot_name,
+        expected_calibration=expected_calibration,
+    )
     calibration_path = Path("config/booster_studio_k1_calibration.json")
     settings_path = Path("config/booster_studio_k1_imu_rgbd.yaml")
     try:
         robot.initialize()
         camera_fps, imu_frequency = robot.measure_sensor_rates()
+        robot.validate_sensor_profile(camera_fps, imu_frequency)
         calibration = write_booster_studio_calibration(
             robot.get_camera_info(),
             calibration_path,
             camera_fps=camera_fps,
             imu_frequency=imu_frequency,
+            reference_calibration=expected_calibration,
         )
         calibration.write_orbslam_settings(settings_path)
         logger.info(

@@ -43,6 +43,8 @@ class BoosterStudioTopics:
     # None means subscribe to both so the K1's built-in IMU stays implicit.
     imu: str | None = None
     pose: str = "/soccer/sim/localization/robot_pose"
+    clock: str = "/clock"
+    odom: str = "/odom"
     detections: str = "/soccer/sim/vision/detections"
 
 
@@ -71,10 +73,13 @@ class BoosterStudioRobotInterface:
         network_interface: str = "127.0.0.1",
         robot_name: str | None = None,
         timeout: float = 15.0,
+        expected_calibration: K1Calibration | None = None,
     ):
         try:
             import rclpy
             from geometry_msgs.msg import Pose2D
+            from nav_msgs.msg import Odometry
+            from rosgraph_msgs.msg import Clock
             from sensor_msgs.msg import CameraInfo, CompressedImage, Image, Imu
             from vision_msgs.msg import Detection2DArray
             from booster_robotics_sdk_python import B1LocoClient, ChannelFactory
@@ -86,16 +91,25 @@ class BoosterStudioRobotInterface:
 
         self._rclpy = rclpy
         self._timeout = timeout
+        self._expected_calibration = expected_calibration
         self._topics = topics or BoosterStudioTopics()
         self._lock = threading.Lock()
         self._ready = threading.Condition(self._lock)
         self._rgb: Any = None
         self._depth: Any = None
+        self._pending_rgb: dict[int, tuple[Any, float]] = {}
+        self._pending_depth: dict[int, Any] = {}
         self._camera_info: Any = None
         self._imu: Any = None
         self._pose = np.zeros(3, dtype=float)
+        self._pose_samples: list[tuple[float, np.ndarray]] = []
+        self._sim_time: float | None = None
+        self._odom: Any = None
         self._imu_samples: list[tuple[float, ...]] = []
+        self._orientation_samples: list[tuple[float, np.ndarray]] = []
         self._rgb_timestamps: list[float] = []
+        self._frame_tokens = 1.0
+        self._last_source_frame_timestamp: float | None = None
         self._detections: list[ObjectDetection] = []
         self._last_frame_timestamp: float | None = None
         self._last_frame_samples: list[tuple[float, ...]] = []
@@ -119,12 +133,19 @@ class BoosterStudioRobotInterface:
         )
         self._subscriptions = [
             self._node.create_subscription(CompressedImage, self._topics.rgb, self._on_rgb, 10),
-            self._node.create_subscription(Image, self._topics.depth, self._on_depth, 10),
+            self._node.create_subscription(
+                Image,
+                self._topics.depth,
+                self._on_depth,
+                rclpy.qos.qos_profile_sensor_data,
+            ),
             self._node.create_subscription(
                 CameraInfo, self._topics.camera_info, self._on_camera_info, 10
             ),
             *(self._node.create_subscription(Imu, topic, self._on_imu, 50) for topic in imu_topics),
             self._node.create_subscription(Pose2D, self._topics.pose, self._on_pose, 10),
+            self._node.create_subscription(Clock, self._topics.clock, self._on_clock, 50),
+            self._node.create_subscription(Odometry, self._topics.odom, self._on_odom, 10),
             self._node.create_subscription(
                 Detection2DArray,
                 self._topics.detections,
@@ -151,17 +172,75 @@ class BoosterStudioRobotInterface:
         stamp = message.header.stamp
         return float(stamp.sec) + float(stamp.nanosec) * 1e-9
 
+    @staticmethod
+    def _stamp_ns(message: Any) -> int:
+        stamp = message.header.stamp
+        return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+
+    def _commit_synchronized_frame(self, stamp_ns: int) -> None:
+        rgb_entry = self._pending_rgb.get(stamp_ns)
+        depth = self._pending_depth.get(stamp_ns)
+        if rgb_entry is None or depth is None:
+            return
+        rgb, _ = rgb_entry
+        sensor_timestamp = self._stamp(rgb)
+        del self._pending_rgb[stamp_ns]
+        del self._pending_depth[stamp_ns]
+
+        # Studio's host renderer commonly runs at 30 Hz and its container relay
+        # does not forward camera-control commands. Deliver synchronized pairs
+        # to policies at the real K1 rate using a timestamp-driven token bucket.
+        expected = self._expected_calibration
+        if expected is not None and self._last_source_frame_timestamp is not None:
+            elapsed = max(0.0, sensor_timestamp - self._last_source_frame_timestamp)
+            self._frame_tokens = min(
+                2.0, self._frame_tokens + elapsed * expected.camera_fps
+            )
+        self._last_source_frame_timestamp = sensor_timestamp
+        if expected is not None and self._frame_tokens < 1.0 - 1e-9:
+            return
+        if expected is not None:
+            self._frame_tokens -= 1.0
+
+        if expected is not None:
+            minimum = expected.depth_min_m
+            maximum = expected.depth_max_m
+            if minimum is not None or maximum is not None:
+                depth_values = depth.data
+                scale = expected.depth_map_factor
+                invalid = np.zeros(depth_values.shape, dtype=bool)
+                if minimum is not None:
+                    invalid |= depth_values < minimum * scale
+                if maximum is not None:
+                    invalid |= depth_values > maximum * scale
+                depth_values[invalid] = 0
+        rgb.nero_timestamp = sensor_timestamp
+        depth.nero_timestamp = sensor_timestamp
+        self._rgb = rgb
+        self._depth = depth
+        self._rgb_timestamps.append(sensor_timestamp)
+        if len(self._rgb_timestamps) > 1000:
+            del self._rgb_timestamps[:-500]
+        self._ready.notify_all()
+
+    def _bound_pending_frames(self) -> None:
+        """Bound unmatched image queues even if synchronization never succeeds."""
+        for pending in (self._pending_rgb, self._pending_depth):
+            while len(pending) > 10:
+                del pending[min(pending)]
+
     def _on_rgb(self, message: Any) -> None:
         image = cv2.imdecode(np.frombuffer(message.data, np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             return
-        timestamp = time.monotonic()
+        stamp_ns = self._stamp_ns(message)
         with self._ready:
-            self._rgb = SimpleNamespace(data=image, header=message.header, nero_timestamp=timestamp)
-            self._rgb_timestamps.append(timestamp)
-            if len(self._rgb_timestamps) > 1000:
-                del self._rgb_timestamps[:-500]
-            self._ready.notify_all()
+            self._pending_rgb[stamp_ns] = (
+                SimpleNamespace(data=image, header=message.header),
+                time.monotonic(),
+            )
+            self._bound_pending_frames()
+            self._commit_synchronized_frame(stamp_ns)
 
     def _on_depth(self, message: Any) -> None:
         encoding = message.encoding.lower()
@@ -171,9 +250,13 @@ class BoosterStudioRobotInterface:
         )
         if bool(message.is_bigendian) != (depth.dtype.byteorder == ">"):
             depth = depth.byteswap().newbyteorder()
+        stamp_ns = self._stamp_ns(message)
         with self._ready:
-            self._depth = SimpleNamespace(data=depth.copy(), header=message.header)
-            self._ready.notify_all()
+            self._pending_depth[stamp_ns] = SimpleNamespace(
+                data=depth.copy(), header=message.header
+            )
+            self._bound_pending_frames()
+            self._commit_synchronized_frame(stamp_ns)
 
     def _on_camera_info(self, message: Any) -> None:
         with self._ready:
@@ -208,25 +291,88 @@ class BoosterStudioRobotInterface:
                 message.linear_acceleration.z,
             ]
         )
-        # Booster Studio currently stamps camera frames in simulation time and its
-        # ROS IMU publisher in wall time. Receipt time gives ORB one shared,
-        # monotonic clock domain for synchronizing the two streams.
-        timestamp = time.monotonic()
-        sample = (*acceleration.tolist(), *gyro.tolist(), timestamp)
         with self._ready:
+            # The IMU header uses wall time, while camera headers use simulation
+            # time. The latest /clock sample places both in one sensor domain.
+            timestamp = self._sim_time if self._sim_time is not None else time.monotonic()
+            if self._imu_samples and timestamp <= self._imu_samples[-1][6]:
+                return
+            sample = (*acceleration.tolist(), *gyro.tolist(), timestamp)
             self._imu = SimpleNamespace(
                 rpy=rpy,
                 angular_velocity=gyro,
                 linear_acceleration=acceleration,
             )
             self._imu_samples.append(sample)
+            self._orientation_samples.append((timestamp, rpy))
             if len(self._imu_samples) > 2000:
                 del self._imu_samples[:-1000]
+            if len(self._orientation_samples) > 2000:
+                del self._orientation_samples[:-1000]
             self._ready.notify_all()
 
     def _on_pose(self, message: Any) -> None:
         with self._lock:
             self._pose = np.array([message.x, message.y, message.theta], dtype=float)
+            timestamp = self._sim_time if self._sim_time is not None else time.monotonic()
+            self._pose_samples.append((timestamp, self._pose.copy()))
+            if len(self._pose_samples) > 5000:
+                del self._pose_samples[:-2500]
+
+    def _on_clock(self, message: Any) -> None:
+        with self._lock:
+            if self._sim_time is None:
+                # Discard any startup samples recorded with receipt time so the
+                # interpolation history contains exactly one clock domain.
+                self._pose_samples.clear()
+            self._sim_time = float(message.clock.sec) + float(message.clock.nanosec) * 1e-9
+
+    def _on_odom(self, message: Any) -> None:
+        orientation = message.pose.pose.orientation
+        yaw = Rotation.from_quat(
+            [orientation.x, orientation.y, orientation.z, orientation.w]
+        ).as_euler("xyz")[2]
+        position = message.pose.pose.position
+        with self._ready:
+            self._odom = SimpleNamespace(
+                pose_2d=np.array([position.x, position.y, yaw], dtype=float),
+                timestamp=time.monotonic(),
+            )
+            self._ready.notify_all()
+
+    def _ground_truth_pose_locked(self, timestamp: float) -> np.ndarray:
+        if not self._pose_samples:
+            return self._pose.copy()
+        times = np.fromiter((sample[0] for sample in self._pose_samples), dtype=float)
+        index = int(np.searchsorted(times, timestamp))
+        if index <= 0:
+            return self._pose_samples[0][1].copy()
+        if index >= len(self._pose_samples):
+            return self._pose_samples[-1][1].copy()
+        before_time, before = self._pose_samples[index - 1]
+        after_time, after = self._pose_samples[index]
+        weight = (timestamp - before_time) / (after_time - before_time)
+        result = before + weight * (after - before)
+        yaw_delta = np.arctan2(np.sin(after[2] - before[2]), np.cos(after[2] - before[2]))
+        result[2] = before[2] + weight * yaw_delta
+        return result
+
+    def _orientation_locked(self, timestamp: float) -> np.ndarray:
+        if not self._orientation_samples:
+            return np.asarray(self._imu.rpy, dtype=float).copy()
+        times = np.fromiter(
+            (sample[0] for sample in self._orientation_samples), dtype=float
+        )
+        index = int(np.searchsorted(times, timestamp))
+        if index <= 0:
+            return self._orientation_samples[0][1].copy()
+        if index >= len(self._orientation_samples):
+            return self._orientation_samples[-1][1].copy()
+        before_time, before = self._orientation_samples[index - 1]
+        after_time, after = self._orientation_samples[index]
+        weight = (timestamp - before_time) / (after_time - before_time)
+        delta = np.arctan2(np.sin(after - before), np.cos(after - before))
+        return before + weight * delta
 
     def _on_detections(self, message: Any) -> None:
         detections = []
@@ -267,7 +413,7 @@ class BoosterStudioRobotInterface:
         with self._ready:
             while not all(
                 value is not None
-                for value in (self._rgb, self._depth, self._camera_info, self._imu)
+                for value in (self._rgb, self._depth, self._camera_info, self._imu, self._odom)
             ):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -278,6 +424,7 @@ class BoosterStudioRobotInterface:
                             ("depth", self._depth),
                             ("camera_info", self._camera_info),
                             ("imu", self._imu),
+                            ("odom", self._odom),
                         )
                         if value is None
                     ]
@@ -301,19 +448,51 @@ class BoosterStudioRobotInterface:
                     "Booster Studio K1 depth must be 16-bit millimetres, got "
                     f"{self._depth.data.dtype}"
                 )
+            if self._expected_calibration is not None:
+                expected = (
+                    self._expected_calibration.depth_height or self._expected_calibration.height,
+                    self._expected_calibration.depth_width or self._expected_calibration.width,
+                )
+                if expected_shape != expected:
+                    raise RuntimeError(
+                        "Booster Studio camera does not match the K1 Geek profile: "
+                        f"{expected_shape[::-1]} != {expected[::-1]}. Re-run "
+                        "nero-setup-booster-room --activate with the same calibration "
+                        "and reload the scene."
+                    )
         self.set_velocity(0.0, 0.0, 0.0)
         self._initialized = True
+
+    def validate_sensor_profile(self, camera_fps: float, imu_frequency: float) -> None:
+        """Reject a sim whose delivered sensors differ from the real K1 profile."""
+        expected = self._expected_calibration
+        if expected is None:
+            return
+        camera_error = abs(camera_fps - expected.camera_fps) / expected.camera_fps
+        imu_error = abs(imu_frequency - expected.imu_frequency) / expected.imu_frequency
+        if camera_error > 0.12 or imu_error > 0.12:
+            raise RuntimeError(
+                "Booster Studio sensor-rate mismatch: "
+                f"camera {camera_fps:.1f}/{expected.camera_fps:.1f} Hz, "
+                f"IMU {imu_frequency:.1f}/{expected.imu_frequency:.1f} Hz"
+            )
 
     def measure_sensor_rates(self, duration: float = 2.0) -> tuple[float, float]:
         """Measure rendered camera and IMU rates instead of assuming target rates."""
         start = time.monotonic()
         with self._ready:
+            # Camera and IMU timestamps are deliberately expressed in the
+            # simulator's /clock domain.  Use sensor-domain markers here;
+            # comparing them with the host's monotonic clock would discard
+            # every sample once simulation time starts near zero.
+            rgb_marker = self._rgb_timestamps[-1] if self._rgb_timestamps else -np.inf
+            imu_marker = self._imu_samples[-1][6] if self._imu_samples else -np.inf
             self._ready.wait_for(
                 lambda: time.monotonic() >= start + duration,
                 timeout=duration + 0.5,
             )
-            rgb_times = [value for value in self._rgb_timestamps if value >= start]
-            imu_times = [sample[6] for sample in self._imu_samples if sample[6] >= start]
+            rgb_times = [value for value in self._rgb_timestamps if value > rgb_marker]
+            imu_times = [sample[6] for sample in self._imu_samples if sample[6] > imu_marker]
         return (
             estimate_frequency(rgb_times, "simulated camera"),
             estimate_frequency(imu_times, "simulated IMU"),
@@ -339,10 +518,15 @@ class BoosterStudioRobotInterface:
                 ]
                 self._last_frame_timestamp = frame_timestamp
             samples = list(self._last_frame_samples)
+            synchronized_imu = SimpleNamespace(
+                rpy=self._orientation_locked(frame_timestamp),
+                angular_velocity=self._imu.angular_velocity,
+                linear_acceleration=self._imu.linear_acceleration,
+            )
             return RobotState(
                 mode="walk",
-                imu=self._imu,
-                odom=SimpleNamespace(pose_2d=self._pose.copy()),
+                imu=synchronized_imu,
+                odom=self._odom,
                 rgb=self._rgb if include_images else None,
                 depth=self._depth if include_images else None,
                 camera_info=self._camera_info,
@@ -357,13 +541,30 @@ class BoosterStudioRobotInterface:
         with self._lock:
             return list(self._detections)
 
+    def get_ground_truth_pose(self, timestamp: float | None = None) -> np.ndarray:
+        """Return Studio's planar reference pose synchronized to a camera frame."""
+        with self._lock:
+            if timestamp is None:
+                timestamp = self.image_source_timestamp(self._rgb)
+            return self._ground_truth_pose_locked(float(timestamp))
+
     @staticmethod
     def image_to_array(image: Any) -> np.ndarray:
         return np.asarray(getattr(image, "data", image))
 
     @staticmethod
     def image_timestamp(image: Any) -> float:
-        return float(getattr(image, "nero_timestamp", BoosterStudioRobotInterface._stamp(image)))
+        synchronized = getattr(image, "nero_timestamp", None)
+        return float(
+            synchronized
+            if synchronized is not None
+            else BoosterStudioRobotInterface._stamp(image)
+        )
+
+    @staticmethod
+    def image_source_timestamp(image: Any) -> float:
+        """Return the renderer's simulation timestamp for reference alignment."""
+        return BoosterStudioRobotInterface._stamp(image)
 
     def speak(self, text: str) -> None:
         print(f"\n[SIMULATED K1 SPEAKER] {text}", flush=True)
@@ -382,7 +583,12 @@ class BoosterStudioRobotInterface:
         if self._closed:
             return
         try:
-            self.stop()
+            try:
+                self.stop()
+            except Exception as exc:
+                # A K1 outside WALK mode rejects even a zero Move command. Do
+                # not let that prevent ROS teardown or hide an earlier error.
+                logger.warning("Could not send final zero velocity: %s", exc)
         finally:
             self._closed = True
             self._spin_thread.join(timeout=2.0)
@@ -395,11 +601,22 @@ def write_booster_studio_calibration(
     *,
     camera_fps: float,
     imu_frequency: float,
+    reference_calibration: K1Calibration | None = None,
 ) -> K1Calibration:
     """Create IMU_RGBD settings from live intrinsics and the K1 simulator MJCF."""
-    body_to_camera = np.eye(4)
-    body_to_camera[:3, :3] = Rotation.from_euler("xyz", [0.0, -1.5708, -1.5708]).as_matrix()
-    body_to_camera[:3, 3] = [0.0669, 0.0, 0.3559]
+    reference = reference_calibration
+    body_to_camera = (
+        np.asarray(reference.tbc, dtype=float).copy()
+        if reference is not None
+        else np.asarray(
+            [
+                [0.0, 1.0, 0.0, 0.0669],
+                [0.0, 0.0, -1.0, 0.0],
+                [-1.0, 0.0, 0.0, 0.3559],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        )
+    )
     calibration = K1Calibration(
         camera_frame=str(camera_info.header.frame_id),
         imu_frame="imu_link",
@@ -417,6 +634,15 @@ def write_booster_studio_calibration(
         imu_gyro_walk=0.0001,
         imu_acc_walk=0.001,
         source="Booster Studio K1 MJCF + live simulated CameraInfo",
+        shutter_type=reference.shutter_type if reference else "global",
+        rgb_fov_degrees=reference.rgb_fov_degrees if reference else None,
+        depth_width=reference.depth_width if reference else int(camera_info.width),
+        depth_height=reference.depth_height if reference else int(camera_info.height),
+        depth_fps=reference.depth_fps if reference else camera_fps,
+        depth_fov_degrees=reference.depth_fov_degrees if reference else None,
+        depth_accuracy_at_1m=(reference.depth_accuracy_at_1m if reference else None),
+        depth_min_m=reference.depth_min_m if reference else None,
+        depth_max_m=reference.depth_max_m if reference else None,
     )
     calibration.save(path)
     return calibration

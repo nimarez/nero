@@ -1,0 +1,42 @@
+{
+  "camera_frame": "camera_color_optical_frame",
+  "imu_frame": "body_imu",
+  "width": 544,
+  "height": 448,
+  "camera_fps": 20.0,
+  "camera_matrix": [
+    208.7129407302772,
+    0.0,
+    272.0,
+    0.0,
+    208.8833792948362,
+    224.0,
+    0.0,
+    0.0,
+    1.0
+  ],
+  "distortion": [0.0, 0.0, 0.0, 0.0, 0.0],
+  "depth_map_factor": 1000.0,
+  "camera_rgb": false,
+  "tbc": [
+    [-0.0000036732051033, 0.9999999999932537, -0.0000000000134922, 0.0669],
+    [0.0000036732051033, -0.0000000000000000, -0.9999999999932537, 0.0],
+    [-0.9999999999865075, -0.0000036732051033, -0.0000036732051033, 0.3559],
+    [0.0, 0.0, 0.0, 1.0]
+  ],
+  "imu_frequency": 500.0,
+  "imu_noise_gyro": 0.001,
+  "imu_noise_acc": 0.01,
+  "imu_gyro_walk": 0.0001,
+  "imu_acc_walk": 0.001,
+  "source": "K1 Geek sensor specification; replace intrinsics and extrinsics with live nero-k1-calibration output",
+  "shutter_type": "global",
+  "rgb_fov_degrees": [105.0, 94.0],
+  "depth_width": 544,
+  "depth_height": 448,
+  "depth_fps": 20.0,
+  "depth_fov_degrees": [105.0, 94.0],
+  "depth_accuracy_at_1m": 0.03,
+  "depth_min_m": 0.5,
+  "depth_max_m": 6.0
+}

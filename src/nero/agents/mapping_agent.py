@@ -19,6 +19,7 @@ import cv2
 from nero.robot import RobotInterface
 from nero.utils.visualization import Visualization
 from nero.mapping.mapping_policy import MappingPolicy, MappingState, MappingConfig
+from nero.observability import RosObservabilityPublisher
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,11 @@ def parse_args() -> argparse.Namespace:
         "--debug",
         action="store_true",
         help="Enable debug logging",
+    )
+    parser.add_argument(
+        "--no-ros-observability",
+        action="store_true",
+        help="Disable normalized /nero ROS 2 telemetry topics",
     )
     return parser.parse_args()
 
@@ -122,6 +128,9 @@ def main():
 
     # Start mapping
     policy.start()
+    telemetry = RosObservabilityPublisher.try_create(
+        enabled=not args.no_ros_observability
+    )
 
     # Signal handler
     shutdown_event = False
@@ -146,6 +155,25 @@ def main():
 
             # Step policy
             status = policy.step()
+            if telemetry is not None and policy.last_robot_state is not None:
+                state = policy.last_robot_state
+                telemetry.publish_robot_state(state, robot)
+                timestamp = (
+                    robot.image_timestamp(state.rgb)
+                    if state.rgb is not None
+                    else time.time()
+                )
+                telemetry.publish_policy(status, timestamp)
+                if policy.last_pose is not None:
+                    telemetry.publish_pose(policy.last_pose, timestamp)
+                slam_pose = policy.slam.get_current_pose()
+                if slam_pose is not None:
+                    telemetry.publish_tracking(
+                        slam_pose.tracking_status, slam_pose.num_map_points
+                    )
+                map_points = policy.slam.get_map_points()
+                if len(map_points):
+                    telemetry.publish_point_cloud(map_points, timestamp)
 
             # Display the K1's built-in RGB stream.
             try:
@@ -236,6 +264,8 @@ def main():
         logger.info("Shutting down...")
         policy.stop()
         robot.stop()
+        if telemetry is not None:
+            telemetry.close()
         if not args.no_display:
             cv2.destroyAllWindows()
         logger.info("Shutdown complete")
