@@ -11,8 +11,11 @@ import subprocess
 import time
 from pathlib import Path
 
-
 DEFAULT_RERUN_PORT = 9876
+DEFAULT_ACK_TIMEOUT = 5.0
+DEFAULT_CONNECT_TIMEOUT = 5
+DEFAULT_KEEPALIVE_INTERVAL = 5
+DEFAULT_KEEPALIVE_COUNT = 3
 
 
 def _mac_address_for(robot_host: str) -> str:
@@ -70,7 +73,7 @@ def _stop_viewer(viewer: subprocess.Popen[bytes] | None) -> None:
     # dedicated process group created above, so stop the whole owned group.
     try:
         os.killpg(viewer.pid, signal.SIGTERM)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         return
     try:
         viewer.wait(timeout=5)
@@ -81,17 +84,30 @@ def _stop_viewer(viewer: subprocess.Popen[bytes] | None) -> None:
     while time.monotonic() < deadline:
         try:
             os.killpg(viewer.pid, 0)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             return
         time.sleep(0.1)
-    os.killpg(viewer.pid, signal.SIGKILL)
+    try:
+        os.killpg(viewer.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def relay_main() -> None:
     """Run on the K1 and relay SSH stdin into the agent's Unix socket."""
-    parser = argparse.ArgumentParser(description="Relay object names to a local Nero agent")
+    parser = argparse.ArgumentParser(
+        description="Relay object names to a local Nero agent"
+    )
     parser.add_argument("--socket", default="/tmp/nero-navigation.sock")
+    parser.add_argument(
+        "--ack-timeout",
+        type=float,
+        default=DEFAULT_ACK_TIMEOUT,
+        help="Seconds to wait for the robot policy to accept a command",
+    )
     args = parser.parse_args()
+    if args.ack_timeout <= 0:
+        parser.error("--ack-timeout must be positive")
 
     print("Nero object command terminal. Type an object name, or 'quit'.", flush=True)
     while True:
@@ -105,6 +121,7 @@ def relay_main() -> None:
         if command.lower() in {"quit", "exit", "q"}:
             return
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(args.ack_timeout)
         try:
             client.connect(args.socket)
             client.sendall((command + "\n").encode())
@@ -122,15 +139,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Start live Rerun visualization and control a running Nero K1 policy"
     )
-    parser.add_argument(
-        "--host", default=os.getenv("NERO_ROBOT_HOST", "10.2.1.130")
-    )
+    parser.add_argument("--host", default=os.getenv("NERO_ROBOT_HOST", "10.2.1.130"))
     parser.add_argument("--user", default=os.getenv("NERO_ROBOT_USER", "booster"))
     parser.add_argument(
         "--repo",
         default=os.getenv("NERO_ROBOT_REPO", "/home/booster/Workspace/nero"),
     )
     parser.add_argument("--socket", default="/tmp/nero-navigation.sock")
+    parser.add_argument(
+        "--ack-timeout",
+        type=float,
+        default=DEFAULT_ACK_TIMEOUT,
+        help="Seconds to wait for the robot policy to accept a command",
+    )
     parser.add_argument(
         "--rerun-host",
         help="Mac address reachable from the robot (default: determine automatically)",
@@ -140,14 +161,40 @@ def main() -> None:
     parser.add_argument(
         "--no-rerun", action="store_true", help="Open only the command terminal"
     )
+    parser.add_argument(
+        "--connect-timeout",
+        type=int,
+        default=DEFAULT_CONNECT_TIMEOUT,
+        help="SSH connection timeout in seconds",
+    )
+    parser.add_argument(
+        "--keepalive-interval",
+        type=int,
+        default=DEFAULT_KEEPALIVE_INTERVAL,
+        help="Seconds between SSH keepalives",
+    )
+    parser.add_argument(
+        "--keepalive-count",
+        type=int,
+        default=DEFAULT_KEEPALIVE_COUNT,
+        help="Missed SSH keepalives before disconnecting",
+    )
     args = parser.parse_args()
+    if not 1 <= args.rerun_port <= 65535:
+        parser.error("--rerun-port must be between 1 and 65535")
+    if args.ack_timeout <= 0:
+        parser.error("--ack-timeout must be positive")
+    for name in ("connect_timeout", "keepalive_interval", "keepalive_count"):
+        if getattr(args, name) <= 0:
+            parser.error(f"--{name.replace('_', '-')} must be positive")
 
     viewer = None
     try:
         if args.no_rerun:
             remote_command = (
                 f"cd {shlex.quote(args.repo)} && uv run nero-command-relay "
-                f"--socket {shlex.quote(args.socket)}"
+                f"--socket {shlex.quote(args.socket)} "
+                f"--ack-timeout {args.ack_timeout:g}"
             )
         else:
             viewer = _start_viewer(args.rerun_port, args.rerun_memory_limit)
@@ -159,17 +206,32 @@ def main() -> None:
                     f"NERO_RERUN_URL={shlex.quote(rerun_url)} "
                     "./scripts/run_rerun_bridge.sh >/tmp/nero-rerun-bridge.log 2>&1 &",
                     "bridge_pid=$!",
-                    "cleanup() { kill \"$bridge_pid\" 2>/dev/null || true; "
-                    "wait \"$bridge_pid\" 2>/dev/null || true; }",
+                    'cleanup() { kill "$bridge_pid" 2>/dev/null || true; '
+                    'wait "$bridge_pid" 2>/dev/null || true; }',
                     "trap cleanup EXIT HUP INT TERM",
-                    f"uv run nero-command-relay --socket {shlex.quote(args.socket)}",
+                    "sleep 0.5",
+                    'if ! kill -0 "$bridge_pid" 2>/dev/null; then '
+                    "cat /tmp/nero-rerun-bridge.log >&2; exit 1; fi",
+                    f"uv run nero-command-relay --socket {shlex.quote(args.socket)} "
+                    f"--ack-timeout {args.ack_timeout:g}",
                 )
             )
             remote_command = f"bash -lc {shlex.quote(remote_script)}"
             print(f"Connecting the robot telemetry bridge to {rerun_url}.", flush=True)
 
         completed = subprocess.run(
-            ["ssh", "-t", f"{args.user}@{args.host}", remote_command],
+            [
+                "ssh",
+                "-t",
+                "-o",
+                f"ConnectTimeout={args.connect_timeout}",
+                "-o",
+                f"ServerAliveInterval={args.keepalive_interval}",
+                "-o",
+                f"ServerAliveCountMax={args.keepalive_count}",
+                f"{args.user}@{args.host}",
+                remote_command,
+            ],
             check=False,
         )
         if completed.returncode not in (0, 130):

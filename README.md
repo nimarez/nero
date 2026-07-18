@@ -111,7 +111,9 @@ Enter an open-vocabulary object name such as `chair` at the `object>` prompt. Th
 command uses your normal SSH authentication, starts a live-only telemetry bridge
 on the robot, and removes that bridge when the terminal exits. It does not create
 a Rerun recording. Use `quit` to close both the prompt and the viewer, or pass
-`--no-rerun` to leave visualization off.
+`--no-rerun` to leave visualization off. SSH connection and keepalive failures
+are bounded, and a command that the robot policy does not acknowledge returns
+after five seconds; tune that with `--ack-timeout` if needed.
 
 YOLO-World runs asynchronously at a 384-pixel performance default while the
 camera and depth topics remain at their native 544x448 resolution. Override the
