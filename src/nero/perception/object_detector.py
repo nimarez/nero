@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,8 +65,8 @@ class ObjectDetection:
 class ObjectDetector:
     """Detects objects in RGB images and computes their 3D positions.
 
-    Uses OpenCV DNN with a local YOLOv8 COCO model. No network access occurs in
-    the policy loop.
+    Uses prompt-conditioned YOLO-World for open-vocabulary targets, with an
+    OpenCV YOLOv8 ONNX fallback. No network access occurs in the policy loop.
     """
 
     def __init__(
@@ -74,6 +75,8 @@ class ObjectDetector:
         depth_threshold_min: float = 0.2,
         depth_threshold_max: float = 5.0,
         model_path: str | Path | None = None,
+        inference_size: int | None = None,
+        max_detections: int | None = None,
     ):
         self.confidence_threshold = confidence_threshold
         self.depth_threshold_min = depth_threshold_min
@@ -86,6 +89,22 @@ class ObjectDetector:
         self._latest_detections: list[ObjectDetection] = []
         self._result_revision = 0
         self._result_lock = threading.Lock()
+        self.inference_size = int(
+            inference_size
+            if inference_size is not None
+            else os.getenv("NERO_YOLO_IMGSZ", "384")
+        )
+        if self.inference_size < 256 or self.inference_size % 32:
+            raise ValueError("YOLO inference size must be >= 256 and divisible by 32")
+        self.max_detections = int(
+            max_detections
+            if max_detections is not None
+            else os.getenv("NERO_YOLO_MAX_DETECTIONS", "10")
+        )
+        if self.max_detections < 1:
+            raise ValueError("YOLO max detections must be positive")
+        self._inference_count = 0
+        self._inference_seconds_ema: float | None = None
         self.model_path = Path(
             model_path
             or os.getenv("NERO_OBJECT_MODEL", "config/yolov8s-worldv2.pt")
@@ -106,9 +125,32 @@ class ObjectDetector:
                 from ultralytics import YOLOWorld
 
                 torch.set_num_threads(max(1, int(os.getenv("NERO_YOLO_THREADS", "4"))))
+                set_interop_threads = getattr(torch, "set_num_interop_threads", None)
+                if set_interop_threads is not None:
+                    try:
+                        set_interop_threads(1)
+                    except RuntimeError:
+                        # PyTorch allows this setting only before inter-op work starts.
+                        logger.debug("PyTorch inter-op thread count was already fixed")
                 self._world_model = YOLOWorld(str(self.model_path))
                 # Load/cache the CLIP text tower before a human gives a command.
                 self._world_model.set_classes(["object"])
+                if os.getenv("NERO_YOLO_WARMUP", "1") != "0":
+                    started = time.perf_counter()
+                    self._world_model.predict(
+                        np.zeros((448, 544, 3), dtype=np.uint8),
+                        imgsz=self.inference_size,
+                        conf=self.confidence_threshold,
+                        device="cpu",
+                        max_det=self.max_detections,
+                        rect=True,
+                        verbose=False,
+                    )
+                    logger.info(
+                        "YOLO-World warmup completed in %.2fs at imgsz=%d",
+                        time.perf_counter() - started,
+                        self.inference_size,
+                    )
             except (ImportError, RuntimeError, OSError, ValueError) as exc:
                 logger.error("Could not load YOLO-World model %s: %s", self.model_path, exc)
                 return False
@@ -192,8 +234,12 @@ class ObjectDetector:
                 self._result_revision += 1
             self._future = None
         if self._future is None:
-            rgb_copy = np.ascontiguousarray(rgb).copy()
-            depth_copy = None if depth is None else np.ascontiguousarray(depth).copy()
+            # The SDK may reuse camera buffers after this call. Take exactly one
+            # contiguous snapshot for the asynchronous worker.
+            rgb_copy = np.array(rgb, copy=True, order="C")
+            depth_copy = (
+                None if depth is None else np.array(depth, copy=True, order="C")
+            )
             self._future = self._executor.submit(
                 self._detect_world, rgb_copy, depth_copy, camera_info
             )
@@ -207,13 +253,32 @@ class ObjectDetector:
         camera_info=None,
     ) -> list[ObjectDetection]:
         """Run one target-conditioned YOLO-World inference."""
+        started = time.perf_counter()
         results = self._world_model.predict(
             np.asarray(rgb),
-            imgsz=448,
+            imgsz=self.inference_size,
             conf=self.confidence_threshold,
             device="cpu",
+            max_det=self.max_detections,
+            rect=True,
             verbose=False,
         )
+        elapsed = time.perf_counter() - started
+        self._inference_count += 1
+        smoothing = 0.2
+        self._inference_seconds_ema = (
+            elapsed
+            if self._inference_seconds_ema is None
+            else smoothing * elapsed + (1.0 - smoothing) * self._inference_seconds_ema
+        )
+        if self._inference_count == 1 or self._inference_count % 20 == 0:
+            logger.info(
+                "YOLO-World inference %.0fms (EMA %.0fms, %.2f FPS, imgsz=%d)",
+                elapsed * 1000.0,
+                self._inference_seconds_ema * 1000.0,
+                1.0 / self._inference_seconds_ema,
+                self.inference_size,
+            )
         detections: list[ObjectDetection] = []
         for result in results:
             boxes = getattr(result, "boxes", None)

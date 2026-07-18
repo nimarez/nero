@@ -170,13 +170,17 @@ def test_yolo_world_accepts_arbitrary_target_and_runs_asynchronously(
     monkeypatch.setitem(
         sys.modules,
         "torch",
-        SimpleNamespace(set_num_threads=thread_counts.append),
+        SimpleNamespace(
+            set_num_threads=thread_counts.append,
+            set_num_interop_threads=lambda count: thread_counts.append(("interop", count)),
+        ),
     )
     model_path = tmp_path / "world.pt"
     model_path.write_bytes(b"weights")
     detector = ObjectDetector(model_path=model_path)
     assert detector.initialize()
-    assert thread_counts == [4]
+    assert thread_counts == [4, ("interop", 1)]
+    assert detector.inference_size == 384
     detector.set_target("unusual brass umbrella stand")
     rgb = np.zeros((10, 10, 3), dtype=np.uint8)
     depth = np.full((10, 10), 1000, dtype=np.uint16)
@@ -193,6 +197,22 @@ def test_yolo_world_accepts_arbitrary_target_and_runs_asynchronously(
     assert detections[0].confidence == 0.87
     assert detections[0].position_3d[2] == 1.0
     detector.close()
+
+
+def test_yolo_world_runtime_tuning_is_validated(tmp_path, monkeypatch):
+    model_path = tmp_path / "world.pt"
+    model_path.write_bytes(b"weights")
+    monkeypatch.setenv("NERO_YOLO_IMGSZ", "448")
+    monkeypatch.setenv("NERO_YOLO_MAX_DETECTIONS", "4")
+
+    detector = ObjectDetector(model_path=model_path)
+    assert detector.inference_size == 448
+    assert detector.max_detections == 4
+
+    with np.testing.assert_raises_regex(ValueError, "divisible by 32"):
+        ObjectDetector(model_path=model_path, inference_size=400)
+    with np.testing.assert_raises_regex(ValueError, "must be positive"):
+        ObjectDetector(model_path=model_path, max_detections=0)
 
 
 def test_hardware_agent_clis_use_k1_sensors_implicitly(monkeypatch):

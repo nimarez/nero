@@ -104,6 +104,12 @@ on the robot, and removes that bridge when the terminal exits. It does not creat
 a Rerun recording. Use `quit` to close both the prompt and the viewer, or pass
 `--no-rerun` to leave visualization off.
 
+YOLO-World runs asynchronously at a 384-pixel performance default while the
+camera and depth topics remain at their native 544x448 resolution. Override the
+detector without changing code using `NERO_YOLO_IMGSZ=448` (higher recall, lower
+rate), `NERO_YOLO_THREADS`, or `NERO_YOLO_MAX_DETECTIONS` when launching the
+robot policy.
+
 The robot announces an accepted command before movement. Nero stops when the
 target track expires, a safety check fails, SLAM loses the required state, or the
 process receives an interrupt.
