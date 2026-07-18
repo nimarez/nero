@@ -31,22 +31,34 @@ COCO80 = tuple(
     "teddy bear,hair drier,toothbrush".split(",")
 )
 
-OPEN_VOCAB_BACKENDS = ("yolo-world", "yoloe")
+QNN_BACKEND = "yolo-world-qnn"
+MODAL_BACKEND = "yolo-world-modal"
+OPEN_VOCAB_BACKENDS = ("yolo-world", QNN_BACKEND, MODAL_BACKEND, "yoloe")
 _BACKEND_ALIASES = {
     "world": "yolo-world",
     "yolo-world": "yolo-world",
     "yoloworld": "yolo-world",
+    "qnn": QNN_BACKEND,
+    "yolo-world-qnn": QNN_BACKEND,
+    "yoloworld-qnn": QNN_BACKEND,
+    "modal": MODAL_BACKEND,
+    "yolo-world-modal": MODAL_BACKEND,
+    "yoloworld-modal": MODAL_BACKEND,
     "yoloe": "yoloe",
     "opencv": "opencv",
     "onnx": "opencv",
 }
 _DEFAULT_MODELS = {
     "yolo-world": "config/yolov8s-worldv2.pt",
+    QNN_BACKEND: "config/yolov8s-worldv2-open-vocab-256-qnn/model.onnx",
+    MODAL_BACKEND: "yolov8s-worldv2.pt",
     "yoloe": "config/yoloe-26n-seg.pt",
     "opencv": "config/yolov8n.onnx",
 }
 _DEFAULT_INFERENCE_SIZES = {
     "yolo-world": 256,
+    QNN_BACKEND: 256,
+    MODAL_BACKEND: 256,
     "yoloe": 320,
     "opencv": 640,
 }
@@ -264,9 +276,9 @@ class ObjectDetection:
 class ObjectDetector:
     """Detects objects in RGB images and computes their 3D positions.
 
-    Uses prompt-conditioned YOLO-World or YOLOE for arbitrary text targets,
-    with an explicit OpenCV YOLOv8 ONNX fixed-vocabulary fallback. The K1
-    runtime isolates open-vocabulary inference from IMU-RGBD SLAM.
+    Uses QNN-accelerated or CPU prompt-conditioned YOLO-World, or YOLOE, for
+    arbitrary text targets, with an explicit OpenCV YOLOv8 ONNX fixed-vocabulary
+    fallback. The K1 runtime defaults to fail-closed QNN HTP execution.
     """
 
     def __init__(
@@ -286,6 +298,10 @@ class ObjectDetector:
         self._net = None
         self._class_names = COCO80
         self._prompt_model = None
+        self._qnn_runtime = None
+        self._modal_client = None
+        self._prompt_encoder = None
+        self._target_embedding: np.ndarray | None = None
         self._prompt_process = False
         self._target_name: str | None = None
         self._executor: ThreadPoolExecutor | ProcessPoolExecutor | None = None
@@ -326,6 +342,8 @@ class ObjectDetector:
         )
         if self.inference_size < 256 or self.inference_size % 32:
             raise ValueError("YOLO inference size must be >= 256 and divisible by 32")
+        if self.backend == QNN_BACKEND and self.inference_size != 256:
+            raise ValueError("the pinned QNN YOLO-World graph requires inference size 256")
         self.max_detections = int(
             max_detections
             if max_detections is not None
@@ -345,15 +363,25 @@ class ObjectDetector:
         )
         if process_setting not in {"0", "1"}:
             raise ValueError("NERO_DETECTOR_PROCESS must be 0 or 1")
-        self._use_prompt_process = process_setting == "1"
+        self._use_prompt_process = process_setting == "1" and self.backend not in {
+            QNN_BACKEND,
+            MODAL_BACKEND,
+        }
         self._initialized = False
 
     @staticmethod
     def _infer_backend(model_path: str | Path | None) -> str:
         """Preserve suffix-based compatibility when no backend is configured."""
         if model_path is None:
+            if platform.system() == "Linux" and platform.machine().lower() in {
+                "aarch64",
+                "arm64",
+            }:
+                return QNN_BACKEND
             return "yolo-world"
         path = Path(model_path)
+        if "open-vocab" in path.name.lower() or "qnn" in str(path).lower():
+            return QNN_BACKEND
         if "yoloe" in path.name.lower():
             return "yoloe"
         return "yolo-world" if path.suffix.lower() == ".pt" else "opencv"
@@ -371,6 +399,8 @@ class ObjectDetector:
 
     def initialize(self) -> bool:
         """Load the repository's supported object-detection backend."""
+        if self.backend == MODAL_BACKEND:
+            return self._initialize_modal()
         if not self.model_path.is_file():
             logger.error(
                 "Object model missing: %s (run scripts/setup_object_detector.sh)",
@@ -384,6 +414,8 @@ class ObjectDetector:
                 self.text_model_path,
             )
             return False
+        if self.backend == QNN_BACKEND:
+            return self._initialize_qnn()
         if self.backend in OPEN_VOCAB_BACKENDS:
             if self._use_prompt_process:
                 return self._initialize_prompt_process()
@@ -459,6 +491,72 @@ class ObjectDetector:
             return False
         self._initialized = True
         logger.info("OpenCV YOLO object detector initialized from %s", self.model_path)
+        return True
+
+    def _initialize_modal(self) -> bool:
+        """Validate and warm the authenticated Modal inference endpoint."""
+        try:
+            from nero.perception.modal_yolo_world import ModalYoloWorldClient
+
+            self._modal_client = ModalYoloWorldClient()
+            if os.getenv("NERO_MODAL_WARMUP", "1") != "0":
+                started = time.perf_counter()
+                self._modal_client.detect(
+                    np.zeros((256, 256, 3), dtype=np.uint8),
+                    "object",
+                    self.confidence_threshold,
+                    self.inference_size,
+                    self.max_detections,
+                )
+                logger.info(
+                    "Modal YOLO-World endpoint warmed in %.2fs", time.perf_counter() - started
+                )
+        except (ImportError, OSError, RuntimeError, ValueError) as exc:
+            logger.error("Could not initialize Modal detector: %s", exc)
+            self._modal_client = None
+            return False
+        self._executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="nero-yolo-world-modal"
+        )
+        self._initialized = True
+        logger.info("Modal YOLO-World initialized at %s", self._modal_client.url)
+        return True
+
+    def _initialize_qnn(self) -> bool:
+        """Load the pinned graph on QNN HTP and preload the prompt text tower."""
+        try:
+            from nero.perception.qnn_artifact import verify_qnn_artifact
+            from nero.perception.qnn_yolo_world import (
+                QNNYoloWorldRuntime,
+                YoloWorldPromptEncoder,
+            )
+
+            verified_model = verify_qnn_artifact(self.model_path.parent)
+            if verified_model.resolve() != self.model_path.resolve():
+                raise RuntimeError(
+                    f"manifest selected {verified_model}, not {self.model_path}"
+                )
+            self._qnn_runtime = QNNYoloWorldRuntime(
+                self.model_path, inference_size=self.inference_size
+            )
+            self._prompt_encoder = YoloWorldPromptEncoder()
+            # Resolve CLIP weights at startup, never after the robot accepts a command.
+            self._target_embedding = self._prompt_encoder.encode("object")
+        except (ImportError, OSError, RuntimeError, ValueError) as exc:
+            logger.error("Could not initialize fail-closed QNN detector: %s", exc)
+            self._qnn_runtime = None
+            self._prompt_encoder = None
+            self._target_embedding = None
+            return False
+        self._executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="nero-yolo-world-qnn"
+        )
+        self._initialized = True
+        logger.info(
+            "QNN YOLO-World initialized from %s (providers=%s)",
+            self.model_path,
+            self._qnn_runtime.providers,
+        )
         return True
 
     def _initialize_prompt_process(self) -> bool:
@@ -538,6 +636,8 @@ class ObjectDetector:
         if (
             self._prompt_model is not None
             or self._prompt_process
+            or self._qnn_runtime
+            or self._modal_client
         ):
             return self._result_revision
         return None
@@ -568,6 +668,20 @@ class ObjectDetector:
                 self._latest_detections = []
                 self._result_revision = 0
             logger.info("%s process prompt set to %r", self.backend, resolved)
+            return
+        if self._qnn_runtime is not None:
+            if self._future is not None:
+                self._future.result()
+                self._future = None
+            if self._prompt_encoder is None:
+                raise RuntimeError("QNN prompt encoder is not initialized")
+            embedding = self._prompt_encoder.encode(resolved)
+            with self._result_lock:
+                self._target_embedding = embedding
+                self._target_name = resolved
+                self._latest_detections = []
+                self._result_revision = 0
+            logger.info("QNN prompt set to %r", resolved)
             return
         if self._prompt_model is None:
             if self._future is not None:
@@ -604,7 +718,12 @@ class ObjectDetector:
         Returns:
             List of ObjectDetection
         """
-        if self._prompt_model is not None or self._prompt_process:
+        if (
+            self._prompt_model is not None
+            or self._prompt_process
+            or self._qnn_runtime
+            or self._modal_client
+        ):
             return self._detect_prompt_async(rgb, depth, camera_info)
         if self._net is not None:
             return self._detect_yolo(rgb, depth, camera_info)
@@ -664,8 +783,14 @@ class ObjectDetector:
                 depth_copy = (
                     None if depth is None else np.array(depth, copy=True, order="C")
                 )
+                if self._qnn_runtime:
+                    detector = self._detect_qnn
+                elif self._modal_client:
+                    detector = self._detect_modal
+                else:
+                    detector = self._detect_prompt
                 self._future = self._executor.submit(
-                    self._detect_prompt, rgb_copy, depth_copy, camera_info
+                    detector, rgb_copy, depth_copy, camera_info
                 )
         with self._result_lock:
             return list(self._latest_detections)
@@ -681,7 +806,7 @@ class ObjectDetector:
         )
         if self._inference_count == 1 or self._inference_count % 20 == 0:
             logger.info(
-                "%s process inference %.0fms (EMA %.0fms, %.2f FPS, imgsz=%d)",
+                "%s inference %.0fms (EMA %.0fms, %.2f FPS, imgsz=%d)",
                 self.backend,
                 elapsed * 1000.0,
                 self._inference_seconds_ema * 1000.0,
@@ -714,6 +839,74 @@ class ObjectDetector:
                 )
             )
         return projected
+
+    def _detect_qnn(
+        self,
+        rgb: np.ndarray,
+        depth: Optional[np.ndarray],
+        camera_info=None,
+    ) -> list[ObjectDetection]:
+        """Run the visual graph on QNN and project its boxes through live depth."""
+        from nero.perception.qnn_yolo_world import (
+            decode_yolo_world,
+            preprocess_yolo_world,
+        )
+
+        if self._qnn_runtime is None or self._target_embedding is None:
+            raise RuntimeError("QNN detector has no active runtime prompt")
+        image, geometry = preprocess_yolo_world(rgb, self.inference_size)
+        output, elapsed = self._qnn_runtime.infer(image, self._target_embedding)
+        self._record_prompt_inference(elapsed)
+        raw = [
+            (self._target_name or "object", score, bbox)
+            for score, bbox in decode_yolo_world(
+                output,
+                geometry,
+                self.confidence_threshold,
+                self.max_detections,
+            )
+        ]
+        camera_matrix = (
+            None
+            if camera_info is None
+            else np.asarray(camera_info.k, dtype=float).reshape(3, 3)
+        )
+        return self._project_worker_detections(raw, depth, camera_matrix)
+
+    def _detect_modal(
+        self,
+        rgb: np.ndarray,
+        depth: Optional[np.ndarray],
+        camera_info=None,
+    ) -> list[ObjectDetection]:
+        """Run remote 2D inference, then keep depth projection on the robot."""
+        if self._modal_client is None or self._target_name is None:
+            raise RuntimeError("Modal detector has no active endpoint target")
+        started = time.perf_counter()
+        detections, server_elapsed = self._modal_client.detect(
+            rgb,
+            self._target_name,
+            self.confidence_threshold,
+            self.inference_size,
+            self.max_detections,
+        )
+        elapsed = time.perf_counter() - started
+        self._record_prompt_inference(elapsed)
+        logger.debug(
+            "Modal detector round trip %.0fms (server inference %.0fms)",
+            elapsed * 1000.0,
+            server_elapsed * 1000.0,
+        )
+        raw = [
+            (detection.label, detection.confidence, detection.bbox)
+            for detection in detections
+        ]
+        camera_matrix = (
+            None
+            if camera_info is None
+            else np.asarray(camera_info.k, dtype=float).reshape(3, 3)
+        )
+        return self._project_worker_detections(raw, depth, camera_matrix)
 
     def _detect_prompt(
         self,
@@ -790,6 +983,7 @@ class ObjectDetector:
         if self._executor is not None:
             self._executor.shutdown(wait=True, cancel_futures=True)
             self._executor = None
+        self._modal_client = None
 
     def _detect_yolo(
         self,
