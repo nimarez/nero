@@ -444,7 +444,9 @@ class NavigationPolicy:
         odom = sensor_data.get("odometry")
 
         # Update SLAM
-        slam_pose = self.slam.track_frame(rgb, depth)
+        slam_pose = self.slam.track_frame(
+            rgb, depth, timestamp=sensor_data.get("timestamp")
+        )
 
         # Update pose estimator
         fused_pose = self.pose_estimator.update(
@@ -557,6 +559,7 @@ class NavigationPolicy:
             return {
                 "rgb": self.robot.image_to_array(state.rgb),
                 "depth": self.robot.image_to_array(state.depth),
+                "timestamp": self.robot.image_timestamp(state.rgb),
                 "camera_info": state.camera_info,
                 "imu_rpy": state.orientation_rpy,
                 "odometry": state.position_2d,

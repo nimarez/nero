@@ -83,16 +83,7 @@ class MappingPolicy:
         self._start_time: Optional[float] = None
 
         # Initialize SLAM
-        self._slam = ORBSLAM3Node(
-            voc_path=(
-                slam_config.get("voc_path", "config/ORBvoc.txt") if slam_config else ""
-            ),
-            settings_path=(
-                slam_config.get("settings_path", "config/orbslam3_settings.yaml")
-                if slam_config
-                else ""
-            ),
-        )
+        self._slam = ORBSLAM3Node(config=slam_config)
         self._pose_estimator = PoseEstimator()
         self._depth_processor = DepthProcessor()
 
@@ -336,13 +327,18 @@ class MappingPolicy:
 
     def _get_current_pose(self, robot_state: RobotState) -> Optional[np.ndarray]:
         """Get current robot pose from SLAM."""
-        if robot_state.rgb is None:
+        if robot_state.rgb is None or robot_state.depth is None:
             return self._last_pose
 
-        # Try SLAM pose first
-        slam_pose = self._slam.get_current_pose()
-        if slam_pose is not None:
-            return slam_pose
+        rgb = self._robot.image_to_array(robot_state.rgb)
+        depth = self._robot.image_to_array(robot_state.depth)
+        slam_pose = self._slam.track_frame(
+            rgb,
+            depth,
+            timestamp=self._robot.image_timestamp(robot_state.rgb),
+        )
+        if slam_pose.tracking_status == "OK":
+            return slam_pose.to_matrix()
 
         # Fallback to odometry
         if robot_state.odom is not None:

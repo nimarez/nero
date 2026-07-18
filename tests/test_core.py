@@ -62,6 +62,10 @@ def test_robot_image_helpers_normalize_k1_images():
         RobotInterface.image_to_array(SimpleNamespace(data=image)), image
     )
     np.testing.assert_array_equal(RobotInterface.image_to_array(image), image)
+    stamped = SimpleNamespace(
+        header=SimpleNamespace(stamp=SimpleNamespace(sec=12, nanosec=500_000_000))
+    )
+    assert RobotInterface.image_timestamp(stamped) == 12.5
 
 
 def test_hardware_agent_clis_use_k1_sensors_implicitly(monkeypatch):

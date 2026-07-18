@@ -10,3 +10,6 @@ htmlcov/
 build/
 dist/
 output/
+config/ORBvoc.txt
+config/k1_calibration.json
+config/k1_orbslam3_imu_rgbd.yaml

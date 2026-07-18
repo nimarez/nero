@@ -10,6 +10,8 @@ dependencies = [
     "pyyaml>=6.0",
     "scipy>=1.11.0",
     "matplotlib>=3.7.0",
+    "booster-robotics-sdk-python==1.5.6; sys_platform == 'linux'",
+    "orbslam3-python==2.0.0; sys_platform == 'linux'",
 ]
 
 [dependency-groups]
@@ -36,6 +38,8 @@ nero-sim = "nero.agents.sim_agent:main"
 nero-mapping = "nero.agents.mapping_agent:main"
 nero-map-nav = "nero.agents.map_nav_agent:main"
 nero-pc2map = "nero.utils.pointcloud_converter:main"
+nero-k1-calibration = "nero.slam.k1_calibration:main"
+nero-setup-orbslam = "nero.slam.setup_orbslam:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

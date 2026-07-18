@@ -112,7 +112,8 @@ def main():
         robot=robot,
         slam_config={
             "voc_path": "config/ORBvoc.txt",
-            "settings_path": "config/orbslam3_settings.yaml",
+            "settings_path": "config/k1_orbslam3_imu_rgbd.yaml",
+            "calibration_path": "config/k1_calibration.json",
         },
         mapping_config=mapping_config,
         safety_config={

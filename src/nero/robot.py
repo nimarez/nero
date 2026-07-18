@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -166,6 +167,15 @@ class RobotInterface:
             raise ValueError("K1 returned no image data")
         data = getattr(image, "data", image)
         return np.asarray(data)
+
+    @staticmethod
+    def image_timestamp(image: AnyImage) -> float:
+        """Return the camera's ROS timestamp, or the local receipt time."""
+        header = getattr(image, "header", None)
+        stamp = getattr(header, "stamp", None)
+        if stamp is None:
+            return time.time()
+        return float(stamp.sec) + float(stamp.nanosec) * 1e-9
 
     def get_imu(self) -> IMUState:
         return self._robot.get_imu()

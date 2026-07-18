@@ -1,38 +1,58 @@
-# ORB-SLAM3 Configuration for K1 Robot
-# Based on K1 depth camera specifications
+%YAML:1.0
+---
+# Template only. `nero-k1-calibration` replaces camera and IMU values with
+# factory/runtime values from the connected K1 before IMU_RGBD is enabled.
+File.version: "1.0"
+Camera.type: "PinHole"
 
 #--------------------------------------------------------------------------------------------
 # Camera Parameters
 #--------------------------------------------------------------------------------------------
 
 # Camera calibration (K1 depth camera approximate values)
-Camera.fx: 216.5
-Camera.fy: 216.5
-Camera.cx: 160.0
-Camera.cy: 120.0
+Camera1.fx: 216.5
+Camera1.fy: 216.5
+Camera1.cx: 160.0
+Camera1.cy: 120.0
 
 # Distortion coefficients (approximate for K1)
-Camera.k1: 0.0
-Camera.k2: 0.0
-Camera.p1: 0.0
-Camera.p2: 0.0
+Camera1.k1: 0.0
+Camera1.k2: 0.0
+Camera1.p1: 0.0
+Camera1.p2: 0.0
+Camera1.k3: 0.0
 
 # Camera resolution
 Camera.width: 320
 Camera.height: 240
 
 # Camera FPS
-Camera.fps: 30.0
+Camera.fps: 30
 
 # Color order (RGB for K1)
 Camera.RGB: 1
 
-# Depth camera baseline/focal length ratio for depth scale
-Camera.bf: 46.0
+Stereo.ThDepth: 40.0
+Stereo.b: 0.07732
+RGBD.DepthMapFactor: 1000.0
 
-# Near and far depth thresholds (meters)
-ThDepth: 5.0
-DepthMapFactor: 1000.0  # Depth values in mm
+# Camera-to-IMU/body transform. The probe replaces this template with the
+# transform composed from the connected K1's factory frame geometry.
+IMU.T_b_c1: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [1.0, 0.0, 0.0, 0.0,
+          0.0, 1.0, 0.0, 0.0,
+          0.0, 0.0, 1.0, 0.0,
+          0.0, 0.0, 0.0, 1.0]
+
+IMU.NoiseGyro: 0.0
+IMU.NoiseAcc: 0.0
+IMU.GyroWalk: 0.0
+IMU.AccWalk: 0.0
+IMU.Frequency: 0.0
+IMU.InsertKFsWhenLost: 0
 
 #--------------------------------------------------------------------------------------------
 # ORB Extractor Parameters
@@ -48,7 +68,8 @@ ORBextractor.nLevels: 8
 ORBextractor.scaleFactor: 1.2
 
 # Fast threshold
-ORBextractor.fastTh: 20
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
 
 #--------------------------------------------------------------------------------------------
 # Viewer Parameters
@@ -65,15 +86,4 @@ Viewer.ViewpointY: -0.7
 Viewer.ViewpointZ: -1.8
 Viewer.ViewpointF: 500
 
-#--------------------------------------------------------------------------------------------
-# System Parameters
-#--------------------------------------------------------------------------------------------
-
-# Use depth images
-System.useDepth: 1
-
-# Enable IMU integration (K1 has IMU)
-System.useIMU: 1
-
-# Atlas mode (multi-map)
-System.atlasMode: 1
+loopClosing: 1

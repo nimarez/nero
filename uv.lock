@@ -32,6 +32,15 @@ wheels = [
 ]
 
 [[package]]
+name = "booster-robotics-sdk-python"
+version = "1.5.6"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ca/bf/12d1323c6c3e164ba29891266bbbb55b3e196839949e4aab328f6d4989b1/booster_robotics_sdk_python-1.5.6-cp310-cp310-manylinux_2_34_aarch64.whl", hash = "sha256:c7672f99866aab76dcc084f171c9d7f3e37a587377f4fce73490028272239da8", size = 6810206, upload-time = "2026-07-08T06:56:06.849Z" },
+    { url = "https://files.pythonhosted.org/packages/67/36/417cdae70f6c9437c8e85ea4dcf01fced672fa6e2dc4ef168f6bb9e80ea1/booster_robotics_sdk_python-1.5.6-cp310-cp310-manylinux_2_34_x86_64.whl", hash = "sha256:40f3b2b01f1d63ff881fa395bb3b8cec60df9f8be0976844cffa6af075866aeb", size = 7462123, upload-time = "2026-07-08T06:56:08.964Z" },
+]
+
+[[package]]
 name = "click"
 version = "8.4.2"
 source = { registry = "https://pypi.org/simple" }
@@ -191,9 +200,11 @@ name = "nero"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "booster-robotics-sdk-python", marker = "sys_platform == 'linux'" },
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "opencv-python" },
+    { name = "orbslam3-python", marker = "sys_platform == 'linux'" },
     { name = "pillow" },
     { name = "pyyaml" },
     { name = "scipy" },
@@ -208,9 +219,11 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "booster-robotics-sdk-python", marker = "sys_platform == 'linux'", specifier = "==1.5.6" },
     { name = "matplotlib", specifier = ">=3.7.0" },
     { name = "numpy", specifier = ">=1.24.0,<2.0.0" },
     { name = "opencv-python", specifier = ">=4.8.0,<4.12.0" },
+    { name = "orbslam3-python", marker = "sys_platform == 'linux'", specifier = "==2.0.0" },
     { name = "pillow", specifier = ">=10.0.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "scipy", specifier = ">=1.11.0" },
@@ -254,6 +267,19 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/2c/8b/90eb44a40476fa0e71e05a0283947cfd74a5d36121a11d926ad6f3193cc4/opencv_python-4.11.0.86-cp37-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:6b02611523803495003bd87362db3e1d2a0454a6a63025dc6658a9830570aa0d", size = 62986597, upload-time = "2025-01-16T13:52:08.836Z" },
     { url = "https://files.pythonhosted.org/packages/fb/d7/1d5941a9dde095468b288d989ff6539dd69cd429dbf1b9e839013d21b6f0/opencv_python-4.11.0.86-cp37-abi3-win32.whl", hash = "sha256:810549cb2a4aedaa84ad9a1c92fbfdfc14090e2749cedf2c1589ad8359aa169b", size = 29384337, upload-time = "2025-01-16T13:52:13.549Z" },
     { url = "https://files.pythonhosted.org/packages/a4/7d/f1c30a92854540bf789e9cd5dde7ef49bbe63f855b85a2e6b3db8135c591/opencv_python-4.11.0.86-cp37-abi3-win_amd64.whl", hash = "sha256:085ad9b77c18853ea66283e98affefe2de8cc4c1f43eda4c100cf9b2721142ec", size = 39488044, upload-time = "2025-01-16T13:52:21.928Z" },
+]
+
+[[package]]
+name = "orbslam3-python"
+version = "2.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy", marker = "sys_platform != 'darwin'" },
+    { name = "opencv-python", marker = "sys_platform != 'darwin'" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d2/67/3c9d223e695fab6727df0c353cb68a43cd6ff9b779fef825cc7df079d5cf/orbslam3_python-2.0.0-cp310-cp310-manylinux_2_28_aarch64.whl", hash = "sha256:1ef2983f49303825c50ace647f877c434d97a6b28e66a82d131ee0beaf840d67", size = 24062250, upload-time = "2025-10-17T15:38:58.215Z" },
+    { url = "https://files.pythonhosted.org/packages/45/77/cb5f4de22eaa3da5290a7315ec7d389a3cb86b7e73cfe8f613277de8ce62/orbslam3_python-2.0.0-cp310-cp310-manylinux_2_28_x86_64.whl", hash = "sha256:fd9f5f421f96f322a22caacdfc7443c79f369bc4f9790a8360ad912501806f93", size = 40502084, upload-time = "2025-10-17T15:39:01.657Z" },
 ]
 
 [[package]]
