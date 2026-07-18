@@ -28,6 +28,7 @@ def main() -> None:
         imu_frame="imu",
         width=320,
         height=240,
+        camera_fps=30,
         camera_matrix=[216.5, 0, 160, 0, 216.5, 120, 0, 0, 1],
         distortion=[0, 0, 0, 0, 0],
         depth_map_factor=1000,
