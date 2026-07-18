@@ -250,5 +250,6 @@ def test_qnn_deploy_streams_binary_without_a_remote_tty(monkeypatch, tmp_path):
     assert command[:2] == ["ssh", "-T"]
     assert command[2] == "booster@robot.local"
     assert "'/tmp/repo with space'" in command[3]
+    assert "/home/booster/.local/bin/uv" in command[3]
     assert "nero-install-qnn-model" in command[3]
     assert kwargs["stdin"] is archive.stdout
