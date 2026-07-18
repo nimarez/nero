@@ -47,8 +47,15 @@ class DepthProcessor:
         else:
             depth_m = depth.astype(np.float32).copy()
 
-        # Mark invalid depths
-        depth_m[(depth_m < self.min_depth) | (depth_m > self.max_depth)] = np.nan
+        # A positive return below the reliable range is still evidence of a
+        # near-field hazard. Clamp it so filtering cannot turn a dangerously
+        # close object into "no obstacle". Zero/non-finite and over-range
+        # returns remain invalid.
+        near = np.isfinite(depth_m) & (depth_m > 0) & (depth_m < self.min_depth)
+        depth_m[near] = self.min_depth
+        depth_m[(depth_m <= 0) | ~np.isfinite(depth_m) | (depth_m > self.max_depth)] = (
+            np.nan
+        )
 
         return depth_m
 
@@ -85,13 +92,11 @@ class DepthProcessor:
         obstacle_mask = region < self.obstacle_threshold
 
         # Check for obstacles
-        has_obstacle = np.any(obstacle_mask)
-
         # Get minimum distance (ignoring NaN)
         valid_depth = region[~np.isnan(region)]
-        min_distance = (
-            float(np.min(valid_depth)) if len(valid_depth) > 0 else self.max_depth
-        )
+        sensor_blind = len(valid_depth) == 0
+        min_distance = float(np.min(valid_depth)) if not sensor_blind else 0.0
+        has_obstacle = bool(np.any(obstacle_mask) or sensor_blind)
 
         # Check left, center, right thirds
         third_w = width // 3
@@ -103,9 +108,10 @@ class DepthProcessor:
             "has_obstacle": has_obstacle,
             "min_distance": min_distance,
             "obstacle_mask": obstacle_mask,
-            "left_clear": not np.any(left_region),
-            "center_clear": not np.any(center_region),
-            "right_clear": not np.any(right_region),
+            "sensor_blind": sensor_blind,
+            "left_clear": not sensor_blind and not np.any(left_region),
+            "center_clear": not sensor_blind and not np.any(center_region),
+            "right_clear": not sensor_blind and not np.any(right_region),
         }
 
     def get_clear_path(

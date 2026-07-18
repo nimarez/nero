@@ -1,4 +1,5 @@
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -20,6 +21,7 @@ from nero.navigation.path_planner import (
     smooth_path,
 )
 from nero.navigation.safety import SafetyMonitor
+from nero.navigation.runtime import SensorFrame, localize_sensor_frame
 from nero.perception.depth_processor import DepthProcessor
 from nero.slam.orb_slam3_node import SLAMPose
 from nero.slam.pose_estimator import PoseEstimator, _blend_angles
@@ -160,7 +162,8 @@ def test_depth_preprocessing_obstacles_clear_path_and_ground_plane():
         dtype=np.uint16,
     )
     depth = processor.preprocess(raw)
-    assert np.isnan(depth[0, 0]) and np.isnan(depth[0, 2])
+    assert depth[0, 0] == pytest.approx(processor.min_depth)
+    assert np.isnan(depth[0, 2])
     obstacles = processor.detect_obstacles(depth)
     assert obstacles["has_obstacle"]
     assert obstacles["min_distance"] == pytest.approx(0.3)
@@ -171,6 +174,32 @@ def test_depth_preprocessing_obstacles_clear_path_and_ground_plane():
     plane = processor.compute_ground_plane(plane_depth)
     assert plane is not None
     assert np.isfinite(plane["normal"]).all()
+
+
+def test_depth_processor_fails_closed_for_near_and_missing_depth():
+    processor = DepthProcessor(obstacle_region_height=60)
+
+    near = processor.detect_obstacles(
+        processor.preprocess(np.full((60, 80), 100, dtype=np.uint16))
+    )
+    assert near["has_obstacle"]
+    assert near["min_distance"] == pytest.approx(processor.min_depth)
+
+    missing = processor.detect_obstacles(
+        processor.preprocess(np.zeros((60, 80), dtype=np.uint16))
+    )
+    assert missing["has_obstacle"]
+    assert missing["sensor_blind"]
+    assert missing["min_distance"] == 0.0
+    assert not missing["left_clear"]
+    assert not missing["center_clear"]
+    assert not missing["right_clear"]
+
+    status = SafetyMonitor().check_safety(
+        obstacle_distance=near["min_distance"]
+    )
+    assert not status.is_safe
+    assert status.emergency_stop
 
 
 def test_safety_monitor_emergency_and_tracking_timeout():
@@ -186,6 +215,36 @@ def test_safety_monitor_emergency_and_tracking_timeout():
 
     critical = monitor.check_safety(battery_level=4)
     assert not critical.is_safe and critical.reason == "Critical battery level"
+
+
+def test_navigation_runtime_feeds_real_battery_soc_into_safety():
+    pose = SLAMPose(
+        position=np.zeros(3),
+        orientation=np.array([0.0, 0.0, 0.0, 1.0]),
+        tracking_status="OK",
+    )
+    sensor = SensorFrame(
+        rgb=np.zeros((2, 2, 3), dtype=np.uint8),
+        depth=np.full((2, 2), 1000, dtype=np.uint16),
+        timestamp=1.0,
+        camera_info=None,
+        imu_rpy=np.zeros(3),
+        imu_samples=[],
+        odometry=np.zeros(3),
+        raw_state=SimpleNamespace(battery_level=4.0),
+    )
+    localized = localize_sensor_frame(
+        sensor,
+        slam=SimpleNamespace(track_frame=lambda *a, **k: pose, body_pose=lambda p: p),
+        pose_estimator=SimpleNamespace(
+            update=lambda **kwargs: SimpleNamespace(position=np.zeros(3), yaw=0.0)
+        ),
+        depth_processor=DepthProcessor(obstacle_region_height=1),
+        safety=SafetyMonitor(),
+    )
+
+    assert not localized.safety_status.is_safe
+    assert localized.safety_status.reason == "Critical battery level"
 
 
 def test_pose_estimator_fuses_sources_and_preserves_zero_timestamp():

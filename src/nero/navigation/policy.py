@@ -314,6 +314,7 @@ class NavigationPolicy:
             sensor_data = self._get_sensor_data()
             if sensor_data is None:
                 self._last_sensor = None
+                self._stop_robot()
                 return self._update_status(
                     state=PolicyState.ERROR, message="Failed to get sensor data"
                 )

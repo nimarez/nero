@@ -36,7 +36,7 @@ class SafetyMonitor:
         self,
         max_tilt_angle: float = 0.2,  # radians (~11 degrees)
         max_velocity: float = 0.8,  # m/s
-        min_obstacle_distance: float = 0.2,  # meters
+        min_obstacle_distance: float = 0.25,  # meters
         max_tracking_lost_time: float = 3.0,  # seconds
     ):
         self.max_tilt_angle = max_tilt_angle

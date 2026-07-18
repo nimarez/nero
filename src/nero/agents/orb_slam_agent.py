@@ -129,7 +129,9 @@ def run_agent(
 
     # Main loop
     logger.info("Starting ORB-SLAM agent loop (press Ctrl+C to stop)")
-    loop_rate = 30
+    # Match the production K1 Geek RGB-D stream; RobotInterface additionally
+    # waits for a new synchronized frame so stale images are never reprocessed.
+    loop_rate = 20
     loop_interval = 1.0 / loop_rate
     viz = Visualization()
     target_object = None
@@ -160,6 +162,9 @@ def run_agent(
             # The policy owns the single synchronized K1 sensor read used by
             # localization, safety, detection, display, and observability.
             status = policy.step()
+            if status.state == PolicyState.ERROR:
+                logger.error("Navigation stopped: %s", status.message)
+                break
             sensor = policy.last_sensor
             if sensor is None:
                 time.sleep(0.01)

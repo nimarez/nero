@@ -110,28 +110,29 @@ class UnixSocketCommandSource:
         except socket.timeout:
             return ""
         if not payload:
-            self.stop_listening()
+            self._close_client()
             return ""
-        command = payload.decode("utf-8", errors="replace").splitlines()[0].strip()
-        if command:
+        return payload.decode("utf-8", errors="replace").splitlines()[0].strip()
+
+    def acknowledge(self, response: str) -> None:
+        """Reply only after the policy has semantically admitted a command."""
+        if self._client is not None:
             try:
-                self._client.sendall(b"accepted\n")
+                self._client.sendall(f"{response}\n".encode())
             except OSError:
                 pass
-        return command
+        self._close_client()
 
-    def stop_listening(self) -> None:
+    def _close_client(self) -> None:
         if self._client is not None:
             try:
                 self._client.close()
             finally:
                 self._client = None
 
-    def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self.stop_listening()
+    def stop_listening(self) -> None:
+        """Close admission completely so commands cannot queue while moving."""
+        self._close_client()
         if self._server is not None:
             self._server.close()
             self._server = None
@@ -139,6 +140,12 @@ class UnixSocketCommandSource:
             self.path.unlink()
         except FileNotFoundError:
             pass
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.stop_listening()
 
 
 class K1VoiceCommandSource:
@@ -297,10 +304,16 @@ def request_navigation_target(
                 object_name = _parse_bare_object_name(command)
             if object_name is None:
                 logger.info("Ignoring non-navigation command: %s", command)
+                acknowledge = getattr(command_source, "acknowledge", None)
+                if callable(acknowledge):
+                    acknowledge("rejected")
                 continue
 
             # Stop ASR before TTS so the K1 never transcribes its own
             # acknowledgement as the next human command.
+            acknowledge = getattr(command_source, "acknowledge", None)
+            if callable(acknowledge):
+                acknowledge("accepted")
             command_source.stop_listening()
             try:
                 speaker.speak(f"Going to the {object_name}.")

@@ -152,6 +152,9 @@ def main() -> None:
         while running:
             loop_started = time.monotonic()
             status = policy.step()
+            if status.state == PolicyState.ERROR:
+                logger.error("Navigation stopped: %s", status.message)
+                break
             command = status.velocity_command or VelocityCommand()
             if telemetry is not None and policy.last_sensor is not None:
                 sensor = policy.last_sensor

@@ -42,6 +42,7 @@ class RobotState:
     depth: Any = None
     camera_info: Any = None
     imu_samples: Optional[list[tuple[float, ...]]] = None
+    battery_level: float | None = None
 
     @property
     def position_2d(self) -> np.ndarray:
@@ -101,7 +102,11 @@ class RobotInterface:
             import rclpy
             from booster_interface.msg import Odometer
             from booster_robotics_sdk_python import (
-                B1LocoClient, B1LowStateSubscriber, ChannelFactory, LuiClient,
+                B1BatteryStateSubscriber,
+                B1LocoClient,
+                B1LowStateSubscriber,
+                ChannelFactory,
+                LuiClient,
             )
             from sensor_msgs.msg import CameraInfo, Image, JointState
         except ImportError as exc:
@@ -124,6 +129,7 @@ class RobotInterface:
         self._pending_rgb: dict[int, Any] = {}
         self._pending_depth: dict[int, Any] = {}
         self._imu_samples: list[tuple[float, ...]] = []
+        self._battery_level: float | None = None
         self._last_frame_timestamp: float | None = None
         self._mode = -1
         self._initialized = False
@@ -176,6 +182,10 @@ class RobotInterface:
         ]
         self._low_state_subscriber = B1LowStateSubscriber(self._on_low_state)
         self._low_state_subscriber.InitChannel()
+        self._battery_state_subscriber = B1BatteryStateSubscriber(
+            self._on_battery_state
+        )
+        self._battery_state_subscriber.InitChannel()
         self._spin_thread = threading.Thread(
             target=self._spin, name="nero-k1-ros", daemon=True
         )
@@ -263,6 +273,16 @@ class RobotInterface:
                     del self._imu_samples[:-4000]
             self._ready.notify_all()
 
+    def _on_battery_state(self, message: Any) -> None:
+        """Receive the K1 state-of-charge percentage from ``rt/battery_state``."""
+        level = float(message.soc)
+        if not np.isfinite(level) or not 0.0 <= level <= 100.0:
+            logger.warning("Ignoring invalid K1 battery state of charge: %r", level)
+            return
+        with self._ready:
+            self._battery_level = level
+            self._ready.notify_all()
+
     def _on_odom(self, message: Any) -> None:
         with self._ready:
             self._odom = SimpleNamespace(
@@ -277,7 +297,14 @@ class RobotInterface:
     def _sensor_ready(self) -> bool:
         return all(
             value is not None
-            for value in (self._rgb, self._depth, self._camera_info, self._imu, self._odom)
+            for value in (
+                self._rgb,
+                self._depth,
+                self._camera_info,
+                self._imu,
+                self._odom,
+                self._battery_level,
+            )
         )
 
     def initialize(self) -> None:
@@ -294,6 +321,7 @@ class RobotInterface:
                             ("rgb", self._rgb), ("depth", self._depth),
                             ("camera_info", self._camera_info), ("imu", self._imu),
                             ("odometry", self._odom),
+                            ("battery", self._battery_level),
                         ) if value is None
                     ]
                     raise RuntimeError("K1 sensor preflight timed out: " + ", ".join(missing))
@@ -317,9 +345,18 @@ class RobotInterface:
         return int(body.get("mode", -1))
 
     def get_state(self, include_images: bool = True) -> RobotState:
-        with self._lock:
+        deadline = time.monotonic() + self._timeout
+        with self._ready:
             if not self._sensor_ready():
                 raise RuntimeError("K1 sensor snapshot is not ready")
+            while (
+                self._last_frame_timestamp is not None
+                and self._stamp(self._rgb) <= self._last_frame_timestamp
+            ):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("K1 synchronized RGB-D frame timed out")
+                self._ready.wait(timeout=min(0.25, remaining))
             timestamp = self._stamp(self._rgb)
             start = self._last_frame_timestamp
             samples = [
@@ -333,6 +370,7 @@ class RobotInterface:
                 joints=self._joints, rgb=self._rgb if include_images else None,
                 depth=self._depth if include_images else None,
                 camera_info=self._camera_info, imu_samples=samples,
+                battery_level=self._battery_level,
             )
 
     def peek_state(self, include_images: bool = True) -> RobotState:
@@ -345,6 +383,7 @@ class RobotInterface:
                 joints=self._joints, rgb=self._rgb if include_images else None,
                 depth=self._depth if include_images else None,
                 camera_info=self._camera_info, imu_samples=[],
+                battery_level=self._battery_level,
             )
 
     def get_camera_info(self) -> Any:
@@ -444,6 +483,8 @@ class RobotInterface:
         self._closed = True
         if hasattr(self, "_low_state_subscriber"):
             self._low_state_subscriber.CloseChannel()
+        if hasattr(self, "_battery_state_subscriber"):
+            self._battery_state_subscriber.CloseChannel()
         if hasattr(self, "_spin_thread"):
             self._spin_thread.join(timeout=1.0)
         if hasattr(self, "_node"):

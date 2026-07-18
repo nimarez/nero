@@ -30,6 +30,19 @@ def test_policy_exposes_only_detections_matching_spoken_target():
     assert policy._matching_target_detections([bottle, chair]) == [chair]
 
 
+def test_sensor_failure_stops_robot_before_entering_terminal_error():
+    robot = RecordingRobot()
+    policy = NavigationPolicy(robot=robot)
+    policy._running = True
+    policy._state = PolicyState.DETECTING
+    policy._get_sensor_data = lambda: None
+
+    status = policy.step()
+
+    assert status.state == PolicyState.ERROR
+    assert robot.commands[-1] == (0.0, 0.0, 0.0)
+
+
 def test_real_policy_projects_camera_detection_into_world_goal():
     camera_to_world = np.eye(4)
     camera_to_world[:3, :3] = [

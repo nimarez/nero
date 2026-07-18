@@ -206,14 +206,23 @@ def main() -> None:
                     f"NERO_RERUN_URL={shlex.quote(rerun_url)} "
                     "./scripts/run_rerun_bridge.sh >/tmp/nero-rerun-bridge.log 2>&1 &",
                     "bridge_pid=$!",
-                    'cleanup() { kill "$bridge_pid" 2>/dev/null || true; '
-                    'wait "$bridge_pid" 2>/dev/null || true; }',
-                    "trap cleanup EXIT HUP INT TERM",
+                    "relay_pid=",
+                    'cleanup() { kill "$bridge_pid" ${relay_pid:+"$relay_pid"} '
+                    '2>/dev/null || true; wait "$bridge_pid" '
+                    '${relay_pid:+"$relay_pid"} 2>/dev/null || true; }',
+                    "trap cleanup EXIT",
+                    "trap 'exit 130' HUP INT TERM",
                     "sleep 0.5",
                     'if ! kill -0 "$bridge_pid" 2>/dev/null; then '
                     "cat /tmp/nero-rerun-bridge.log >&2; exit 1; fi",
                     f"uv run nero-command-relay --socket {shlex.quote(args.socket)} "
-                    f"--ack-timeout {args.ack_timeout:g}",
+                    f"--ack-timeout {args.ack_timeout:g} <&0 &",
+                    "relay_pid=$!",
+                    'while kill -0 "$bridge_pid" 2>/dev/null && '
+                    'kill -0 "$relay_pid" 2>/dev/null; do sleep 0.25; done',
+                    'if ! kill -0 "$bridge_pid" 2>/dev/null; then '
+                    "cat /tmp/nero-rerun-bridge.log >&2; exit 1; fi",
+                    'wait "$relay_pid"',
                 )
             )
             remote_command = f"bash -lc {shlex.quote(remote_script)}"

@@ -93,6 +93,7 @@ def localize_sensor_frame(
     safety_status = safety.check_safety(
         imu_rpy=sensor.imu_rpy,
         obstacle_distance=float(obstacle_info.get("min_distance", float("inf"))),
+        battery_level=getattr(sensor.raw_state, "battery_level", None),
     )
     return LocalizedFrame(
         sensor=sensor,

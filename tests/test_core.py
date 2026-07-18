@@ -108,6 +108,48 @@ def test_robot_image_helpers_decode_production_k1_encodings():
     assert np.max(decoded) - np.min(decoded) == 0
 
 
+def test_robot_consumes_official_battery_soc_and_waits_for_a_new_rgbd_frame():
+    robot = RobotInterface.__new__(RobotInterface)
+    robot._lock = threading.Lock()
+    robot._ready = threading.Condition(robot._lock)
+    robot._timeout = 0.5
+    robot._battery_level = None
+    robot._camera_info = object()
+    robot._imu = SimpleNamespace(rpy=np.zeros(3))
+    robot._odom = SimpleNamespace(pose_2d=np.zeros(3))
+    robot._joints = None
+    robot._mode = 2
+    robot._imu_samples = []
+    robot._last_frame_timestamp = 1.0
+
+    def image(stamp):
+        return SimpleNamespace(
+            header=SimpleNamespace(
+                stamp=SimpleNamespace(sec=int(stamp), nanosec=0)
+            )
+        )
+
+    robot._rgb = image(1)
+    robot._depth = image(1)
+    robot._on_battery_state(SimpleNamespace(soc=42.5))
+    assert robot._battery_level == 42.5
+
+    states = []
+    reader = threading.Thread(target=lambda: states.append(robot.get_state()))
+    reader.start()
+    time.sleep(0.02)
+    assert reader.is_alive()
+    with robot._ready:
+        robot._rgb = image(2)
+        robot._depth = image(2)
+        robot._ready.notify_all()
+    reader.join(timeout=1)
+
+    assert not reader.is_alive()
+    assert states[0].battery_level == 42.5
+    assert RobotInterface.image_timestamp(states[0].rgb) == 2.0
+
+
 def test_opencv_yolo_backend_decodes_coco_detection_with_depth():
     class FakeNet:
         def setInput(self, blob):
@@ -330,6 +372,51 @@ def test_unix_socket_command_source_accepts_object_and_is_private():
     assert not os.path.exists(socket_path)
 
 
+def test_unix_socket_rejects_invalid_commands_and_closes_admission_while_busy():
+    socket_path = f"/tmp/nero-admission-{os.getpid()}-{time.time_ns()}.sock"
+    commands = UnixSocketCommandSource(socket_path)
+    result = []
+    listener = threading.Thread(
+        target=lambda: result.append(
+            request_navigation_target(
+                SimpleNamespace(speak=lambda _: None), commands
+            )
+        )
+    )
+    listener.start()
+
+    deadline = time.monotonic() + 1.0
+    while not os.path.exists(socket_path) and time.monotonic() < deadline:
+        time.sleep(0.001)
+
+    invalid = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    invalid.connect(socket_path)
+    invalid.sendall(b"go\n")
+    assert invalid.recv(128) == b"rejected\n"
+    invalid.close()
+
+    valid = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    valid.connect(socket_path)
+    valid.sendall(b"chair\n")
+    assert valid.recv(128) == b"accepted\n"
+    valid.close()
+    listener.join(timeout=2)
+
+    assert result == ["chair"]
+    assert not os.path.exists(socket_path)
+    queued = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    with np.testing.assert_raises(OSError):
+        queued.connect(socket_path)
+    queued.close()
+
+    # A later listening session starts with a new socket and no stale backlog.
+    commands.start_listening()
+    assert os.path.exists(socket_path)
+    commands.stop_listening()
+    commands.close()
+    assert not os.path.exists(socket_path)
+
+
 def test_unavailable_speaker_does_not_discard_terminal_target(monkeypatch):
     monkeypatch.setattr("builtins.input", lambda _: "chair")
 
@@ -451,6 +538,67 @@ def test_stand_off_is_internal_and_independent_of_initial_range():
     assert safe_stand_off_distance("chair") == 1.0
     assert safe_stand_off_distance("bottle") == 0.7
     assert safe_stand_off_distance("unknown") == 0.8
+
+
+def test_real_agent_exits_immediately_on_terminal_policy_error(monkeypatch):
+    import nero.agents.orb_slam_agent as agent
+
+    events = []
+
+    class FailedPolicy:
+        last_sensor = None
+
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            events.append("start")
+
+        def step(self):
+            events.append("step")
+            return SimpleNamespace(
+                state=agent.PolicyState.ERROR,
+                message="camera timed out",
+            )
+
+        def stop(self):
+            events.append("policy stop")
+
+    class Listener:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            events.append("listen")
+
+        def poll(self):
+            return None
+
+        def close(self):
+            events.append("listener close")
+
+    monkeypatch.setattr(agent, "NavigationPolicy", FailedPolicy)
+    monkeypatch.setattr(agent, "NavigationTargetListener", Listener)
+    monkeypatch.setattr(agent.signal, "signal", lambda *args: None)
+    monkeypatch.setattr(
+        agent.RosObservabilityPublisher, "try_create", lambda **kwargs: None
+    )
+    robot = SimpleNamespace(stop=lambda: events.append("robot stop"))
+
+    agent.run_agent(
+        robot,
+        SimpleNamespace(no_ros_observability=True, no_display=True),
+        command_source=SimpleNamespace(),
+    )
+
+    assert events == [
+        "start",
+        "listen",
+        "step",
+        "policy stop",
+        "robot stop",
+        "listener close",
+    ]
 
 
 def test_robot_speak_uses_booster_speaker_service():
