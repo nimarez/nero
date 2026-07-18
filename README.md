@@ -1,222 +1,256 @@
 # Nero
 
-Nero obeys object-navigation directions such as "go to the chair," announces
-"Going to the chair" over the Booster K1 speaker, and then uses the built-in
-RGB-D camera to detect, track, and approach only that requested target. Camera,
-depth, and IMU inputs are internal K1 capabilities; agents do not accept sensor
-handles, object names, or target distances as CLI arguments.
+Nero is a command-driven object-navigation stack for the Booster K1 Geek. A
+person says or types `go to the chair`; the robot announces `Going to the chair`,
+detects only the requested class in its live RGB-D stream, builds a
+visual-inertial world pose with ORB-SLAM3, and drives toward a dynamic `(x, y, yaw)`
+approach pose. Object names, target distances, cameras, depth devices, and IMUs
+are deliberately not CLI arguments: they are commands or intrinsic K1 hardware.
 
-## Environment
+## What is supported
 
-The project uses `uv` and Python 3.10:
+The physical runtime uses interfaces verified on K1 Geek firmware
+`v1.5.0.9-release-0387-2026-01-23`:
+
+| Function | Production interface |
+|---|---|
+| RGB | `/boostercamera/head/rgb`, NV12, 544×448 |
+| Depth | `/boostercamera/head/depth`, `mono16`, 544×448 |
+| Intrinsics | `/boostercamera/head/rgb/camera_info` |
+| IMU | Official `B1LowStateSubscriber`, approximately 500 Hz |
+| Planar odometry | `/odometer_state` |
+| Locomotion | Official `B1LocoClient` on loopback |
+| Speech | Official Booster LUI ASR/TTS |
+| Detection | Checksum-verified YOLOv8n ONNX through OpenCV DNN |
+| SLAM | Native ORB-SLAM3 `Sensor.IMU_RGBD` |
+
+Only the interfaces in this table are part of the physical runtime. RGB and depth
+must have the same timestamp. IMU samples are synchronized to each pair before
+native SLAM.
+
+Startup is fail-closed. Nero requires live RGB, depth, CameraInfo, IMU, odometry,
+the ONNX model, ORB vocabulary, robot calibration, walking mode, and the native
+IMU-RGBD backend before it enables velocity output. It never changes the real
+robot's mode automatically. Keep the area clear and the hardware stop reachable.
+
+## Local development
+
+The repository uses Python 3.10 and `uv`:
 
 ```bash
-uv sync --all-groups
+uv sync --all-groups --locked
+uv run pytest -q
 ```
 
-The official Booster and ORB-SLAM3 Python wheels are Linux-only, so `uv` installs
-them only on Linux. macOS can run tests and the visual RGB-D fallback, but native
-SLAM on a K1 is always initialized as `Sensor.IMU_RGBD`.
+The Booster and ORB-SLAM3 wheels are Linux-only. macOS runs the deterministic
+simulator, tests, tooling, and the development RGB-D odometry fallback. The real
+K1 and clean Linux Docker test are strict visual-inertial paths.
 
-On a minimal Debian/Ubuntu image, install the shared libraries linked by the
-native ORB wheel (verified in a clean Linux ARM64 Docker container):
+## One-time real K1 setup
 
-```bash
-sudo apt-get install libopengl0 libglx0 libglu1-mesa libglib2.0-0 libsm6 libice6 \
-  libx11-6 libxext6 libegl1 libgl1
-```
-
-## One-time K1 setup
-
-Run these commands on the robot, with the robot stationary during calibration:
+Clone the repository on the robot, then run:
 
 ```bash
-./scripts/setup_booster_studio.sh
+source /opt/ros/humble/setup.bash
+source /opt/booster/BoosterAgent/install/setup.bash
+./scripts/setup_k1_runtime.sh
 ./scripts/setup_object_detector.sh
 uv run nero-setup-orbslam
 uv run nero-k1-calibration --iface lo --duration 60
 ```
 
-The first command creates the robot's uv environment with its preinstalled ROS 2
-packages visible. The second downloads and checksum-verifies the COCO object
-detector. The remaining commands verify the ORB vocabulary and read the live
-camera resolution, intrinsics, synchronized RGB-D rate, and 500 Hz low-state IMU,
-then estimate inertial noise from the stationary sample. It uses the production
-ROS camera calibration plus the nominal K1 Geek camera mount, and records that
-provenance in the output.
-It produces robot-specific files under `config/`; these are intentionally ignored
-by git. Set `BOOSTER_NET_IF` if DDS uses an interface other than `lo`.
+The prefix commands expose ROS messages and native libraries to the current
+shell. `setup_k1_runtime.sh` creates a uv environment that can see those
+preinstalled packages. The detector and vocabulary installers
+download fixed artifacts and verify their checksums. Calibration reads the live
+production ROS intrinsics and RGB-D rate, measures stationary low-state IMU noise,
+and combines those measurements with the nominal K1 Geek camera mount. It writes:
 
-Then start an agent normally, for example:
+- `config/k1_calibration.json`
+- `config/k1_orbslam3_imu_rgbd.yaml`
+
+These robot-specific generated files are ignored by Git.
+
+In every new robot shell, source the installed ROS prefixes before using Nero:
 
 ```bash
-uv run nero-orb-slam
+source /opt/ros/humble/setup.bash
+source /opt/booster/BoosterAgent/install/setup.bash
 ```
 
-All Nero commands run through the uv-managed environment:
+If the second prefix is absent on a different firmware image, locate the prefix
+that provides `booster_interface/msg/Odometer` and source its `setup.bash`.
+
+## Run on the real robot
+
+Put the K1 in walking mode through the supported Booster UI, keep it stationary
+for startup, and run:
 
 ```bash
-uv run nero-orb-slam
-uv run nero-sim
-uv run nero-booster-studio
-uv run nero-mapping
-uv run nero-map-nav --map maps/office.npy --goal 3.5 2.0
-uv run nero-pc2map scan.ply -o maps/office
-uv run nero-k1-calibration --iface lo --duration 60
-uv run nero-setup-orbslam
+export BOOSTER_NET_IF=lo
+uv run nero-orb-slam --no-display
 ```
 
-The physical K1 adapter reads the official low-state IMU and synchronizes samples
-to each exact timestamp-paired RGB-D frame. A native inertial frame without IMU
-samples is marked lost rather
-than silently processed as visual-only SLAM. Linux/K1 initialization is strict:
-missing native libraries, vocabulary, or robot calibration is an error. The
-RGB-D odometry fallback is automatic only on non-Linux development machines.
+Say `go to the chair`, or enter it at the terminal if the current robot agent does
+not expose LUI ASR. Unrelated speech is ignored. The LUI speaker must be available
+because Nero announces an accepted command before movement. Nero stops when the
+target track expires, a safety check fails, SLAM loses the required state, or the
+process receives an interrupt.
 
-## Booster Studio virtual K1
+The policy does not drive to a scalar distance. Each current 3D observation is
+transformed into the SLAM world frame, filtered into an object track, and converted
+to a full approach pose facing the object. An internal class-aware safety radius
+is used only to construct that pose.
 
-`nero-sim` is the fast, in-process deterministic test environment. For a
-physics and sensor integration test, start a **K1 virtual robot** in Booster
-Studio, switch it to WALK mode, and use its Linux robot terminal:
+## Commands
+
+All commands run through uv:
+
+| Command | Purpose |
+|---|---|
+| `uv run nero-orb-slam` | Spoken/typed object navigation on a real K1 |
+| `uv run nero-sim --demo` | Fast deterministic in-process policy test |
+| `uv run nero-booster-studio` | Full policy on a Booster Studio virtual K1 |
+| `uv run nero-sim-benchmark` | Compare native SLAM with simulator truth |
+| `uv run nero-mapping` | Collect RGB-D/pose frames and invoke COLMAP + gsplat |
+| `uv run nero-map-nav --map MAP` | Occupancy-grid navigation with visual odometry |
+| `uv run nero-pc2map CLOUD -o MAP` | Convert a point cloud to an occupancy map |
+| `uv run nero-k1-calibration` | Capture real K1 IMU-RGBD calibration |
+| `uv run --extra viz nero-rerun` | Bridge normalized Nero ROS topics into Rerun |
+
+`nero-mapping` is a separate reconstruction pipeline. COLMAP and the configured
+gsplat training command must already be installed; they are intentionally not
+robot runtime dependencies. `nero-map-nav` accepts an explicit world-map goal,
+which is distinct from command-driven object navigation. These two auxiliary
+mapping commands are experimental and are not part of the validated object-
+navigation path.
+
+## Booster Studio
+
+Use `nero-sim` for quick policy tests. Use Booster Studio when physics, vendor
+transport, native ORB-SLAM3, or sim-to-real sensor boundaries matter.
+
+Inside the virtual K1 terminal:
 
 ```bash
-./scripts/setup_booster_studio.sh
+./scripts/setup_k1_runtime.sh
 uv run nero-setup-orbslam
 ./scripts/run_booster_studio.sh
 ```
 
-The setup script creates uv's `.venv` with system-site-package access because
-ROS 2 and Booster's SDK are part of the virtual K1 image rather than packages in
-PyPI. Nero's own dependency graph remains locked and installed by `uv sync`.
-The run wrapper sources Studio's ROS 2 environment, then executes
-`uv run nero-booster-studio`; pass normal Nero flags to the wrapper.
+The Studio adapter changes only environment and sensors. It consumes live
+simulated RGB, 16-bit depth, CameraInfo, IMU, odometry, clock, and detection
+topics; velocity still goes through `B1LocoClient`. Simulator truth is isolated
+under `/nero/reference` and is never policy input.
 
-The Booster Studio command runs the same command-driven object targeting,
-`IMU_RGBD` SLAM, obstacle processing, navigation, and safety policy used by
-`nero-orb-slam`. Only the environment and command adapters change. It consumes
-the simulator's live RGB, 16-bit depth, CameraInfo, IMU, and odometry topics,
-synchronizes RGB-D and IMU on a shared receipt-time clock, derives simulator
-calibration from live intrinsics plus the K1 MJCF camera mount, and sends velocity
-through the official Booster locomotion client on `127.0.0.1`.
-The simulator localization topic is isolated as benchmark-only ground truth; it
-is never exposed to the navigation policy as odometry.
-It verifies that RGB, depth, and CameraInfo dimensions agree, requires the K1
-simulator's 16-bit millimetre depth format, and measures rendered camera and IMU
-rates before generating the ORB-SLAM settings.
+Nero enforces the K1 Geek profile: 544×448 RGB and depth at 20 fps, global
+shutter, 105°×94° RGB/depth field of view, 0.5–6 m depth range, and 3% depth
+accuracy at 1 m. Studio's renderer may run faster, so the adapter decimates exact
+RGB-D pairs to 20 fps and rejects a source that is too slow. If
+`config/k1_calibration.json` exists, Studio uses it as the expected real sensor
+profile; otherwise it uses `config/k1_geek_nominal_calibration.json`.
 
-The staged Geek sensor profile is 544x448 RGB and depth at 20 fps, global shutter,
-105x94 degree RGB/depth field of view, and a 0.5-6 m depth range. Scene activation
-creates a vendor-model copy with that resolution and vertical FOV. Studio's
-container relay has no host-renderer control channel, so Nero deterministically
-decimates exact synchronized RGB-D pairs to the delivered 20 fps contract and
-rejects a source that is too slow. A calibration captured from the real robot
-takes precedence over the nominal profile.
-
-The default single-robot topics match Booster Studio's installed K1 simulator.
-For a named/multi-robot scene, override them with `--rgb-topic`, `--depth-topic`,
-`--camera-info-topic`, `--imu-topic`, `--pose-topic`, and `--detections-topic`.
-Object names and target distances remain intentionally absent from the CLI:
-enter a direction such as `go to the chair` at the runtime prompt, and the
-simulated speaker acknowledges it before motion begins. The physical K1 uses the
-official Booster LUI ASR service for the same command contract and falls back to
-terminal input if ASR initialization fails. Nero ignores unrelated speech and
-does not announce every object it sees. Each fresh matching 3D observation is
-transformed into the SLAM world frame and filtered into an object track. Nero
-derives a dynamic `(x, y, yaw)` approach pose that faces the object from an
-internal safety radius; both position and heading must converge.
-Brief occlusions use the last world-frame goal, never stale camera-relative
-coordinates, and an expired track stops the robot.
-
-### Sim-reference benchmark
-
-With the furnished scene visible and the virtual K1 in WALK mode, run the native
-localization and mapping benchmark from its terminal:
+Multi-robot/topic overrides are listed by:
 
 ```bash
-./scripts/run_booster_benchmark.sh
+uv run nero-booster-studio --help
 ```
 
-The conservative built-in trajectory always stops in a `finally` block. Reports
-land in `output/sim_benchmark/` and include tracking coverage, rigid-SE(2)-aligned
-ATE and RPE, yaw error, metric scale drift, and symmetric point-cloud geometry
-scores. Alignment never rescales the trajectory, so RGB-D scale errors remain
-visible. The simulator reference pose is used only by this evaluator.
+Object names and stand-off distances remain absent from that CLI.
 
-### Policy and ROS boundary
+### Furnished living room
 
-Navigation and mapping policies depend on Nero's transport-neutral `RobotAdapter`.
-The physical K1 implementation uses the high-level vendor walking controller; the
-Studio implementation supplies the same contract from ROS 2 sensor/state topics
-and sends body-velocity commands through `B1LocoClient`. Nero intentionally does
-not run `booster_deploy` beside that controller: its joint-space policy loop enters
-custom control mode and publishes motor targets, so it is an alternative gait
-backend rather than a sensor/navigation framework. It can be added later behind
-the same adapter if a custom locomotion policy is required.
-
-### ROS 2 and Rerun observability
-
-The hardware, Studio, mapping, and benchmark runtimes publish a common ROS 2
-observability contract by default. Sensors live under `/nero/sensors`, fused
-SLAM pose/path/map data under `/nero/slam`, detections and commands under
-`/nero/navigation`, and simulator-only truth under `/nero/reference`. The
-reference namespace is visualization and benchmark data only; policies never
-consume it. Pass `--no-ros-observability` to an agent to disable this layer.
-
-Start the viewer on the macOS host:
-
-```bash
-./scripts/run_rerun_viewer.sh
-```
-
-Then start the bridge in a Booster Studio terminal:
-
-```bash
-./scripts/run_rerun_bridge.sh
-```
-
-Run `nero-booster-studio`, `nero-mapping`, or `nero-sim-benchmark` in another
-Studio terminal. Rerun will show synchronized RGB and metric depth, intrinsics,
-IMU plots, estimated and reference transforms/paths/map points, detections,
-the tracked world-space object, dynamic goal pose, tracking and navigation
-status, and velocity commands. To record without a live viewer, run
-`uv run --extra viz nero-rerun --save output/nero.rrd` inside the ROS environment.
-The Rerun dependency is an optional uv extra so headless robot runtimes do not
-install visualization packages.
-
-### Furnished-room scene
-
-Nero includes a small, CC0, collision-enabled living room for testing RGB-D SLAM
-and obstacle handling somewhere more representative than an empty soccer pitch.
-From the **virtual robot terminal**, install it into Booster Studio's disposable
-simulator container and activate it as the empty K1 scene:
+The repository contains a small CC0, collision-enabled living room for the
+disposable Linux simulator. From the virtual K1 terminal:
 
 ```bash
 uv run nero-setup-booster-room --activate
 ```
 
-Activation also changes the disposable simulator from its default shared-memory
-motion transport to its supported ROS transport. Nero automatically consumes the
-K1 IMU from `/imu/data` or the legacy robot-specific topic, depending on which
-one the installed Studio version publishes. The original container setting is
-backed up and restored together with the scene.
-
-Then restart the virtual robot, or switch away from and back to the empty K1
-scene. The room contains walls, a couch, chairs, a coffee table, cabinets,
-shelves, and a red ball. The ball deliberately retains Booster Studio's special
-`ball` body name so its built-in simulated detector can exercise Nero's spoken
-command-driven flow. Restore the original scene with:
+This backs up the empty K1 scene and simulator transport setting, installs a
+calibrated K1 model and furnished room, and enables ROS sensor transport. Restart
+the virtual robot or switch away from and back to the empty K1 scene. Restore the
+original files with:
 
 ```bash
 uv run nero-setup-booster-room --restore
 ```
 
-Use `--sim-root` or `BOOSTER_STUDIO_SIM_ROOT` if the simulator source directory
-is not auto-detected. The installer refuses to modify the signed macOS app; scene
-activation is intentionally limited to the disposable Linux virtual robot.
+Pass `--sensor-calibration config/k1_calibration.json` to stage the measured real
+profile explicitly. Use `--sim-root` or `BOOSTER_STUDIO_SIM_ROOT` if auto-detection
+fails. The installer refuses to modify the signed macOS application bundle.
+
+The large `industrial_storage_room` and `main_room` splat/collider pairs are
+reference scene assets stored in Git LFS. They are not automatically activated by
+`nero-setup-booster-room`; see their adjacent READMEs before integrating them.
+
+### Native reference benchmark
+
+With a visible scene and the virtual K1 in walking mode:
+
+```bash
+./scripts/run_booster_benchmark.sh
+```
+
+The default trajectory is conservative and always sends zero velocity in cleanup.
+Reports in `output/sim_benchmark/` include tracking coverage, rigid-SE(2)-aligned
+ATE/RPE, yaw error, metric scale drift, and symmetric point-cloud error. Alignment
+does not rescale the estimate, so RGB-D scale errors remain visible.
+
+## ROS 2 and Rerun
+
+Hardware, Studio, mapping, and benchmark runtimes publish normalized telemetry:
+
+| Namespace | Contents |
+|---|---|
+| `/nero/sensors` | RGB, metric depth, CameraInfo, IMU |
+| `/nero/slam` | Pose, path, tracking state, map points |
+| `/nero/navigation` | Requested detections, object/goal poses, status, velocity |
+| `/nero/reference` | Simulator-only truth for visualization and benchmarks |
+
+Control never consumes `/nero/reference`. Pass `--no-ros-observability` to a
+supported agent to disable publication.
+
+On the macOS host, start the viewer:
+
+```bash
+./scripts/run_rerun_viewer.sh
+```
+
+In a Studio container, start the bridge with its default host address:
+
+```bash
+./scripts/run_rerun_bridge.sh
+```
+
+On a physical K1, point the bridge at the Mac's reachable IP instead:
+
+```bash
+NERO_RERUN_URL=<mac-ip>:9876 ./scripts/run_rerun_bridge.sh
+```
+
+To record without a viewer:
+
+```bash
+uv run --extra viz nero-rerun --save output/nero.rrd
+```
+
+Rerun is an optional uv extra and is not installed in the headless robot runtime.
+
+## Why not `booster_deploy`?
+
+Nero's navigation policies depend on a transport-neutral `RobotAdapter`. The real
+adapter uses Booster's high-level walking controller; the Studio adapter provides
+the same contract from simulated sensors. Booster's
+[`booster_deploy`](https://github.com/BoosterRobotics/booster_deploy) framework is
+a joint-space policy loop built around low-state input, low-command output, and a
+custom-mode prepare state. Running it beside the walking controller would create
+competing locomotion owners. It is an alternative future adapter for custom gait
+policies, not a requirement for RGB-D navigation or sim-to-real sensor parity.
 
 ## Testing
 
-Run the complete local suite through uv:
+Run the complete local suite:
 
 ```bash
 uv sync --all-groups --locked
@@ -225,13 +259,13 @@ uv run pytest -q
 uv build --no-sources
 ```
 
-Run the native Linux ARM64 path in Docker:
+Exercise the Linux vendor wheels and native inertial binding in Docker:
 
 ```bash
 ./scripts/test_docker.sh
 ```
 
-The Docker test installs the actual Linux Booster and ORB-SLAM3 wheels, verifies
-the official vocabulary checksum, runs the full test suite, initializes
-`Sensor.IMU_RGBD`, submits synchronized RGB-D and IMU data, and shuts the native
-system down. Override `NERO_DOCKER_PLATFORM` when testing another Linux target.
+The Docker test installs the official Booster and ORB-SLAM3 wheels, verifies the
+ORB vocabulary checksum, runs the suite, initializes `Sensor.IMU_RGBD`, submits a
+synchronized RGB-D/IMU frame, and shuts the system down. Set
+`NERO_DOCKER_PLATFORM` to override the target architecture.

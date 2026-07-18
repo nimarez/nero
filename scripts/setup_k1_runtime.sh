@@ -1,0 +1,22 @@
+#!/bin/bash
+set -eo pipefail
+
+# ROS 2 and Booster message packages are supplied by the real/virtual K1 image,
+# not PyPI. Source any installed prefixes before exposing them to uv's venv.
+for setup in \
+    /opt/ros/humble/setup.bash \
+    /opt/booster/BoosterAgent/install/setup.bash
+do
+    if [[ -f "$setup" ]]; then
+        source "$setup"
+    fi
+done
+
+if ! command -v ros2 >/dev/null 2>&1; then
+    echo "ROS 2 was not found; run this inside a real or virtual K1 terminal." >&2
+    exit 1
+fi
+
+export UV_LINK_MODE="${UV_LINK_MODE:-copy}"
+uv venv --clear --system-site-packages
+uv sync --all-groups --locked
