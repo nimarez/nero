@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Simulation Agent: Test the ORB-SLAM navigation in simulation.
 
 This agent runs the same navigation policy as orb_slam_agent but uses
@@ -11,8 +10,8 @@ Agent/Policy Loop:
 4. Navigate to the confirmed object (target distance deduced by robot)
 
 Usage:
-    python -m nero.agents.sim_agent
-    python -m nero.agents.sim_agent --demo  # Run with pre-configured demo scene
+    uv run nero-sim
+    uv run nero-sim --demo  # Run with pre-configured demo scene
 """
 
 from __future__ import annotations

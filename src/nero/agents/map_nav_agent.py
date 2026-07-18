@@ -4,8 +4,8 @@ Navigates using a pre-built static map without SLAM.
 Uses visual odometry for localization and A* for path planning.
 
 Usage:
-    nero-map-nav --map maps/office.png --yaml maps/office.yaml
-    nero-map-nav --map maps/office.npy --goal 3.5 2.0
+    uv run nero-map-nav --map maps/office.png --yaml maps/office.yaml
+    uv run nero-map-nav --map maps/office.npy --goal 3.5 2.0
 """
 
 from __future__ import annotations

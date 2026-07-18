@@ -158,7 +158,8 @@ class ORBSLAM3Node:
 
         if not self.vocab_path.is_file():
             raise FileNotFoundError(
-                f"ORB vocabulary missing: {self.vocab_path}; run nero-setup-orbslam"
+                f"ORB vocabulary missing: {self.vocab_path}; "
+                "run `uv run nero-setup-orbslam`"
             )
         self._calibration = K1Calibration.load(self.calibration_path)
         self._calibration.write_orbslam_settings(self.settings_path)

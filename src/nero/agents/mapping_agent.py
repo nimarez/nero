@@ -1,11 +1,10 @@
-#!/usr/bin/env python3
 """Mapping Agent: Autonomous space exploration and Gaussian splat reconstruction.
 
 This agent explores a space while collecting RGB-D frames with poses,
 then trains a 3D Gaussian Splat model for viewing.
 
 Usage:
-    python -m nero.agents.mapping_agent --pattern spiral --max-frames 500
+    uv run nero-mapping --pattern spiral --max-frames 500
 """
 
 from __future__ import annotations

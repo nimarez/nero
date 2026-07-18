@@ -47,6 +47,18 @@ Then start an agent normally, for example:
 uv run nero-orb-slam
 ```
 
+All Nero commands run through the uv-managed environment:
+
+```bash
+uv run nero-orb-slam
+uv run nero-sim
+uv run nero-mapping
+uv run nero-map-nav --map maps/office.npy --goal 3.5 2.0
+uv run nero-pc2map scan.ply -o maps/office
+uv run nero-k1-calibration --iface lo --duration 60
+uv run nero-setup-orbslam
+```
+
 The SLAM wrapper subscribes to the K1 IMU itself and synchronizes samples to each
 RGB-D frame. A native inertial frame without IMU samples is marked lost rather
 than silently processed as visual-only SLAM. Linux/K1 initialization is strict:

@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -371,7 +372,7 @@ class GaussianSplatMapper:
         # Run gsplat training
         result = subprocess.run(
             [
-                "python",
+                sys.executable,
                 "-m",
                 "gsplat.train",
                 "--data_dir",

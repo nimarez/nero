@@ -1,6 +1,6 @@
 %YAML:1.0
 ---
-# Template only. `nero-k1-calibration` replaces camera and IMU values with
+# Template only. `uv run nero-k1-calibration` replaces camera and IMU values with
 # factory/runtime values from the connected K1 before IMU_RGBD is enabled.
 File.version: "1.0"
 Camera.type: "PinHole"

@@ -1,11 +1,10 @@
-#!/usr/bin/env python3
 """ORB-SLAM Agent: Navigate to a detected object using ORB-SLAM based navigation.
 
 This agent uses the K1's built-in RGB-D camera, announces detected objects,
 waits for human confirmation, and navigates to the confirmed object.
 
 Usage:
-    python -m nero.agents.orb_slam_agent
+    uv run nero-orb-slam
 """
 
 from __future__ import annotations

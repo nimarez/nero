@@ -7,8 +7,8 @@ Supports:
 - LAS/LAZ files (with pylas)
 
 Usage:
-    nero-pc2map scan.ply -o maps/office --resolution 0.05
-    nero-pc2map scan.pcd -o maps/office --height-thresh 0.3
+    uv run nero-pc2map scan.ply -o maps/office --resolution 0.05
+    uv run nero-pc2map scan.pcd -o maps/office --height-thresh 0.3
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ def load_pointcloud(path: str | Path) -> np.ndarray:
             pcd = o3d.io.read_point_cloud(str(path))
             return np.asarray(pcd.points)
         except ImportError:
-            raise ImportError("Install open3d for PCD support: pip install open3d")
+            raise ImportError("Install open3d for PCD support: uv add open3d")
 
     if path.suffix in (".las", ".laz"):
         try:
@@ -65,7 +65,7 @@ def load_pointcloud(path: str | Path) -> np.ndarray:
             las = pylas.read(str(path))
             return np.column_stack([las.x, las.y, las.z])
         except ImportError:
-            raise ImportError("Install pylas for LAS/LAZ support: pip install pylas")
+            raise ImportError("Install pylas for LAS/LAZ support: uv add pylas")
 
     raise ValueError(f"Unsupported point cloud format: {path.suffix}")
 
