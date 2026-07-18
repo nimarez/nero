@@ -74,10 +74,14 @@ physics and sensor integration test, start a **K1 virtual robot** in Booster
 Studio, switch it to WALK mode, and use its Linux robot terminal:
 
 ```bash
-uv sync --all-groups --locked
+./scripts/setup_booster_studio.sh
 uv run nero-setup-orbslam
 uv run nero-booster-studio
 ```
+
+The setup script creates uv's `.venv` with system-site-package access because
+ROS 2 and Booster's SDK are part of the virtual K1 image rather than packages in
+PyPI. Nero's own dependency graph remains locked and installed by `uv sync`.
 
 The Booster Studio command runs the same object detection, spoken announcement,
 human confirmation, `IMU_RGBD` SLAM, obstacle processing, navigation, and safety
