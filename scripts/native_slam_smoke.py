@@ -18,8 +18,8 @@ def main() -> None:
     vocabulary = Path(sys.argv[1])
     if not vocabulary.is_file():
         raise SystemExit(f"vocabulary is missing: {vocabulary}")
-    if not hasattr(booster, "B1RosImuSubscriber"):
-        raise SystemExit("official Booster SDK has no B1RosImuSubscriber")
+    if not hasattr(booster, "B1LowStateSubscriber"):
+        raise SystemExit("official Booster SDK has no B1LowStateSubscriber")
     if not hasattr(orbslam3.Sensor, "IMU_RGBD"):
         raise SystemExit("ORB binding has no IMU_RGBD sensor mode")
 

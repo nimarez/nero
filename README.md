@@ -41,9 +41,9 @@ The first command creates the robot's uv environment with its preinstalled ROS 2
 packages visible. The second downloads and checksum-verifies the COCO object
 detector. The remaining commands verify the ORB vocabulary and read the live
 camera resolution, intrinsics, synchronized RGB-D rate, and 500 Hz low-state IMU,
-then estimate inertial noise from the stationary sample. Firmware without the
-optional camera-metadata RPC uses the production ROS camera calibration plus the
-nominal K1 Geek camera mount, and records that provenance in the output.
+then estimate inertial noise from the stationary sample. It uses the production
+ROS camera calibration plus the nominal K1 Geek camera mount, and records that
+provenance in the output.
 It produces robot-specific files under `config/`; these are intentionally ignored
 by git. Set `BOOSTER_NET_IF` if DDS uses an interface other than `lo`.
 

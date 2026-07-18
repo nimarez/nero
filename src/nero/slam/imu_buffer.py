@@ -3,16 +3,11 @@
 from __future__ import annotations
 
 import threading
-import logging
-import os
 from collections import deque
 from dataclasses import dataclass
 from typing import Iterable
 
 import numpy as np
-
-logger = logging.getLogger(__name__)
-
 
 def stamp_seconds(stamp: object) -> float:
     """Convert a ROS-style sec/nanosec stamp to seconds."""
@@ -67,43 +62,3 @@ class IMUBuffer:
     def __len__(self) -> int:
         with self._lock:
             return len(self._samples)
-
-
-class K1IMUSource:
-    """Internal K1 ROS IMU subscriber; agents never need to pass sensor handles."""
-
-    def __init__(self, iface: str | None = None, maxlen: int = 4000):
-        self.buffer = IMUBuffer(maxlen=maxlen)
-        self.iface = iface or os.getenv("BOOSTER_NET_IF", "lo")
-        self._subscriber = None
-
-    def start(self) -> None:
-        try:
-            import booster_robotics_sdk_python as br
-        except ImportError as exc:
-            raise RuntimeError(
-                "official Booster SDK is unavailable on this platform"
-            ) from exc
-
-        br.ChannelFactory.Instance().Init(0, self.iface)
-
-        def callback(message: object) -> None:
-            stamp = stamp_seconds(message.header.stamp)
-            accel = message.linear_acceleration
-            gyro = message.angular_velocity
-            self.buffer.append(
-                IMUMeasurement(
-                    timestamp=stamp,
-                    accel=(float(accel.x), float(accel.y), float(accel.z)),
-                    gyro=(float(gyro.x), float(gyro.y), float(gyro.z)),
-                )
-            )
-
-        self._subscriber = br.B1RosImuSubscriber(callback)
-        self._subscriber.InitChannel()
-        logger.info("K1 IMU subscriber active on interface %s", self.iface)
-
-    def close(self) -> None:
-        if self._subscriber is not None:
-            self._subscriber.CloseChannel()
-            self._subscriber = None

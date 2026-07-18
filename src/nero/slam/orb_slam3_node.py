@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from nero.slam.imu_buffer import IMUMeasurement, K1IMUSource
+from nero.slam.imu_buffer import IMUMeasurement
 from nero.slam.k1_calibration import K1Calibration
 
 logger = logging.getLogger(__name__)
@@ -105,7 +105,6 @@ class ORBSLAM3Node:
         settings_path: str | None = None,
         calibration_path: str | None = None,
         allow_fallback: bool | None = None,
-        start_imu_source: bool = True,
         **aliases: Any,
     ):
         config_dict = config if isinstance(config, dict) else {}
@@ -128,10 +127,8 @@ class ORBSLAM3Node:
         self.allow_fallback = (
             sys.platform != "linux" if allow_fallback is None else allow_fallback
         )
-        self.start_imu_source = start_imu_source
         self._lock = threading.Lock()
         self._slam_system: Any = None
-        self._imu_source: K1IMUSource | None = None
         self._calibration: K1Calibration | None = None
         self._use_fallback = True
         self._is_initialized = False
@@ -204,14 +201,6 @@ class ORBSLAM3Node:
         system.initialize()
         self._slam_system = system
         self._use_fallback = False
-        if self.start_imu_source:
-            self._imu_source = K1IMUSource()
-            try:
-                self._imu_source.start()
-            except Exception as exc:
-                self._slam_system.shutdown()
-                self._slam_system = None
-                raise RuntimeError("K1 IMU subscription failed") from exc
         logger.info("ORB-SLAM3 initialized with Sensor.IMU_RGBD")
 
     @staticmethod
@@ -256,10 +245,6 @@ class ORBSLAM3Node:
             if self._use_fallback:
                 pose = self._track_fallback(rgb, depth, ts)
             else:
-                if imu_data is None and self._imu_source is not None:
-                    imu_data = self._imu_source.buffer.between(
-                        self._last_frame_timestamp, ts
-                    )
                 pose = self._track_native(rgb, depth, self._coerce_imu(imu_data), ts)
             self._last_frame_timestamp = ts
             self._current_pose = pose
@@ -469,17 +454,7 @@ class ORBSLAM3Node:
             self._last_frame_timestamp = None
             self._prev_keypoints = self._prev_descriptors = self._prev_depth = None
 
-    def save_map(self, path: str) -> bool:
-        logger.warning("The Python ORB-SLAM3 binding does not expose atlas persistence")
-        return False
-
-    def load_map(self, path: str) -> bool:
-        logger.warning("The Python ORB-SLAM3 binding does not expose atlas persistence")
-        return False
-
     def shutdown(self) -> None:
-        if self._imu_source is not None:
-            self._imu_source.close()
         if self._slam_system is not None and hasattr(self._slam_system, "shutdown"):
             self._slam_system.shutdown()
         self._is_initialized = False

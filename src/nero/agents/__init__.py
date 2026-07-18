@@ -18,7 +18,7 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    """Lazy imports to avoid requiring boosteros for sim-only usage."""
+    """Keep CLI modules lazy so importing the package has no runtime side effects."""
     if name == "orb_slam_agent_main":
         from nero.agents.orb_slam_agent import main as orb_slam_agent_main
 

@@ -28,24 +28,10 @@ from nero.navigation.object_goal import (
 )
 from nero.interaction import safe_stand_off_distance
 
-# These modules are hardware-independent. The vendor SDK is isolated inside the
-# injected robot adapter, so policies work unchanged with ROS simulation.
-try:
-    from nero.perception.depth_processor import DepthProcessor
-    from nero.slam.orb_slam3_node import ORBSLAM3Node, SLAMPose
-    from nero.slam.pose_estimator import PoseEstimator, FusedPose
-    from nero.navigation.safety import SafetyMonitor, SafetyStatus
-
-    HAS_BOOSTEROS = True
-except ImportError:
-    DepthProcessor = None
-    ORBSLAM3Node = None
-    SLAMPose = None
-    PoseEstimator = None
-    FusedPose = None
-    SafetyMonitor = None
-    SafetyStatus = None
-    HAS_BOOSTEROS = False
+from nero.perception.depth_processor import DepthProcessor
+from nero.slam.orb_slam3_node import ORBSLAM3Node
+from nero.slam.pose_estimator import PoseEstimator, FusedPose
+from nero.navigation.safety import SafetyMonitor, SafetyStatus
 
 logger = logging.getLogger(__name__)
 
@@ -129,12 +115,7 @@ class NavigationPolicy:
         # Components are required for every sensor-backed robot adapter. The
         # lightweight in-process SimEnvironment has its own synthetic path.
         if not self._is_sim:
-            if not HAS_BOOSTEROS:
-                raise RuntimeError("navigation dependencies are unavailable")
             options = dict(slam_options or {})
-            # Physical and Studio adapters already synchronize IMU samples to
-            # each RGB-D frame. A second SDK subscriber would race that source.
-            options.setdefault("start_imu_source", False)
             self.slam = ORBSLAM3Node(config=slam_config, **options)
             self.pose_estimator = PoseEstimator()
             self.depth_processor = DepthProcessor()
@@ -184,10 +165,10 @@ class NavigationPolicy:
             self.sim_env.initialize()
         elif self.robot:
             self.robot.initialize()
-            if HAS_BOOSTEROS and self.slam:
+            if self.slam:
                 camera_info = self.robot.get_camera_info()
                 self.slam.initialize(camera_info)
-        elif HAS_BOOSTEROS and self.slam:
+        elif self.slam:
             self.slam.initialize()
 
         if not self._is_sim and not self.object_detector.initialize():

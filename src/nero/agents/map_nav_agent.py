@@ -101,7 +101,8 @@ def main() -> None:
 
     try:
         # Initialize odometry from the K1's built-in RGB camera.
-        frame = robot.get_rgb_frame()
+        initial_state = robot.get_state(include_images=True)
+        frame = robot.image_to_array(initial_state.rgb)
         policy.init_odometry(frame)
 
         # Set goal if provided

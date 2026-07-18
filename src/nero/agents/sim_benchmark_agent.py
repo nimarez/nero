@@ -204,7 +204,6 @@ def run(args: argparse.Namespace) -> Path:
             calibration_path=str(calibration_path),
             settings_path=str(settings_path),
             allow_fallback=False,
-            start_imu_source=False,
         )
         slam.initialize(camera_info=robot.get_camera_info())
         estimated, reference, estimated_map, reference_map, total = _run_trajectory(

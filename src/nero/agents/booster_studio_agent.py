@@ -100,7 +100,6 @@ def main() -> None:
             slam_options={
                 "calibration_path": str(calibration_path),
                 "settings_path": str(settings_path),
-                "start_imu_source": False,
             },
             object_detector=BoosterStudioObjectDetector(robot),
         )

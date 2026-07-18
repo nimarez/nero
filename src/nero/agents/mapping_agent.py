@@ -177,7 +177,12 @@ def main():
 
             # Display the K1's built-in RGB stream.
             try:
-                frame = robot.get_rgb_frame()
+                state = policy.last_robot_state
+                frame = (
+                    robot.image_to_array(state.rgb)
+                    if state is not None and state.rgb is not None
+                    else None
+                )
             except Exception as e:
                 logger.warning(f"Failed to read K1 RGB frame: {e}")
                 frame = None

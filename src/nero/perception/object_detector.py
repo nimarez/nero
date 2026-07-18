@@ -62,8 +62,8 @@ class ObjectDetection:
 class ObjectDetector:
     """Detects objects in RGB images and computes their 3D positions.
 
-    Uses the optional BoosterOS API when present, otherwise OpenCV DNN with a
-    local YOLOv8 COCO model. No network access occurs in the policy loop.
+    Uses OpenCV DNN with a local YOLOv8 COCO model. No network access occurs in
+    the policy loop.
     """
 
     def __init__(
@@ -76,7 +76,6 @@ class ObjectDetector:
         self.confidence_threshold = confidence_threshold
         self.depth_threshold_min = depth_threshold_min
         self.depth_threshold_max = depth_threshold_max
-        self._detection_api = None
         self._net = None
         self.model_path = Path(
             model_path
@@ -85,32 +84,21 @@ class ObjectDetector:
         self._initialized = False
 
     def initialize(self) -> bool:
-        """Initialize detection API.
-
-        Returns True if either supported inference backend is available.
-        """
+        """Load the repository's supported object-detection backend."""
+        if not self.model_path.is_file():
+            logger.error(
+                "Object model missing: %s (run scripts/setup_object_detector.sh)",
+                self.model_path,
+            )
+            return False
         try:
-            from boosteros.brain import Detection
-
-            self._detection_api = Detection()
-            self._initialized = True
-            logger.info("Detection API initialized")
-            return True
-        except ImportError:
-            if not self.model_path.is_file():
-                logger.error(
-                    "Object model missing: %s (run scripts/setup_object_detector.sh)",
-                    self.model_path,
-                )
-                return False
-            try:
-                self._net = cv2.dnn.readNetFromONNX(str(self.model_path))
-            except cv2.error as exc:
-                logger.error("Could not load object model %s: %s", self.model_path, exc)
-                return False
-            self._initialized = True
-            logger.info("OpenCV YOLO object detector initialized from %s", self.model_path)
-            return True
+            self._net = cv2.dnn.readNetFromONNX(str(self.model_path))
+        except cv2.error as exc:
+            logger.error("Could not load object model %s: %s", self.model_path, exc)
+            return False
+        self._initialized = True
+        logger.info("OpenCV YOLO object detector initialized from %s", self.model_path)
+        return True
 
     def detect(
         self,
@@ -128,69 +116,8 @@ class ObjectDetector:
         Returns:
             List of ObjectDetection
         """
-        if self._initialized and self._detection_api is not None:
-            return self._detect_with_api(rgb, depth, camera_info)
         if self._net is not None:
             return self._detect_yolo(rgb, depth, camera_info)
-        return []
-
-    def _detect_with_api(
-        self,
-        rgb: np.ndarray,
-        depth: np.ndarray,
-        camera_info=None,
-    ) -> list[ObjectDetection]:
-        """Detect using boosteros Detection API."""
-        try:
-            results = self._detection_api.detect(rgb)
-            detections = []
-            for result in results:
-                if result.confidence < self.confidence_threshold:
-                    continue
-
-                bbox = (
-                    int(result.bbox.x_min),
-                    int(result.bbox.y_min),
-                    int(result.bbox.x_max),
-                    int(result.bbox.y_max),
-                )
-
-                # Compute 3D position from depth
-                pos_3d = (
-                    self._compute_3d_position(bbox, depth, camera_info)
-                    if depth is not None
-                    else None
-                )
-                distance = np.linalg.norm(pos_3d) if pos_3d is not None else 0.0
-
-                detections.append(
-                    ObjectDetection(
-                        label=result.label,
-                        confidence=result.confidence,
-                        bbox=bbox,
-                        position_3d=pos_3d,
-                        distance=distance,
-                    )
-                )
-
-            return detections
-        except Exception as e:
-            logger.error(f"Detection API error: {e}")
-            return []
-
-    def _detect_fallback(
-        self,
-        rgb: np.ndarray,
-        depth: np.ndarray,
-        camera_info=None,
-    ) -> list[ObjectDetection]:
-        """Fallback detection using simple heuristics.
-
-        This is a placeholder for development when the Detection API
-        is not available. In production, always use boosteros[brain].
-        """
-        # Return empty list - no detection without proper API
-        logger.debug("Fallback detection: no objects detected")
         return []
 
     def _detect_yolo(

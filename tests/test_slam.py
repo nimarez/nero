@@ -13,7 +13,6 @@ from nero.mapping.gaussian_splat import FrameData, GaussianSplatMapper
 from nero.slam.imu_buffer import IMUBuffer, IMUMeasurement
 from nero.slam.k1_calibration import (
     K1Calibration,
-    _device_body,
     estimate_frequency,
     estimate_imu_noise,
 )
@@ -99,11 +98,6 @@ def test_sensor_frequency_uses_live_timestamps():
     assert estimate_frequency(alternating, "K1 camera") == pytest.approx(20)
 
 
-def test_booster_device_info_body_is_unwrapped():
-    assert _device_body({"body": {"cameras": [1]}, "kind": 4}) == {"cameras": [1]}
-    assert _device_body({"body": '{"imus": [1]}'}) == {"imus": [1]}
-
-
 class FakeSystem:
     def __init__(self, vocabulary, settings, sensor):
         self.arguments = vocabulary, settings, sensor
@@ -159,7 +153,6 @@ def native_node(tmp_path, monkeypatch):
         settings_path=str(tmp_path / "settings.yaml"),
         calibration_path=str(calibration_path),
         allow_fallback=False,
-        start_imu_source=False,
     )
     node.initialize()
     return node
@@ -224,7 +217,6 @@ def test_native_backend_honors_enhanced_result_failure(tmp_path, monkeypatch):
         settings_path=str(tmp_path / "settings.yaml"),
         calibration_path=str(calibration_path),
         allow_fallback=False,
-        start_imu_source=False,
     )
     node.initialize()
     pose = node.track_frame(
@@ -254,7 +246,6 @@ def test_native_backend_calls_enhanced_result_validity_methods(tmp_path, monkeyp
         settings_path=str(tmp_path / "settings.yaml"),
         calibration_path=str(calibration_path),
         allow_fallback=False,
-        start_imu_source=False,
     )
     node.initialize()
     pose = node.track_frame(

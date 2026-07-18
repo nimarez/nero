@@ -5,14 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from scipy.spatial.transform import Rotation
 
 logger = logging.getLogger(__name__)
 
@@ -32,46 +30,6 @@ def _yaml_real(value: float) -> str:
 
 def _stamp_seconds(stamp: Any) -> float:
     return float(stamp.sec) + float(stamp.nanosec) * 1e-9
-
-
-def _vector3(value: Any) -> np.ndarray:
-    if isinstance(value, dict):
-        return np.array([value[axis] for axis in ("x", "y", "z")], dtype=float)
-    if isinstance(value, (list, tuple, np.ndarray)):
-        if len(value) != 3:
-            raise ValueError("3-vector must contain exactly three values")
-        return np.asarray(value, dtype=float)
-    return np.array([value.x, value.y, value.z], dtype=float)
-
-
-def _transform(xyz: Any, rpy: Any) -> np.ndarray:
-    result = np.eye(4)
-    result[:3, :3] = Rotation.from_euler("xyz", _vector3(rpy)).as_matrix()
-    result[:3, 3] = _vector3(xyz)
-    return result
-
-
-def _sdk_transform(value: Any) -> np.ndarray:
-    result = np.eye(4)
-    result[:3, :3] = Rotation.from_quat(
-        [
-            value.orientation.x,
-            value.orientation.y,
-            value.orientation.z,
-            value.orientation.w,
-        ]
-    ).as_matrix()
-    result[:3, 3] = _vector3(value.position)
-    return result
-
-
-def _device_body(value: Any) -> Any:
-    """Unwrap the DeviceInfo JSON emitted by the official Python binding."""
-    if isinstance(value, dict) and "body" in value:
-        value = value["body"]
-    if isinstance(value, str):
-        value = json.loads(value)
-    return value
 
 
 @dataclass
@@ -309,140 +267,10 @@ def estimate_frequency(timestamps: list[float], sensor: str) -> float:
     return 1.0 / period
 
 
-def probe_k1(
-    *, iface: str, robot_name: str | None, duration: float, camera_info_topic: str
-) -> K1Calibration:
-    """Collect factory geometry and stationary noise data from a connected K1."""
-    try:
-        import booster_robotics_sdk_python as br
-    except ImportError as exc:
-        raise RuntimeError("the official Booster Python SDK is only available on Linux") from exc
-
-    br.ChannelFactory.Instance().Init(0, iface)
-    camera_client = br.CameraClient()
-    loco_client = br.B1LocoClient()
-    camera_client.InitWithName(robot_name) if robot_name else camera_client.Init()
-    loco_client.InitWithName(robot_name) if robot_name else loco_client.Init()
-
-    try:
-        camera_catalog = _device_body(json.loads(camera_client.GetCameras().to_json_str()))
-    except Exception as exc:
-        logger.warning(
-            "Camera metadata RPC is unavailable (%s); probing production ROS topics",
-            exc,
-        )
-        return probe_k1_ros(duration=duration, camera_info_topic=camera_info_topic)
-    sensor_catalog = _device_body(json.loads(loco_client.GetSensors().to_json_str()))
-    cameras = (
-        camera_catalog if isinstance(camera_catalog, list) else camera_catalog.get("cameras", [])
-    )
-    if not cameras:
-        raise RuntimeError(f"K1 returned no cameras: {camera_catalog}")
-    camera = next(
-        (
-            item
-            for item in cameras
-            if "head" in str(item.get("pos", item.get("position", ""))).lower()
-        ),
-        cameras[0],
-    )
-    imus = (
-        sensor_catalog
-        if isinstance(sensor_catalog, list)
-        else sensor_catalog.get("imus", sensor_catalog.get("imu", []))
-    )
-    if isinstance(imus, dict):
-        imus = [imus]
-    if not imus:
-        raise RuntimeError(f"K1 returned no IMU metadata: {sensor_catalog}")
-    imu = imus[0]
-
-    camera_info: dict[str, Any] = {}
-    camera_timestamps: list[float] = []
-    imu_samples: list[tuple[float, np.ndarray, np.ndarray]] = []
-    info_event = threading.Event()
-
-    def on_camera_info(message: Any) -> None:
-        # CameraInfo can be latched or use a different clock domain. Receipt
-        # intervals measure the delivered rate that ORB-SLAM actually sees.
-        timestamp = time.monotonic()
-        if not camera_timestamps or timestamp > camera_timestamps[-1]:
-            camera_timestamps.append(timestamp)
-        camera_info.update(
-            frame=str(message.header.frame_id),
-            width=int(message.width),
-            height=int(message.height),
-            k=list(message.k),
-            d=list(message.d),
-        )
-        info_event.set()
-
-    def on_imu(message: Any) -> None:
-        timestamp = _stamp_seconds(message.header.stamp)
-        gyro = _vector3(message.angular_velocity)
-        accel = _vector3(message.linear_acceleration)
-        if not imu_samples or timestamp > imu_samples[-1][0]:
-            imu_samples.append((timestamp, gyro, accel))
-
-    camera_subscriber = br.CameraInfoSubscriber(on_camera_info, camera_info_topic)
-    imu_subscriber = br.B1RosImuSubscriber(on_imu)
-    camera_subscriber.InitChannel()
-    imu_subscriber.InitChannel()
-    try:
-        if not info_event.wait(timeout=10.0):
-            raise RuntimeError(f"no CameraInfo received on {camera_info_topic}")
-        logger.info("Keep the K1 completely stationary for %.1f seconds", duration)
-        time.sleep(duration)
-    finally:
-        camera_subscriber.CloseChannel()
-        imu_subscriber.CloseChannel()
-
-    noise = estimate_imu_noise(imu_samples)
-    camera_fps = estimate_frequency(camera_timestamps, "camera")
-    extrinsics = camera.get("extrinsics", {})
-    if not all(key in extrinsics for key in ("xyz", "rpy", "parent_frame")):
-        raise RuntimeError(f"camera catalog has no usable factory extrinsics: {camera}")
-    parent = str(extrinsics["parent_frame"]).lower()
-    imu_mount = str(imu.get("mount_position", "body")).lower()
-    parent_to_camera = _transform(extrinsics["xyz"], extrinsics["rpy"])
-    if ("body" in parent and "body" in imu_mount) or ("head" in parent and "head" in imu_mount):
-        tbc = parent_to_camera
-    elif "head" in parent and "body" in imu_mount:
-        body_to_head = _sdk_transform(loco_client.GetFrameTransform(br.Frame.kBody, br.Frame.kHead))
-        tbc = body_to_head @ parent_to_camera
-    else:
-        raise RuntimeError(f"cannot compose camera parent {parent!r} with IMU mount {imu_mount!r}")
-
-    depth_scale = float(camera.get("depth_scale", 0.001))
-    color = camera.get("color_encoding", {})
-    color_format = str(color.get("format", "RGB8") if isinstance(color, dict) else color).upper()
-    return K1Calibration(
-        camera_frame=camera_info["frame"],
-        imu_frame=str(imu.get("name", imu_mount)),
-        width=camera_info["width"],
-        height=camera_info["height"],
-        camera_fps=camera_fps,
-        camera_matrix=[float(value) for value in camera_info["k"]],
-        distortion=[float(value) for value in camera_info["d"]],
-        depth_map_factor=1.0 / depth_scale,
-        camera_rgb="BGR" not in color_format,
-        tbc=tbc.tolist(),
-        shutter_type="global",
-        rgb_fov_degrees=list(K1_GEEK_FOV_DEGREES),
-        depth_width=camera_info["width"],
-        depth_height=camera_info["height"],
-        depth_fps=camera_fps,
-        depth_fov_degrees=list(K1_GEEK_FOV_DEGREES),
-        depth_accuracy_at_1m=0.03,
-        depth_min_m=K1_GEEK_DEPTH_RANGE_M[0],
-        depth_max_m=K1_GEEK_DEPTH_RANGE_M[1],
-        **noise,
-    )
-
-
 def probe_k1_ros(
     *,
     duration: float,
+    iface: str = "lo",
     camera_info_topic: str = DEFAULT_CAMERA_INFO_TOPIC,
     rgb_topic: str = DEFAULT_RGB_TOPIC,
     depth_topic: str = DEFAULT_DEPTH_TOPIC,
@@ -450,9 +278,8 @@ def probe_k1_ros(
     """Calibrate from the ROS streams shipped on production K1 firmware.
 
     Production firmware 1.5 exposes calibrated intrinsics and synchronized
-    RGB-D frames via ROS even when the optional CameraClient metadata RPC is
-    absent. The mount transform falls back to Booster's nominal K1 Geek model;
-    the output source field records that distinction explicitly.
+    RGB-D frames via ROS. The mount transform comes from Booster's nominal K1
+    Geek model; the output source field records that distinction explicitly.
     """
     try:
         import rclpy
@@ -464,6 +291,7 @@ def probe_k1_ros(
     owns_rclpy = not rclpy.ok()
     if owns_rclpy:
         rclpy.init(args=None)
+    booster.ChannelFactory.Instance().Init(0, iface)
     node = rclpy.create_node("nero_k1_calibration")
     qos = rclpy.qos.QoSProfile(
         depth=200,
@@ -565,7 +393,6 @@ def probe_k1_ros(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Probe K1 calibration for ORB-SLAM3 IMU_RGBD")
     parser.add_argument("--iface", default="lo", help="DDS interface; use lo when running on K1")
-    parser.add_argument("--robot-name", default=None)
     parser.add_argument(
         "--duration", type=float, default=60.0, help="stationary IMU capture seconds"
     )
@@ -574,10 +401,9 @@ def main() -> None:
     parser.add_argument("--settings", type=Path, default=Path("config/k1_orbslam3_imu_rgbd.yaml"))
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
-    calibration = probe_k1(
-        iface=args.iface,
-        robot_name=args.robot_name,
+    calibration = probe_k1_ros(
         duration=args.duration,
+        iface=args.iface,
         camera_info_topic=args.camera_info_topic,
     )
     calibration.validate_geek_profile()
