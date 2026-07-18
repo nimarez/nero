@@ -6,11 +6,10 @@ Uses COLMAP for SfM and gsplat for 3D Gaussian Splatting training.
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -324,7 +323,7 @@ class GaussianSplatMapper:
         """
         # Check if gsplat is available
         try:
-            import gsplat
+            import gsplat  # noqa: F401
         except ImportError:
             logger.warning("gsplat not installed, using fallback training")
             return self._train_fallback()

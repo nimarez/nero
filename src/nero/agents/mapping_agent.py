@@ -29,7 +29,9 @@ logger = logging.getLogger(__name__)
 
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="Nero Mapping Agent - Gaussian Splat Reconstruction")
+    parser = argparse.ArgumentParser(
+        description="Nero Mapping Agent - Gaussian Splat Reconstruction"
+    )
     parser.add_argument(
         "--camera",
         type=str,
@@ -128,7 +130,7 @@ def main():
 
     # Initialize robot
     try:
-        robot = RobotInterface(serial_number=args.robot_serial)
+        robot = RobotInterface(virtual_robot_name=args.robot_serial or "")
         robot.initialize()
         logger.info("Robot connected")
     except Exception as e:
@@ -199,8 +201,12 @@ def main():
                     message=status.message,
                     fps=camera.get_fps(),
                     velocity=(
-                        (status.velocity_command.linear_x, status.velocity_command.angular_z)
-                        if status.velocity_command else None
+                        (
+                            status.velocity_command.linear_x,
+                            status.velocity_command.angular_z,
+                        )
+                        if status.velocity_command
+                        else None
                     ),
                 )
 
@@ -213,9 +219,21 @@ def main():
                 bar_y = h - 30
 
                 # Background
-                cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_width, bar_y + bar_height), (50, 50, 50), -1)
+                cv2.rectangle(
+                    frame,
+                    (bar_x, bar_y),
+                    (bar_x + bar_width, bar_y + bar_height),
+                    (50, 50, 50),
+                    -1,
+                )
                 # Progress
-                cv2.rectangle(frame, (bar_x, bar_y), (bar_x + int(bar_width * progress), bar_y + bar_height), (0, 255, 0), -1)
+                cv2.rectangle(
+                    frame,
+                    (bar_x, bar_y),
+                    (bar_x + int(bar_width * progress), bar_y + bar_height),
+                    (0, 255, 0),
+                    -1,
+                )
                 # Text
                 cv2.putText(
                     frame,
@@ -230,9 +248,9 @@ def main():
                 # Display
                 if not args.no_display:
                     key = viz.show_stream(frame, "Nero Mapping Agent", camera.get_fps())
-                    if key == ord('q'):
+                    if key == ord("q"):
                         shutdown_event = True
-                    elif key == ord('t') and status.state == MappingState.EXPLORING:
+                    elif key == ord("t") and status.state == MappingState.EXPLORING:
                         # Trigger training manually
                         logger.info("Manual training trigger")
                         policy.start_training()

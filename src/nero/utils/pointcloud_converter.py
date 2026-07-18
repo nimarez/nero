@@ -71,7 +71,6 @@ def _parse_ply(path: Path) -> np.ndarray:
     """Simple PLY parser for vertex data."""
     points = []
     in_header = True
-    vertex_count = 0
     props = []
 
     with open(path) as f:
@@ -81,9 +80,7 @@ def _parse_ply(path: Path) -> np.ndarray:
                 in_header = False
                 continue
             if in_header:
-                if line.startswith("element vertex"):
-                    vertex_count = int(line.split()[-1])
-                elif line.startswith("property"):
+                if line.startswith("property"):
                     props.append(line.split()[-1])
             else:
                 values = line.split()

@@ -13,11 +13,10 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from pathlib import Path
+import time
 from typing import Optional
 
 import cv2
-import numpy as np
 
 from nero.navigation import (
     MapNavConfig,
@@ -25,9 +24,32 @@ from nero.navigation import (
     MapNavigationPolicy,
 )
 from nero.robot import RobotInterface
-from nero.utils.camera_stream import CameraStream
+from nero.simulation.mock_robot import MockRobot
+from nero.utils.camera_stream import CameraSource, CameraStream
 
 logger = logging.getLogger(__name__)
+
+
+def create_camera_stream(source: str) -> CameraStream:
+    """Create a camera stream from a USB index, URL, or file path."""
+    if source.startswith("usb:"):
+        return CameraStream(source[4:], CameraSource.USB)
+    if source.startswith("rtsp://"):
+        return CameraStream(source, CameraSource.RTSP)
+    if source.startswith("http://") or source.startswith("https://"):
+        return CameraStream(source, CameraSource.HTTP)
+    return CameraStream(source, CameraSource.FILE)
+
+
+def wait_for_frame(camera: CameraStream, timeout: float = 2.0):
+    """Wait briefly for the background capture thread to publish a frame."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        frame = camera.get_frame()
+        if frame is not None:
+            return frame
+        time.sleep(0.01)
+    return None
 
 
 def parse_args() -> argparse.Namespace:
@@ -67,7 +89,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-vel", type=float, default=0.3, help="Max linear velocity (m/s)"
     )
-    parser.add_argument("--no-depth", action="store_true", help="Disable depth-assisted VO")
+    parser.add_argument(
+        "--no-depth", action="store_true", help="Disable depth-assisted VO"
+    )
     parser.add_argument("--headless", action="store_true", help="Run without GUI")
     return parser.parse_args()
 
@@ -100,16 +124,16 @@ def main() -> None:
         sys.exit(1)
 
     # Open camera
-    camera = CameraStream(args.camera)
-    if not camera.open():
+    camera = create_camera_stream(args.camera)
+    if not camera.start():
         logger.error(f"Failed to open camera: {args.camera}")
         sys.exit(1)
 
     # Open depth camera if provided
     depth_camera: Optional[CameraStream] = None
     if args.depth_camera:
-        depth_camera = CameraStream(args.depth_camera)
-        if not depth_camera.open():
+        depth_camera = create_camera_stream(args.depth_camera)
+        if not depth_camera.start():
             logger.error(f"Failed to open depth camera: {args.depth_camera}")
             sys.exit(1)
 
@@ -119,19 +143,20 @@ def main() -> None:
         robot.initialize()
         logger.info("Robot connected and initialized in walk mode")
     except Exception as e:
-        logger.error(f"Failed to connect to robot: {e}")
-        sys.exit(1)
+        logger.warning(f"Failed to connect to robot: {e}; using mock robot")
+        robot = MockRobot()
+        robot.initialize()
 
     try:
         # Get first frame and init odometry
-        frame = camera.read()
+        frame = wait_for_frame(camera)
         if frame is None:
             logger.error("Failed to read from camera")
             sys.exit(1)
 
         depth = None
         if depth_camera is not None:
-            depth = depth_camera.read()
+            depth = depth_camera.get_frame()
 
         policy.init_odometry(frame)
 
@@ -140,32 +165,40 @@ def main() -> None:
             policy.set_goal(args.goal[0], args.goal[1])
 
         # Main loop
-        logger.info("Map navigation agent started. Press 'q' to quit, 'c' to click goal on map.")
+        logger.info(
+            "Map navigation agent started. Press 'q' to quit, 'c' to click goal on map."
+        )
         running = True
         click_mode = False
+        loop_interval = 1.0 / 30.0
 
         while running:
-            frame = camera.read()
+            loop_started = time.monotonic()
+            frame = camera.get_frame()
             if frame is None:
                 logger.warning("Failed to read frame")
                 continue
 
             depth = None
             if depth_camera is not None:
-                depth = depth_camera.read()
+                depth = depth_camera.get_frame()
 
             # Run policy
             vx, vy, vyaw = policy.update(frame, depth)
 
             # Send velocity command
-            if policy.state not in (MapNavState.IDLE, MapNavState.ARRIVED, MapNavState.LOST):
+            if policy.state not in (
+                MapNavState.IDLE,
+                MapNavState.ARRIVED,
+                MapNavState.LOST,
+            ):
                 robot.set_velocity(vx=vx, vy=vy, vyaw=vyaw)
             else:
                 robot.set_velocity(0.0, 0.0, 0.0)
 
             # Print state
             pose = policy.current_pose
-            logger.info(
+            logger.debug(
                 f"State: {policy.state.value} | "
                 f"Pose: ({pose.x:.2f}, {pose.y:.2f}, {pose.theta:.2f}) | "
                 f"Vel: ({vx:.2f}, {vy:.2f}, {vyaw:.2f})"
@@ -192,7 +225,9 @@ def main() -> None:
                     logger.info("Policy reset")
                 elif key == ord("c"):
                     click_mode = not click_mode
-                    logger.info(f"Click mode: {'ON' if click_mode else 'OFF'} - click on map to set goal")
+                    logger.info(
+                        f"Click mode: {'ON' if click_mode else 'OFF'} - click on map to set goal"
+                    )
                 elif key == ord("s") and policy.state == MapNavState.ARRIVED:
                     # Prompt for new goal
                     try:
@@ -208,6 +243,10 @@ def main() -> None:
                 if args.headless:
                     break
 
+            elapsed = time.monotonic() - loop_started
+            if elapsed < loop_interval:
+                time.sleep(loop_interval - elapsed)
+
         # Stop robot
         robot.set_velocity(0.0, 0.0, 0.0)
 
@@ -215,9 +254,9 @@ def main() -> None:
         logger.info("Interrupted")
     finally:
         robot.set_velocity(0.0, 0.0, 0.0)
-        camera.close()
+        camera.stop()
         if depth_camera is not None:
-            depth_camera.close()
+            depth_camera.stop()
         cv2.destroyAllWindows()
 
 

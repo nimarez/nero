@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Go-To Agent: Navigate to a detected object.
+"""ORB-SLAM Agent: Navigate to a detected object using ORB-SLAM based navigation.
 
 This agent shows an external camera stream to the user, waits for an object name,
 detects the object using GroundingDINO, and navigates the robot to it.
 
 Usage:
-    python -m nero.agents.goto_agent --camera usb:0 --object "chair"
-    python -m nero.agents.goto_agent --camera rtsp://192.168.1.100/stream --object "bottle"
+    python -m nero.agents.orb_slam_agent --camera usb:0 --object "chair"
+    python -m nero.agents.orb_slam_agent --camera rtsp://192.168.1.100/stream --object "bottle"
 """
 
 from __future__ import annotations
@@ -22,15 +22,16 @@ import cv2
 from nero.robot import RobotInterface
 from nero.utils.camera_stream import CameraStream, CameraSource
 from nero.utils.visualization import Visualization
-from nero.navigation.policy import NavigationPolicy, NavigationState, NavigationConfig
-from nero.perception.object_detector import ObjectDetector
+from nero.navigation.policy import NavigationPolicy, PolicyState
 
 logger = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="Nero Go-To Agent - Navigate to a detected object")
+    parser = argparse.ArgumentParser(
+        description="Nero ORB-SLAM Agent - Navigate to a detected object"
+    )
     parser.add_argument(
         "--camera",
         type=str,
@@ -81,7 +82,7 @@ def parse_camera_source(camera_str: str) -> tuple[str, CameraSource]:
 
 
 def main():
-    """Main entry point for go-to agent."""
+    """Main entry point for ORB-SLAM agent."""
     args = parse_args()
 
     # Setup logging
@@ -94,7 +95,7 @@ def main():
     # Parse camera source
     camera_source, camera_type = parse_camera_source(args.camera)
 
-    logger.info("Starting Nero Go-To Agent")
+    logger.info("Starting Nero ORB-SLAM Agent")
     logger.info(f"Camera: {camera_type.value} - {camera_source}")
     logger.info(f"Target object: {args.object or '(will prompt)'}")
 
@@ -109,30 +110,25 @@ def main():
 
     # Initialize robot
     try:
-        robot = RobotInterface(serial_number=args.robot_serial)
+        robot = RobotInterface(virtual_robot_name=args.robot_serial or "")
         robot.initialize()
         logger.info("Robot connected and initialized in walk mode")
     except Exception as e:
         logger.warning(f"Robot connection failed: {e}, using mock mode")
         robot = None
 
-    # Initialize object detector
-    detector = ObjectDetector()
-
     # Initialize navigation policy
-    nav_config = NavigationConfig(
-        target_distance=args.target_distance,
-    )
-    policy = NavigationPolicy(
-        robot=robot,
-        detector=detector,
-        nav_config=nav_config,
-    )
+    policy = NavigationPolicy(robot=robot)
 
     # Start camera
     if not camera.start():
         logger.error("Failed to start camera")
         sys.exit(1)
+
+    policy.start()
+    if args.object:
+        policy.set_target(args.object)
+        policy._goal.target_distance = args.target_distance
 
     # Signal handler
     shutdown_event = False
@@ -146,7 +142,7 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
 
     # Main loop
-    logger.info("Starting go-to agent loop (press Ctrl+C to stop)")
+    logger.info("Starting ORB-SLAM agent loop (press Ctrl+C to stop)")
     loop_rate = 30
     loop_interval = 1.0 / loop_rate
     viz = Visualization()
@@ -163,10 +159,13 @@ def main():
                 continue
 
             # Get current policy state
-            status = policy.get_status()
+            status = policy.status
 
             # If no target object set and we're idle, wait for user input
-            if target_object is None and status.state == NavigationState.IDLE:
+            if target_object is None and status.state in (
+                PolicyState.SHOWING_CAMERA,
+                PolicyState.WAITING_FOR_OBJECT,
+            ):
                 frame_with_text = viz.draw_navigation_info(
                     frame,
                     state="idle",
@@ -174,10 +173,12 @@ def main():
                     fps=camera.get_fps(),
                 )
                 if not args.no_display:
-                    key = viz.show_stream(frame_with_text, "Nero Go-To Agent", camera.get_fps())
-                    if key == ord('q'):
+                    key = viz.show_stream(
+                        frame_with_text, "Nero ORB-SLAM Agent", camera.get_fps()
+                    )
+                    if key == ord("q"):
                         shutdown_event = True
-                    elif key == ord('s'):
+                    elif key == ord("s"):
                         target_object = input("Enter object name: ").strip()
                         if target_object:
                             policy.set_target(target_object)
@@ -194,13 +195,17 @@ def main():
                 message=status.message,
                 fps=camera.get_fps(),
                 velocity=(
-                    (status.velocity_command.linear_x, status.velocity_command.angular_z)
-                    if status.velocity_command else None
+                    (
+                        status.velocity_command.linear_x,
+                        status.velocity_command.angular_z,
+                    )
+                    if status.velocity_command
+                    else None
                 ),
             )
 
             # Draw detection info if detecting
-            if status.state == NavigationState.DETECTING:
+            if status.state == PolicyState.DETECTING:
                 cv2.putText(
                     frame,
                     f"Looking for: {target_object}",
@@ -213,20 +218,22 @@ def main():
 
             # Display
             if not args.no_display:
-                key = viz.show_stream(frame, "Nero Go-To Agent", camera.get_fps())
-                if key == ord('q'):
+                key = viz.show_stream(frame, "Nero ORB-SLAM Agent", camera.get_fps())
+                if key == ord("q"):
                     shutdown_event = True
-                elif key == ord('r') and status.state == NavigationState.ARRIVED:
+                elif key == ord("r") and status.state == PolicyState.ARRIVED:
                     # Reset and look for new object
                     policy.reset()
                     target_object = None
                     logger.info("Reset - ready for new target")
 
             # Check for completion
-            if status.state == NavigationState.ARRIVED:
+            if status.state == PolicyState.ARRIVED:
                 logger.info(f"Arrived at {target_object}")
                 if not args.no_display:
-                    logger.info("Press 'r' to reset and find another object, 'q' to quit")
+                    logger.info(
+                        "Press 'r' to reset and find another object, 'q' to quit"
+                    )
 
             # Maintain loop rate
             elapsed = time.time() - loop_start

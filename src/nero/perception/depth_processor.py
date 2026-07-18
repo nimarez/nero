@@ -127,9 +127,6 @@ class DepthProcessor:
 
         # Convert corridor width to pixel width at various depths
         # Using camera intrinsics (approximate for K1)
-        fx = 216.5
-        cy = 120.0
-
         # Check at multiple depth slices
         slices = [h // 2, 2 * h // 3, 3 * h // 4]
         clear_distances = []

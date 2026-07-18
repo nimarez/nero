@@ -299,7 +299,6 @@ class MappingPolicy:
         area = self._config.area_size
 
         # Simple back-and-forth pattern
-        x = pose[0, 3]
         y = pose[1, 3]
 
         # Move forward, turn at edges

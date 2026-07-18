@@ -21,6 +21,7 @@ class VelocityCommand:
     - vy: lateral/sideways (m/s)
     - vyaw: yaw rotation (rad/s)
     """
+
     linear_x: float = 0.0  # m/s (forward)
     linear_y: float = 0.0  # m/s (lateral)
     angular_z: float = 0.0  # rad/s (yaw)
@@ -39,7 +40,7 @@ class VelocityController:
 
     def __init__(
         self,
-        max_linear_velocity: float = 0.5,
+        max_linear_velocity: float = 0.3,  # K1 recommended max for safe operation
         max_angular_velocity: float = 1.0,
         goal_threshold: float = 0.3,
         kp_linear: float = 1.0,
@@ -88,7 +89,9 @@ class VelocityController:
 
         # Clamp velocities
         linear = np.clip(linear, self.min_velocity, self.max_linear_velocity)
-        angular = np.clip(angular, -self.max_angular_velocity, self.max_angular_velocity)
+        angular = np.clip(
+            angular, -self.max_angular_velocity, self.max_angular_velocity
+        )
 
         # Apply obstacle avoidance
         if obstacle_info and obstacle_info.get("has_obstacle"):
@@ -134,7 +137,9 @@ class VelocityController:
 
         # Clamp
         linear = np.clip(linear, -self.max_linear_velocity, self.max_linear_velocity)
-        angular = np.clip(angular, -self.max_angular_velocity, self.max_angular_velocity)
+        angular = np.clip(
+            angular, -self.max_angular_velocity, self.max_angular_velocity
+        )
 
         # Apply minimum velocity
         if abs(linear) > 0 and abs(linear) < self.min_velocity:
@@ -199,7 +204,9 @@ class VelocityController:
 
         return VelocityCommand(
             linear_x=float(np.clip(linear, -0.2, self.max_linear_velocity)),
-            angular_z=float(np.clip(angular, -self.max_angular_velocity, self.max_angular_velocity)),
+            angular_z=float(
+                np.clip(angular, -self.max_angular_velocity, self.max_angular_velocity)
+            ),
         )
 
     def _avoid_obstacles(

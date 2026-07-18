@@ -174,12 +174,6 @@ class VisualOdometry:
     ) -> Optional[Pose2D]:
         """Estimate 2D motion between point sets."""
         # Undistort points
-        K = np.array([
-            [self._fx, 0, self._cx],
-            [0, self._fy, self._cy],
-            [0, 0, 1],
-        ])
-
         # Try essential matrix for general motion
         if len(pts1) >= 8:
             E, mask = cv2.findEssentialMat(
@@ -241,7 +235,6 @@ class VisualOdometry:
         if self._prev_kp is None or self._prev_desc is None:
             return frame2
 
-        gray1 = self._to_gray(frame1)
         gray2 = self._to_gray(frame2)
 
         kp1 = [cv2.KeyPoint(x, y, 1) for x, y in self._prev_kp]

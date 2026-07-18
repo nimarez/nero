@@ -4,19 +4,27 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
-from boosteros.robots.booster import BoosterRobot
-from boosteros.data_models import (
-    AnyImage,
-    CameraInfo,
-    IMUState,
-    OdomState,
-    JointStates,
-    RobotInfo,
-    RobotModeName,
-)
+
+try:
+    from boosteros.robots.booster import BoosterRobot, RobotModeName
+    from boosteros.types import (
+        AnyImage,
+        CameraInfo,
+        IMUState,
+        JointStates,
+        OdomState,
+        RobotInfo,
+    )
+except ImportError as exc:
+    BoosterRobot = None
+    RobotModeName = str
+    AnyImage = CameraInfo = IMUState = JointStates = OdomState = RobotInfo = Any
+    _BOOSTEROS_IMPORT_ERROR: Optional[ImportError] = exc
+else:
+    _BOOSTEROS_IMPORT_ERROR = None
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +79,12 @@ class RobotInterface:
         virtual_robot_name: str = "",
         timeout: float = 10.0,
     ):
+        if BoosterRobot is None:
+            raise RuntimeError(
+                "BoosterOS is unavailable. Install the vendor SDK on the supported "
+                "Linux/ROS robot environment to enable hardware control."
+            ) from _BOOSTEROS_IMPORT_ERROR
+
         self._robot = BoosterRobot(
             network_interface=network_interface,
             virtual_robot_name=virtual_robot_name,
@@ -79,7 +93,9 @@ class RobotInterface:
         )
         self._info = self._robot.robot_info
         self._initialized = False
-        logger.info(f"Connected to {self._info.manufacturer} {self._info.model} ({self._info.serial_number})")
+        logger.info(
+            f"Connected to {self._info.manufacturer} {self._info.model} ({self._info.serial_number})"
+        )
 
     def initialize(self) -> None:
         """Initialize robot for navigation.
@@ -163,7 +179,9 @@ class RobotInterface:
         self._robot.reset_odom()
         logger.info("Odometry reset")
 
-    def get_transform(self, target_frame: str, source_frame: str = "") -> Optional[np.ndarray]:
+    def get_transform(
+        self, target_frame: str, source_frame: str = ""
+    ) -> Optional[np.ndarray]:
         """Get transform between frames as 4x4 matrix."""
         try:
             return self._robot.get_transform(target_frame, source_frame)

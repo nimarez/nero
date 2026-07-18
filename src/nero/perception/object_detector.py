@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -34,6 +35,13 @@ class ObjectDetection:
         """Size of bounding box."""
         return (self.bbox[2] - self.bbox[0], self.bbox[3] - self.bbox[1])
 
+    @property
+    def angle(self) -> float:
+        """Horizontal bearing to the object in radians."""
+        if self.position_3d is None:
+            return 0.0
+        return math.atan2(float(self.position_3d[0]), float(self.position_3d[2]))
+
 
 class ObjectDetector:
     """Detects objects in RGB images and computes their 3D positions.
@@ -61,6 +69,7 @@ class ObjectDetector:
         """
         try:
             from boosteros.brain import Detection
+
             self._detection_api = Detection()
             self._initialized = True
             logger.info("Detection API initialized")
@@ -73,7 +82,7 @@ class ObjectDetector:
     def detect(
         self,
         rgb: np.ndarray,
-        depth: np.ndarray,
+        depth: Optional[np.ndarray] = None,
         camera_info=None,
     ) -> list[ObjectDetection]:
         """Detect objects in RGB image and compute 3D positions.
@@ -113,16 +122,22 @@ class ObjectDetector:
                 )
 
                 # Compute 3D position from depth
-                pos_3d = self._compute_3d_position(bbox, depth, camera_info)
+                pos_3d = (
+                    self._compute_3d_position(bbox, depth, camera_info)
+                    if depth is not None
+                    else None
+                )
                 distance = np.linalg.norm(pos_3d) if pos_3d is not None else 0.0
 
-                detections.append(ObjectDetection(
-                    label=result.label,
-                    confidence=result.confidence,
-                    bbox=bbox,
-                    position_3d=pos_3d,
-                    distance=distance,
-                ))
+                detections.append(
+                    ObjectDetection(
+                        label=result.label,
+                        confidence=result.confidence,
+                        bbox=bbox,
+                        position_3d=pos_3d,
+                        distance=distance,
+                    )
+                )
 
             return detections
         except Exception as e:
@@ -159,10 +174,7 @@ class ObjectDetector:
             Closest matching detection or None
         """
         target_lower = target_name.lower()
-        matches = [
-            d for d in detections
-            if target_lower in d.label.lower()
-        ]
+        matches = [d for d in detections if target_lower in d.label.lower()]
 
         if not matches:
             return None
@@ -207,8 +219,8 @@ class ObjectDetector:
             region_depth = region_depth.astype(np.float32) / 1000.0  # mm to m
 
         valid = region_depth[
-            (region_depth >= self.depth_threshold_min) &
-            (region_depth <= self.depth_threshold_max)
+            (region_depth >= self.depth_threshold_min)
+            & (region_depth <= self.depth_threshold_max)
         ]
 
         if len(valid) == 0:

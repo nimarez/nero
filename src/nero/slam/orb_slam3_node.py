@@ -10,9 +10,8 @@ This module provides a Python interface to ORB-SLAM3, handling:
 from __future__ import annotations
 
 import logging
-import os
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -152,7 +151,8 @@ class ORBSLAM3Node:
     def _try_load_orb_slam3(self) -> None:
         """Attempt to load ORB-SLAM3 Python bindings."""
         try:
-            import orb_slam3_python
+            import orb_slam3_python  # noqa: F401
+
             # If import succeeds, we can use full ORB-SLAM3
             self._use_fallback = False
             logger.info("ORB-SLAM3 Python bindings found")
