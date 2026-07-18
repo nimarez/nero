@@ -1,10 +1,10 @@
 # Nero
 
-Nero detects objects through the Booster K1's built-in RGB-D camera, announces
-them over the robot speaker, waits for human confirmation, and then follows the
-confirmed object. Camera, depth, and IMU inputs are internal K1 capabilities;
-agents do not accept sensor handles, object names, or target distances as CLI
-arguments.
+Nero obeys object-navigation directions such as "go to the chair," announces
+"Going to the chair" over the Booster K1 speaker, and then uses the built-in
+RGB-D camera to detect, track, and approach only that requested target. Camera,
+depth, and IMU inputs are internal K1 capabilities; agents do not accept sensor
+handles, object names, or target distances as CLI arguments.
 
 ## Environment
 
@@ -85,9 +85,9 @@ PyPI. Nero's own dependency graph remains locked and installed by `uv sync`.
 The run wrapper sources Studio's ROS 2 environment, then executes
 `uv run nero-booster-studio`; pass normal Nero flags to the wrapper.
 
-The Booster Studio command runs the same object detection, spoken announcement,
-human confirmation, `IMU_RGBD` SLAM, obstacle processing, navigation, and safety
-policy used by `nero-orb-slam`. Only the environment adapter changes. It consumes
+The Booster Studio command runs the same command-driven object targeting,
+`IMU_RGBD` SLAM, obstacle processing, navigation, and safety policy used by
+`nero-orb-slam`. Only the environment and command adapters change. It consumes
 the simulator's live RGB, 16-bit depth, CameraInfo, IMU, and odometry topics,
 synchronizes RGB-D and IMU on a shared receipt-time clock, derives simulator
 calibration from live intrinsics plus the K1 MJCF camera mount, and sends velocity
@@ -110,11 +110,14 @@ The default single-robot topics match Booster Studio's installed K1 simulator.
 For a named/multi-robot scene, override them with `--rgb-topic`, `--depth-topic`,
 `--camera-info-topic`, `--imu-topic`, `--pose-topic`, and `--detections-topic`.
 Object names and target distances remain intentionally absent from the CLI:
-detections are live, the simulated speaker announces each candidate in the
-terminal, and a human confirms before motion begins. After confirmation, each
-fresh 3D observation is transformed into the SLAM world frame and filtered into
-an object track. Nero derives a dynamic `(x, y, yaw)` approach pose that faces the
-object from an internal safety radius; both position and heading must converge.
+enter a direction such as `go to the chair` at the runtime prompt, and the
+simulated speaker acknowledges it before motion begins. The physical K1 uses the
+official Booster LUI ASR service for the same command contract and falls back to
+terminal input if ASR initialization fails. Nero ignores unrelated speech and
+does not announce every object it sees. Each fresh matching 3D observation is
+transformed into the SLAM world frame and filtered into an object track. Nero
+derives a dynamic `(x, y, yaw)` approach pose that faces the object from an
+internal safety radius; both position and heading must converge.
 Brief occlusions use the last world-frame goal, never stale camera-relative
 coordinates, and an expired track stops the robot.
 
@@ -195,7 +198,7 @@ Then restart the virtual robot, or switch away from and back to the empty K1
 scene. The room contains walls, a couch, chairs, a coffee table, cabinets,
 shelves, and a red ball. The ball deliberately retains Booster Studio's special
 `ball` body name so its built-in simulated detector can exercise Nero's spoken
-confirmation flow. Restore the original scene with:
+command-driven flow. Restore the original scene with:
 
 ```bash
 uv run nero-setup-booster-room --restore

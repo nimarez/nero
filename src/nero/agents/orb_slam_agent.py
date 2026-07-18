@@ -1,7 +1,7 @@
-"""ORB-SLAM Agent: Navigate to a detected object using ORB-SLAM based navigation.
+"""ORB-SLAM Agent: obey spoken object-navigation directions.
 
-This agent uses the K1's built-in RGB-D camera, announces detected objects,
-waits for human confirmation, and navigates to the confirmed object.
+This agent listens for ``go to <object>``, acknowledges the direction aloud,
+and uses the K1's built-in RGB-D camera to navigate to that object.
 
 Usage:
     uv run nero-orb-slam
@@ -17,7 +17,11 @@ import time
 import cv2
 
 from nero.robot import RobotInterface
-from nero.interaction import announce_and_confirm
+from nero.interaction import (
+    K1VoiceCommandSource,
+    TerminalCommandSource,
+    request_navigation_target,
+)
 from nero.utils.visualization import Visualization
 from nero.navigation.policy import NavigationPolicy, PolicyState
 from nero.observability import RosObservabilityPublisher
@@ -49,7 +53,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def run_agent(
-    robot, args: argparse.Namespace, *, slam_options=None, object_detector=None
+    robot,
+    args: argparse.Namespace,
+    *,
+    slam_options=None,
+    object_detector=None,
+    command_source=None,
 ) -> None:
     """Run the shared object-following loop with a robot environment adapter."""
     # Initialize navigation policy
@@ -70,7 +79,6 @@ def run_agent(
         shutdown_event = True
         logger.info("Shutdown signal received")
 
-    signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
     # Main loop
@@ -79,19 +87,31 @@ def run_agent(
     loop_interval = 1.0 / loop_rate
     viz = Visualization()
     target_object = None
-    last_announce_time: dict[str, float] = {}
-    announce_cooldown = 5.0
     announced_arrival = False
+    commands = command_source or TerminalCommandSource()
 
     try:
         while not shutdown_event:
             loop_start = time.time()
 
+            # Perception is target-driven: wait for a direction before running
+            # the detector or issuing any navigation command.
+            if target_object is None:
+                try:
+                    target_object = request_navigation_target(
+                        robot, commands, cancelled=lambda: shutdown_event
+                    )
+                except (EOFError, KeyboardInterrupt, InterruptedError):
+                    shutdown_event = True
+                    break
+                policy.set_target(target_object)
+                announced_arrival = False
+                logger.info("Accepted navigation target: %s", target_object)
+
             # Read the K1's built-in RGB-D stream.
             try:
                 state = robot.get_state(include_images=True)
                 frame = robot.image_to_array(state.rgb)
-                depth = robot.image_to_array(state.depth)
                 sensor_timestamp = robot.image_timestamp(state.rgb)
                 if telemetry is not None:
                     telemetry.publish_robot_state(state, robot)
@@ -99,55 +119,6 @@ def run_agent(
                 logger.warning(f"Failed to read K1 sensors: {e}")
                 time.sleep(0.01)
                 continue
-
-            # Get current policy state
-            status = policy.status
-
-            # Scan continuously until a human confirms one detected object.
-            if target_object is None and status.state in (
-                PolicyState.SHOWING_CAMERA,
-                PolicyState.WAITING_FOR_OBJECT,
-            ):
-                detections = policy.object_detector.detect(
-                    frame, depth, state.camera_info
-                )
-                if telemetry is not None:
-                    telemetry.publish_detections(detections, sensor_timestamp)
-                    telemetry.publish_policy(status, sensor_timestamp)
-                now = time.monotonic()
-                for detection in detections:
-                    object_name = detection.label.lower()
-                    if (
-                        now - last_announce_time.get(object_name, 0.0)
-                        < announce_cooldown
-                    ):
-                        continue
-                    last_announce_time[object_name] = now
-                    try:
-                        should_follow = announce_and_confirm(robot, object_name)
-                    except RuntimeError as e:
-                        logger.error(f"Could not announce detection: {e}")
-                        should_follow = False
-                    if should_follow:
-                        target_object = object_name
-                        policy.set_target(object_name)
-                        logger.info("Confirmed dynamic target: %s", object_name)
-                        break
-
-                frame_with_text = viz.draw_navigation_info(
-                    frame,
-                    state="idle",
-                    message="Scanning for objects...",
-                    fps=loop_rate,
-                )
-                if not args.no_display:
-                    key = viz.show_stream(
-                        frame_with_text, "Nero ORB-SLAM Agent", loop_rate
-                    )
-                    if key == ord("q"):
-                        shutdown_event = True
-                if target_object is None:
-                    continue
 
             # Step policy
             status = policy.step()
@@ -228,6 +199,7 @@ def run_agent(
         logger.info("Shutting down...")
         policy.stop()
         robot.stop()
+        commands.close()
         if telemetry is not None:
             telemetry.close()
         if not args.no_display:
@@ -256,7 +228,22 @@ def main():
         logger.error(f"Failed to connect to K1 robot: {e}")
         raise SystemExit(1) from e
 
-    run_agent(robot, args)
+    command_source = None
+    try:
+        command_source = K1VoiceCommandSource()
+        # Verify that the robot-side LUI service is actually reachable. The SDK
+        # client and DDS topic can initialize even when that service is absent.
+        command_source.start_listening()
+        command_source.stop_listening()
+    except Exception as exc:
+        if command_source is not None:
+            command_source.close()
+        logger.warning(
+            "K1 ASR is unavailable (%s); falling back to terminal directions", exc
+        )
+        command_source = TerminalCommandSource()
+
+    run_agent(robot, args, command_source=command_source)
 
 
 if __name__ == "__main__":

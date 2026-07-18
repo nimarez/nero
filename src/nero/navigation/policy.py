@@ -2,7 +2,7 @@
 
 This module implements the agent/policy loop:
 1. Read the K1's built-in RGB-D camera stream
-2. Detect objects live and accept a human-confirmed track
+2. Accept a human direction and retain only matching live detections
 3. Project the track into the SLAM world frame
 4. Follow a dynamic stand-off pose while avoiding obstacles
 """
@@ -315,9 +315,22 @@ class NavigationPolicy:
 
         return self._update_status(robot_pose=pose)
 
+    def _matching_target_detections(
+        self, detections: list[ObjectDetection]
+    ) -> list[ObjectDetection]:
+        """Keep non-target detections out of policy state and telemetry."""
+        if self._goal is None:
+            return []
+        target_name = self._goal.object_name.lower()
+        return [
+            detection
+            for detection in detections
+            if target_name in detection.label.lower()
+        ]
+
     def _step_sim_detecting(self, frame: np.ndarray, pose: np.ndarray) -> PolicyStatus:
         """Step in DETECTING state for simulation."""
-        detections = self.sim_env.get_detections()
+        detections = self._matching_target_detections(self.sim_env.get_detections())
         target = self.object_detector.find_object(detections, self._goal.object_name)
 
         if target is None or target.position_3d is None:
@@ -346,7 +359,7 @@ class NavigationPolicy:
 
     def _step_sim_navigating(self, frame: np.ndarray, pose: np.ndarray) -> PolicyStatus:
         """Step in NAVIGATING state for simulation."""
-        detections = self.sim_env.get_detections()
+        detections = self._matching_target_detections(self.sim_env.get_detections())
         target = self.object_detector.find_object(detections, self._goal.object_name)
 
         observed_now = target is not None and target.position_3d is not None
@@ -440,7 +453,9 @@ class NavigationPolicy:
         camera_info = sensor_data.get("camera_info")
 
         # Detect objects
-        detections = self.object_detector.detect(rgb, depth, camera_info)
+        detections = self._matching_target_detections(
+            self.object_detector.detect(rgb, depth, camera_info)
+        )
         target = self.object_detector.find_object(detections, self._goal.object_name)
 
         if target is not None and target.position_3d is not None:
@@ -518,7 +533,9 @@ class NavigationPolicy:
             return self._update_status(message="Navigation timeout")
 
         # Detect object again (for tracking)
-        detections = self.object_detector.detect(rgb, depth, camera_info)
+        detections = self._matching_target_detections(
+            self.object_detector.detect(rgb, depth, camera_info)
+        )
         target = self.object_detector.find_object(detections, self._goal.object_name)
 
         observed_now = (

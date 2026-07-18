@@ -20,6 +20,16 @@ class RecordingRobot:
         self.commands.append((0.0, 0.0, 0.0))
 
 
+def test_policy_exposes_only_detections_matching_spoken_target():
+    chair = ObjectDetection("red chair", 0.9, (0, 0, 10, 10))
+    bottle = ObjectDetection("bottle", 0.8, (0, 0, 10, 10))
+    policy = NavigationPolicy(sim_env=SimpleNamespace())
+    policy._state = PolicyState.WAITING_FOR_OBJECT
+    policy.set_target("chair")
+
+    assert policy._matching_target_detections([bottle, chair]) == [chair]
+
+
 def test_real_policy_projects_camera_detection_into_world_goal():
     camera_to_world = np.eye(4)
     camera_to_world[:3, :3] = [

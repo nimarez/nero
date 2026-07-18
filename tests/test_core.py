@@ -8,7 +8,12 @@ import nero.agents as agents
 from nero.navigation.controller import VelocityController
 from nero.perception.object_detector import ObjectDetection, ObjectDetector
 from nero.robot import RobotInterface
-from nero.interaction import announce_and_confirm, safe_stand_off_distance
+from nero.interaction import (
+    K1VoiceCommandSource,
+    parse_go_to_command,
+    request_navigation_target,
+    safe_stand_off_distance,
+)
 
 
 def test_lazy_agent_exports_are_callable():
@@ -109,15 +114,116 @@ def test_hardware_agent_clis_use_k1_sensors_implicitly(monkeypatch):
     assert not hasattr(studio_args, "target_distance")
 
 
-def test_detection_announcement_requires_explicit_confirmation():
-    spoken = []
-    speaker = SimpleNamespace(speak=spoken.append)
+def test_go_to_command_parser_accepts_natural_object_names():
+    assert parse_go_to_command("go to chair") == "chair"
+    assert parse_go_to_command("Go to the red chair, please!") == "red chair"
+    assert (
+        parse_go_to_command("please go to a fire extinguisher") == "fire extinguisher"
+    )
+    assert parse_go_to_command("chair detected") is None
+    assert parse_go_to_command("follow the chair") is None
+    assert parse_go_to_command("go to") is None
 
-    assert announce_and_confirm(speaker, "chair", lambda _: "yes")
-    assert not announce_and_confirm(speaker, "bottle", lambda _: "no")
-    assert spoken == [
-        "chair detected. Should I follow it?",
-        "bottle detected. Should I follow it?",
+
+def test_direction_acknowledges_target_without_detection_confirmation():
+    spoken = []
+    events = []
+    speaker = SimpleNamespace(
+        speak=lambda text: (events.append("speak"), spoken.append(text))
+    )
+    responses = iter(["what can you see?", "go to", "go to the chair"])
+    commands = SimpleNamespace(
+        start_listening=lambda: events.append("start"),
+        read_command=lambda _: next(responses),
+        stop_listening=lambda: events.append("stop"),
+    )
+
+    assert request_navigation_target(speaker, commands) == "chair"
+    assert spoken == ["Going to the chair."]
+    assert events[:3] == ["start", "stop", "speak"]
+
+
+def test_direction_wait_can_be_cancelled_cleanly():
+    events = []
+    commands = SimpleNamespace(
+        start_listening=lambda: events.append("start"),
+        read_command=lambda _: "",
+        stop_listening=lambda: events.append("stop"),
+    )
+
+    with np.testing.assert_raises(InterruptedError):
+        request_navigation_target(
+            SimpleNamespace(speak=lambda _: None),
+            commands,
+            cancelled=lambda: True,
+        )
+    assert events == ["start", "stop"]
+
+
+def test_direction_parser_combines_split_asr_chunks():
+    speaker = SimpleNamespace(speak=lambda _: None)
+    responses = iter(["go to", "the coffee table"])
+    commands = SimpleNamespace(
+        start_listening=lambda: None,
+        read_command=lambda _: next(responses),
+        stop_listening=lambda: None,
+    )
+
+    assert request_navigation_target(speaker, commands) == "coffee table"
+
+
+def test_k1_voice_source_uses_official_lui_asr(monkeypatch):
+    calls = []
+
+    class FakeFactory:
+        @classmethod
+        def Instance(cls):
+            return cls()
+
+        def Init(self, domain, interface):
+            calls.append(("channel_init", domain, interface))
+
+    class FakeClient:
+        def Init(self):
+            calls.append("client_init")
+
+        def StartAsr(self):
+            calls.append("start_asr")
+
+        def StopAsr(self):
+            calls.append("stop_asr")
+
+    class FakeSubscriber:
+        def __init__(self, callback):
+            self.callback = callback
+
+        def InitChannel(self):
+            calls.append("subscriber_init")
+
+        def CloseChannel(self):
+            calls.append("subscriber_close")
+
+    sdk = SimpleNamespace(
+        ChannelFactory=FakeFactory,
+        LuiClient=FakeClient,
+        LuiAsrChunkSubscriber=FakeSubscriber,
+    )
+    monkeypatch.setitem(sys.modules, "booster_robotics_sdk_python", sdk)
+
+    source = K1VoiceCommandSource()
+    source.start_listening()
+    source._subscriber.callback(SimpleNamespace(text="go to the chair"))
+    assert source.read_command("direction: ") == "go to the chair"
+    source.stop_listening()
+    source.close()
+    source.close()
+    assert calls == [
+        ("channel_init", 0, "lo"),
+        "client_init",
+        "subscriber_init",
+        "start_asr",
+        "stop_asr",
+        "subscriber_close",
     ]
 
 
