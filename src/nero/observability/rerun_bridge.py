@@ -23,16 +23,30 @@ logger = logging.getLogger(__name__)
 def image_message_to_array(message: Any) -> np.ndarray:
     encoding = str(message.encoding).lower()
     if encoding in {"bgr8", "rgb8"}:
-        array = np.frombuffer(message.data, np.uint8).reshape(message.height, message.width, 3)
+        array = np.frombuffer(message.data, np.uint8).reshape(
+            message.height, message.width, 3
+        )
         return array[..., ::-1].copy() if encoding == "bgr8" else array.copy()
     if encoding in {"mono8", "8uc1"}:
-        return np.frombuffer(message.data, np.uint8).reshape(message.height, message.width).copy()
+        return (
+            np.frombuffer(message.data, np.uint8)
+            .reshape(message.height, message.width)
+            .copy()
+        )
     if encoding in {"mono16", "16uc1"}:
         dtype = np.dtype(">u2" if message.is_bigendian else "<u2")
-        return np.frombuffer(message.data, dtype).reshape(message.height, message.width).astype(np.uint16)
+        return (
+            np.frombuffer(message.data, dtype)
+            .reshape(message.height, message.width)
+            .astype(np.uint16)
+        )
     if encoding == "32fc1":
         dtype = np.dtype(">f4" if message.is_bigendian else "<f4")
-        return np.frombuffer(message.data, dtype).reshape(message.height, message.width).astype(np.float32)
+        return (
+            np.frombuffer(message.data, dtype)
+            .reshape(message.height, message.width)
+            .astype(np.float32)
+        )
     raise ValueError(f"unsupported ROS image encoding: {message.encoding}")
 
 
@@ -70,7 +84,7 @@ class RerunRosBridge:
     ) -> None:
         import rerun as rr
         import rclpy
-        from geometry_msgs.msg import PoseStamped, Twist
+        from geometry_msgs.msg import PointStamped, PoseStamped, Twist
         from nav_msgs.msg import Path as RosPath
         from sensor_msgs.msg import CameraInfo, Image, Imu, PointCloud2
         from std_msgs.msg import String
@@ -87,18 +101,46 @@ class RerunRosBridge:
             [
                 subscribe(Image, self._topics.rgb, self._on_rgb, sensor_qos),
                 subscribe(Image, self._topics.depth, self._on_depth, sensor_qos),
-                subscribe(CameraInfo, self._topics.camera_info, self._on_camera_info, 1),
+                subscribe(
+                    CameraInfo, self._topics.camera_info, self._on_camera_info, 1
+                ),
                 subscribe(Imu, self._topics.imu, self._on_imu, sensor_qos),
                 subscribe(PoseStamped, self._topics.pose, self._on_pose, 10),
                 subscribe(RosPath, self._topics.path, self._on_path, 1),
-                subscribe(PointCloud2, self._topics.map_points, self._on_map, sensor_qos),
+                subscribe(
+                    PointCloud2, self._topics.map_points, self._on_map, sensor_qos
+                ),
                 subscribe(String, self._topics.tracking, self._on_tracking, 10),
-                subscribe(Detection2DArray, self._topics.detections, self._on_detections, sensor_qos),
+                subscribe(
+                    Detection2DArray,
+                    self._topics.detections,
+                    self._on_detections,
+                    sensor_qos,
+                ),
                 subscribe(String, self._topics.status, self._on_status, 10),
                 subscribe(Twist, self._topics.command, self._on_command, 10),
-                subscribe(PoseStamped, self._topics.reference_pose, self._on_reference_pose, 10),
-                subscribe(RosPath, self._topics.reference_path, self._on_reference_path, 1),
-                subscribe(PointCloud2, self._topics.reference_map, self._on_reference_map, sensor_qos),
+                subscribe(PoseStamped, self._topics.goal_pose, self._on_goal_pose, 10),
+                subscribe(
+                    PointStamped,
+                    self._topics.object_position,
+                    self._on_object_position,
+                    10,
+                ),
+                subscribe(
+                    PoseStamped,
+                    self._topics.reference_pose,
+                    self._on_reference_pose,
+                    10,
+                ),
+                subscribe(
+                    RosPath, self._topics.reference_path, self._on_reference_path, 1
+                ),
+                subscribe(
+                    PointCloud2,
+                    self._topics.reference_map,
+                    self._on_reference_map,
+                    sensor_qos,
+                ),
             ]
         )
         recording.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
@@ -108,9 +150,7 @@ class RerunRosBridge:
         mount_rotation = Rotation.from_matrix(transform[:3, :3]).as_quat()
         recording.log(
             "world/robot/camera",
-            rr.Transform3D(
-                translation=transform[:3, 3], quaternion=mount_rotation
-            ),
+            rr.Transform3D(translation=transform[:3, 3], quaternion=mount_rotation),
             static=True,
         )
 
@@ -127,13 +167,17 @@ class RerunRosBridge:
 
     def _on_rgb(self, message: Any) -> None:
         self._time(message)
-        self._recording.log("world/robot/camera/rgb", self._rr.Image(image_message_to_array(message)))
+        self._recording.log(
+            "world/robot/camera/rgb", self._rr.Image(image_message_to_array(message))
+        )
 
     def _on_depth(self, message: Any) -> None:
         self._time(message)
         depth = image_message_to_array(message)
         meter = 1000.0 if depth.dtype == np.uint16 else 1.0
-        self._recording.log("world/robot/camera/depth", self._rr.DepthImage(depth, meter=meter))
+        self._recording.log(
+            "world/robot/camera/depth", self._rr.DepthImage(depth, meter=meter)
+        )
 
     def _on_camera_info(self, message: Any) -> None:
         self._time(message)
@@ -177,6 +221,19 @@ class RerunRosBridge:
     def _on_reference_pose(self, message: Any) -> None:
         self._log_pose(message, "world/reference_robot")
 
+    def _on_goal_pose(self, message: Any) -> None:
+        self._log_pose(message, "world/navigation/goal")
+
+    def _on_object_position(self, message: Any) -> None:
+        self._time(message)
+        point = message.point
+        self._recording.log(
+            "world/navigation/object",
+            self._rr.Points3D(
+                [[point.x, point.y, point.z]], colors=[255, 80, 80], radii=0.08
+            ),
+        )
+
     def _log_path(self, message: Any, entity: str, color: list[int]) -> None:
         self._time(message)
         points = [
@@ -184,7 +241,9 @@ class RerunRosBridge:
             for pose in message.poses
         ]
         if len(points) >= 2:
-            self._recording.log(entity, self._rr.LineStrips3D([points], colors=color, radii=0.01))
+            self._recording.log(
+                entity, self._rr.LineStrips3D([points], colors=color, radii=0.01)
+            )
 
     def _on_path(self, message: Any) -> None:
         self._log_path(message, "world/slam/trajectory", [0, 200, 255])
@@ -212,7 +271,9 @@ class RerunRosBridge:
             centers.append([position.x, position.y])
             sizes.append([detection.bbox.size_x, detection.bbox.size_y])
             result = detection.results[0] if detection.results else None
-            labels.append(result.hypothesis.class_id if result is not None else "object")
+            labels.append(
+                result.hypothesis.class_id if result is not None else "object"
+            )
         self._recording.log(
             "world/robot/camera/rgb/detections",
             self._rr.Boxes2D(centers=centers, sizes=sizes, labels=labels),
@@ -233,9 +294,13 @@ class RerunRosBridge:
             data = json.loads(message.data)
         except json.JSONDecodeError:
             data = {"status": message.data}
-        self._recording.log("status/tracking", self._rr.TextLog(str(data.get("status", "unknown"))))
+        self._recording.log(
+            "status/tracking", self._rr.TextLog(str(data.get("status", "unknown")))
+        )
         if "map_points" in data:
-            self._recording.log("metrics/slam/map_points", self._rr.Scalar(float(data["map_points"])))
+            self._recording.log(
+                "metrics/slam/map_points", self._rr.Scalar(float(data["map_points"]))
+            )
 
     def _on_command(self, message: Any) -> None:
         self._receipt_time()
@@ -245,7 +310,9 @@ class RerunRosBridge:
             "angular_z": message.angular.z,
         }
         for name, value in values.items():
-            self._recording.log(f"metrics/command/{name}", self._rr.Scalar(float(value)))
+            self._recording.log(
+                f"metrics/command/{name}", self._rr.Scalar(float(value))
+            )
 
 
 def parse_args() -> argparse.Namespace:
@@ -256,8 +323,12 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("NERO_RERUN_URL"),
         help="Rerun viewer address, e.g. host.docker.internal:9876",
     )
-    sink.add_argument("--save", type=Path, help="Write a .rrd recording instead of streaming")
-    sink.add_argument("--spawn", action="store_true", help="Spawn a local native viewer")
+    sink.add_argument(
+        "--save", type=Path, help="Write a .rrd recording instead of streaming"
+    )
+    sink.add_argument(
+        "--spawn", action="store_true", help="Spawn a local native viewer"
+    )
     parser.add_argument(
         "--sensor-calibration",
         type=Path,
@@ -276,7 +347,9 @@ def main() -> None:
         import rclpy
         from rclpy.executors import ExternalShutdownException
     except ImportError as exc:
-        raise SystemExit("Install the visualization extra with: uv sync --extra viz") from exc
+        raise SystemExit(
+            "Install the visualization extra with: uv sync --extra viz"
+        ) from exc
 
     rclpy.init(args=None)
     recording = rr.new_recording("nero_k1", make_default=False)

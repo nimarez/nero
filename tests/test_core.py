@@ -8,7 +8,7 @@ import nero.agents as agents
 from nero.navigation.controller import VelocityController
 from nero.perception.object_detector import ObjectDetection, ObjectDetector
 from nero.robot import RobotInterface
-from nero.interaction import announce_and_confirm, deduce_target_distance
+from nero.interaction import announce_and_confirm, safe_stand_off_distance
 
 
 def test_lazy_agent_exports_are_callable():
@@ -49,6 +49,13 @@ def test_velocity_controller_stops_and_clamps():
     command = controller.compute_goal_velocity(np.zeros(3), np.array([10.0, 10.0, 0.0]))
     assert command.linear_x == 0.3
     assert command.angular_z == 1.0
+
+    turn_in_place = controller.compute_goal_velocity(
+        np.zeros(3), np.array([0.1, 0.0, 1.0])
+    )
+    assert turn_in_place.linear_x == 0.0
+    assert turn_in_place.angular_z > 0.0
+    assert not controller.has_reached_pose(np.zeros(3), np.array([0.1, 0.0, 1.0]))
 
     reverse = controller.compute_avoidance_velocity(
         {"has_obstacle": True, "min_distance": 0.2}
@@ -114,10 +121,10 @@ def test_detection_announcement_requires_explicit_confirmation():
     ]
 
 
-def test_target_distance_is_deduced_internally():
-    assert deduce_target_distance("chair", 4.0) == 2.0
-    assert deduce_target_distance("bottle", 4.0) == 1.2
-    assert deduce_target_distance("unknown", 1.0) == 0.8
+def test_stand_off_is_internal_and_independent_of_initial_range():
+    assert safe_stand_off_distance("chair") == 1.0
+    assert safe_stand_off_distance("bottle") == 0.7
+    assert safe_stand_off_distance("unknown") == 0.8
 
 
 def test_robot_speak_uses_booster_speaker_service():

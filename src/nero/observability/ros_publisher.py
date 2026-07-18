@@ -51,7 +51,7 @@ class RosObservabilityPublisher:
         camera_frame: str = "nero_camera",
     ) -> None:
         import rclpy
-        from geometry_msgs.msg import PoseStamped, Twist
+        from geometry_msgs.msg import PointStamped, PoseStamped, Twist
         from nav_msgs.msg import Path
         from sensor_msgs.msg import CameraInfo, Image, Imu, PointCloud2, PointField
         from std_msgs.msg import String
@@ -67,6 +67,7 @@ class RosObservabilityPublisher:
         self._camera_frame = camera_frame
         self._types = {
             "PoseStamped": PoseStamped,
+            "PointStamped": PointStamped,
             "Twist": Twist,
             "Path": Path,
             "CameraInfo": CameraInfo,
@@ -81,18 +82,36 @@ class RosObservabilityPublisher:
         self._publishers = {
             "rgb": self._node.create_publisher(Image, self._topics.rgb, sensor_qos),
             "depth": self._node.create_publisher(Image, self._topics.depth, sensor_qos),
-            "camera_info": self._node.create_publisher(CameraInfo, self._topics.camera_info, 1),
+            "camera_info": self._node.create_publisher(
+                CameraInfo, self._topics.camera_info, 1
+            ),
             "imu": self._node.create_publisher(Imu, self._topics.imu, sensor_qos),
             "pose": self._node.create_publisher(PoseStamped, self._topics.pose, 10),
             "path": self._node.create_publisher(Path, self._topics.path, 1),
-            "map_points": self._node.create_publisher(PointCloud2, self._topics.map_points, sensor_qos),
+            "map_points": self._node.create_publisher(
+                PointCloud2, self._topics.map_points, sensor_qos
+            ),
             "tracking": self._node.create_publisher(String, self._topics.tracking, 10),
-            "detections": self._node.create_publisher(Detection2DArray, self._topics.detections, sensor_qos),
+            "detections": self._node.create_publisher(
+                Detection2DArray, self._topics.detections, sensor_qos
+            ),
             "status": self._node.create_publisher(String, self._topics.status, 10),
             "command": self._node.create_publisher(Twist, self._topics.command, 10),
-            "reference_pose": self._node.create_publisher(PoseStamped, self._topics.reference_pose, 10),
-            "reference_path": self._node.create_publisher(Path, self._topics.reference_path, 1),
-            "reference_map": self._node.create_publisher(PointCloud2, self._topics.reference_map, sensor_qos),
+            "goal_pose": self._node.create_publisher(
+                PoseStamped, self._topics.goal_pose, 10
+            ),
+            "object_position": self._node.create_publisher(
+                PointStamped, self._topics.object_position, 10
+            ),
+            "reference_pose": self._node.create_publisher(
+                PoseStamped, self._topics.reference_pose, 10
+            ),
+            "reference_path": self._node.create_publisher(
+                Path, self._topics.reference_path, 1
+            ),
+            "reference_map": self._node.create_publisher(
+                PointCloud2, self._topics.reference_map, sensor_qos
+            ),
         }
         self._path = Path()
         self._path.header.frame_id = map_frame
@@ -101,7 +120,9 @@ class RosObservabilityPublisher:
         self._last_sensor_timestamp: float | None = None
 
     @classmethod
-    def try_create(cls, *, enabled: bool = True, **kwargs: Any) -> "RosObservabilityPublisher | None":
+    def try_create(
+        cls, *, enabled: bool = True, **kwargs: Any
+    ) -> "RosObservabilityPublisher | None":
         if not enabled:
             return None
         try:
@@ -118,7 +139,9 @@ class RosObservabilityPublisher:
         message = self._types["PoseStamped"]()
         self._header(message, timestamp, self._map_frame)
         transform = np.asarray(matrix, dtype=float)
-        message.pose.position.x, message.pose.position.y, message.pose.position.z = transform[:3, 3]
+        message.pose.position.x, message.pose.position.y, message.pose.position.z = (
+            transform[:3, 3]
+        )
         quaternion = Rotation.from_matrix(transform[:3, :3]).as_quat()
         (
             message.pose.orientation.x,
@@ -164,9 +187,11 @@ class RosObservabilityPublisher:
             info_msg.k = np.asarray(info.k, dtype=float).reshape(-1).tolist()
             info_msg.d = list(getattr(info, "d", []))
             info_msg.r = np.eye(3).reshape(-1).tolist()
-            info_msg.p = np.hstack(
-                (np.asarray(info.k).reshape(3, 3), np.zeros((3, 1)))
-            ).reshape(-1).tolist()
+            info_msg.p = (
+                np.hstack((np.asarray(info.k).reshape(3, 3), np.zeros((3, 1))))
+                .reshape(-1)
+                .tolist()
+            )
             self._publishers["camera_info"].publish(info_msg)
 
         if state.imu is not None:
@@ -179,8 +204,16 @@ class RosObservabilityPublisher:
                 imu_msg.orientation.z,
                 imu_msg.orientation.w,
             ) = quaternion
-            imu_msg.angular_velocity.x, imu_msg.angular_velocity.y, imu_msg.angular_velocity.z = state.angular_velocity
-            imu_msg.linear_acceleration.x, imu_msg.linear_acceleration.y, imu_msg.linear_acceleration.z = state.linear_acceleration
+            (
+                imu_msg.angular_velocity.x,
+                imu_msg.angular_velocity.y,
+                imu_msg.angular_velocity.z,
+            ) = state.angular_velocity
+            (
+                imu_msg.linear_acceleration.x,
+                imu_msg.linear_acceleration.y,
+                imu_msg.linear_acceleration.z,
+            ) = state.linear_acceleration
             self._publishers["imu"].publish(imu_msg)
 
     def publish_policy(self, status: Any, timestamp: float) -> None:
@@ -190,8 +223,12 @@ class RosObservabilityPublisher:
             {
                 "state": state_name,
                 "message": getattr(status, "message", ""),
-                "goal": getattr(getattr(status, "current_goal", None), "object_name", None),
-                "tracking_confidence": getattr(getattr(status, "current_pose", None), "confidence", None),
+                "goal": getattr(
+                    getattr(status, "current_goal", None), "object_name", None
+                ),
+                "tracking_confidence": getattr(
+                    getattr(status, "current_pose", None), "confidence", None
+                ),
             },
             separators=(",", ":"),
         )
@@ -211,9 +248,30 @@ class RosObservabilityPublisher:
             matrix[:3, :3] = Rotation.from_euler("z", float(pose.yaw)).as_matrix()
             matrix[:3, 3] = np.asarray(pose.position, dtype=float)
             self.publish_pose(matrix, timestamp)
+        goal = getattr(status, "current_goal", None)
+        approach = getattr(goal, "approach_pose", None)
+        if approach is not None:
+            goal_matrix = np.eye(4)
+            goal_matrix[:3, :3] = Rotation.from_euler(
+                "z", float(approach[2])
+            ).as_matrix()
+            goal_matrix[:2, 3] = np.asarray(approach[:2], dtype=float)
+            self._publishers["goal_pose"].publish(
+                self._pose_message(goal_matrix, timestamp)
+            )
+        object_position = getattr(goal, "object_position_world", None)
+        if object_position is not None:
+            point = self._types["PointStamped"]()
+            self._header(point, timestamp, self._map_frame)
+            point.point.x, point.point.y, point.point.z = map(
+                float, np.asarray(object_position, dtype=float)
+            )
+            self._publishers["object_position"].publish(point)
         self.publish_detections(getattr(status, "detections", []), timestamp)
 
-    def publish_pose(self, matrix: np.ndarray, timestamp: float, *, reference: bool = False) -> None:
+    def publish_pose(
+        self, matrix: np.ndarray, timestamp: float, *, reference: bool = False
+    ) -> None:
         message = self._pose_message(matrix, timestamp)
         path = self._reference_path if reference else self._path
         publisher = self._publishers["reference_pose" if reference else "pose"]
@@ -253,14 +311,23 @@ class RosObservabilityPublisher:
             result = ObjectHypothesisWithPose()
             result.hypothesis.class_id = str(detection.label)
             result.hypothesis.score = float(detection.confidence)
-            if detection.position_3d is not None:
+            if (
+                detection.position_3d is not None
+                and getattr(detection, "coordinate_frame", "camera") == "camera"
+            ):
                 position = np.asarray(detection.position_3d, dtype=float)
-                result.pose.pose.position.x, result.pose.pose.position.y, result.pose.pose.position.z = position
+                (
+                    result.pose.pose.position.x,
+                    result.pose.pose.position.y,
+                    result.pose.pose.position.z,
+                ) = position
             item.results.append(result)
             message.detections.append(item)
         self._publishers["detections"].publish(message)
 
-    def publish_point_cloud(self, points: np.ndarray, timestamp: float, *, reference: bool = False) -> None:
+    def publish_point_cloud(
+        self, points: np.ndarray, timestamp: float, *, reference: bool = False
+    ) -> None:
         message = self._types["PointCloud2"]()
         self._header(message, timestamp, self._map_frame)
         field_type = self._types["PointField"]
@@ -271,7 +338,9 @@ class RosObservabilityPublisher:
         finite = np.asarray(points, dtype=float).reshape(-1, 3)
         finite = finite[np.all(np.isfinite(finite), axis=1)]
         _point_cloud_xyz(message, finite)
-        self._publishers["reference_map" if reference else "map_points"].publish(message)
+        self._publishers["reference_map" if reference else "map_points"].publish(
+            message
+        )
 
     def close(self) -> None:
         if self._owns_node:

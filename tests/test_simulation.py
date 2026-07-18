@@ -80,7 +80,6 @@ def test_sim_policy_reaches_target():
     policy.start()
     assert policy.step().state == PolicyState.WAITING_FOR_OBJECT
     policy.set_target("chair")
-    policy._goal.target_distance = 1.0
     assert policy.step().state == PolicyState.NAVIGATING
 
     for _ in range(100):
@@ -103,11 +102,49 @@ def test_sim_policy_loses_missing_target_without_crashing():
     assert policy.step().state == PolicyState.NAVIGATING
     sim.clear_environment()
 
-    for _ in range(policy._max_object_not_found):
-        status = policy.step()
+    policy._goal.last_observed_monotonic -= policy._object_track_timeout + 0.1
+    status = policy.step()
 
     assert status.state == PolicyState.LOST
     assert "Lost object" in status.message
+    policy.stop()
+
+
+def test_sim_policy_uses_full_goal_pose_and_replans_for_motion():
+    sim = SimEnvironment(camera_width=80, camera_height=60)
+    sim.add_object("chair", 1.0, 0.5)
+    policy = NavigationPolicy(sim_env=sim, object_position_filter=1.0)
+    policy.start()
+    policy.step()
+    policy.set_target("chair")
+    policy.step()
+
+    first_goal = policy.status.current_goal.approach_pose.copy()
+    assert first_goal[1] > 0.0
+    assert first_goal[2] > 0.0
+
+    sim.camera.add_object("chair", 2.0, -0.5)
+    status = policy.step()
+    second_goal = status.current_goal.approach_pose
+    assert second_goal[0] > first_goal[0]
+    assert second_goal[1] < first_goal[1]
+    policy.stop()
+
+
+def test_arrived_follower_resumes_when_object_moves():
+    sim = SimEnvironment(camera_width=80, camera_height=60)
+    sim.add_object("chair", 0.5, 0.0)
+    policy = NavigationPolicy(sim_env=sim, object_position_filter=1.0)
+    policy.start()
+    policy.step()
+    policy.set_target("chair")
+    policy.step()
+    assert policy.step().state == PolicyState.ARRIVED
+
+    sim.camera.add_object("chair", 2.0, 0.0)
+    status = policy.step()
+    assert status.state == PolicyState.NAVIGATING
+    assert status.velocity_command.linear_x > 0.0
     policy.stop()
 
 
@@ -180,7 +217,9 @@ def test_booster_studio_image_helpers():
         data=np.arange(12).reshape(2, 2, 3),
         header=SimpleNamespace(stamp=stamp),
     )
-    np.testing.assert_array_equal(BoosterStudioRobotInterface.image_to_array(image), image.data)
+    np.testing.assert_array_equal(
+        BoosterStudioRobotInterface.image_to_array(image), image.data
+    )
     assert BoosterStudioRobotInterface.image_timestamp(image) == 4.25
     assert BoosterStudioRobotInterface.image_source_timestamp(image) == 4.25
 
@@ -253,9 +292,7 @@ def test_booster_studio_bounds_unmatched_image_queues():
     ok, encoded = cv2.imencode(".jpg", np.zeros((2, 3, 3), dtype=np.uint8))
     assert ok
     for stamp in range(12):
-        robot._on_rgb(
-            SimpleNamespace(data=encoded.tobytes(), header=_header_at(stamp))
-        )
+        robot._on_rgb(SimpleNamespace(data=encoded.tobytes(), header=_header_at(stamp)))
     assert len(robot._pending_rgb) == 10
     assert min(robot._pending_rgb) == 2_000_000_000
 
@@ -275,7 +312,9 @@ def test_booster_studio_delivers_synchronized_pairs_at_geek_rate(monkeypatch):
         depth = SimpleNamespace(data=np.full((2, 3), 1000, np.uint16), header=header)
         robot._pending_rgb[stamp] = (rgb, receipt)
         robot._pending_depth[stamp] = depth
-        monkeypatch.setattr("nero.simulation.booster_studio.time.monotonic", lambda r=receipt: r)
+        monkeypatch.setattr(
+            "nero.simulation.booster_studio.time.monotonic", lambda r=receipt: r
+        )
         with robot._ready:
             robot._commit_synchronized_frame(stamp)
     assert len(robot._rgb_timestamps) == 21
@@ -320,9 +359,7 @@ def test_booster_studio_interpolates_ground_truth_across_yaw_wrap():
 
 def test_booster_studio_stamps_reference_pose_in_simulation_time():
     robot = _adapter_without_ros()
-    robot._on_clock(
-        SimpleNamespace(clock=SimpleNamespace(sec=7, nanosec=500_000_000))
-    )
+    robot._on_clock(SimpleNamespace(clock=SimpleNamespace(sec=7, nanosec=500_000_000)))
     robot._on_pose(SimpleNamespace(x=1.0, y=2.0, theta=0.3))
     assert robot._pose_samples[0][0] == 7.5
     np.testing.assert_allclose(robot.get_ground_truth_pose(7.5), [1.0, 2.0, 0.3])
@@ -370,12 +407,15 @@ def test_booster_studio_detection_coordinates_feed_shared_controller():
         size_x=20.0,
         size_y=10.0,
     )
-    robot._on_detections(SimpleNamespace(detections=[SimpleNamespace(results=[result], bbox=bbox)]))
+    robot._on_detections(
+        SimpleNamespace(detections=[SimpleNamespace(results=[result], bbox=bbox)])
+    )
     detection = robot.get_detections()[0]
     assert detection.label == "Ball"
     assert detection.bbox == (90, 75, 110, 85)
-    np.testing.assert_allclose(detection.position_3d, [0.5, 0.0, 2.0])
+    np.testing.assert_allclose(detection.position_3d, [2.0, 0.5, 0.0])
     assert detection.distance == np.hypot(2.0, 0.5)
+    assert detection.coordinate_frame == "body"
 
 
 def _fake_booster_sim(tmp_path):
@@ -402,7 +442,9 @@ def test_living_room_scene_is_well_formed_and_has_collision_content():
     assert len(root.findall(".//worldbody/geom[@type='box']")) == 3
 
     extension_root = ET.parse(SCENE_DIR / "living_room_K1.extensions.xml").getroot()
-    extension_names = {item.attrib["name"] for item in extension_root.findall("extension_process")}
+    extension_names = {
+        item.attrib["name"] for item in extension_root.findall("extension_process")
+    }
     assert extension_names == {
         "detection_extension",
         "rgb_publisher_extension",
@@ -437,7 +479,9 @@ def test_room_activation_is_reversible_and_does_not_overwrite_backup(tmp_path):
 
     install_room(sim_root, activate=True)
     scene_backup = default_scene.with_name(default_scene.name + BACKUP_SUFFIX)
-    extensions_backup = default_extensions.with_name(default_extensions.name + BACKUP_SUFFIX)
+    extensions_backup = default_extensions.with_name(
+        default_extensions.name + BACKUP_SUFFIX
+    )
     assert scene_backup.read_text() == original_scene
     assert extensions_backup.read_text() == original_extensions
     assert "Nero living room K1" in default_scene.read_text()

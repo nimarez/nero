@@ -7,7 +7,7 @@ Agent/Policy Loop:
 1. Show external camera stream of a space (both cameras)
 2. Detect objects in real-time and announce them via speaker
 3. Await user confirmation to follow a detected object
-4. Navigate to the confirmed object (target distance deduced by robot)
+4. Follow a dynamic world-frame goal pose derived from the confirmed object
 
 Usage:
     uv run nero-sim
@@ -27,7 +27,7 @@ from nero.simulation.environment import SimEnvironment
 from nero.simulation.sim_camera import CameraMode
 from nero.utils.visualization import Visualization
 from nero.navigation.policy import NavigationPolicy, PolicyState
-from nero.interaction import announce_and_confirm, deduce_target_distance
+from nero.interaction import announce_and_confirm
 
 logger = logging.getLogger(__name__)
 
@@ -150,15 +150,8 @@ def main():
                     should_follow = announce_and_confirm(speaker, obj_name)
                     if should_follow:
                         confirmed_object = obj_name
-                        target_distance = deduce_target_distance(
-                            obj_name, detection.distance
-                        )
-                        logger.info(
-                            f"Confirmed target: {confirmed_object} at "
-                            f"{target_distance:.2f}m"
-                        )
+                        logger.info("Confirmed dynamic target: %s", confirmed_object)
                         policy.set_target(confirmed_object)
-                        policy._goal.target_distance = target_distance
                         break
 
             # Get current policy state

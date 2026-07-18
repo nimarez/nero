@@ -88,8 +88,8 @@ class SimEnvironment:
             dx = object_x - robot_x
             dy = object_y - robot_y
             forward = dx * cos_yaw + dy * sin_yaw
-            lateral = -dx * sin_yaw + dy * cos_yaw
-            distance = math.hypot(forward, lateral)
+            left = -dx * sin_yaw + dy * cos_yaw
+            distance = math.hypot(forward, left)
             if forward <= 0:
                 continue
 
@@ -98,7 +98,8 @@ class SimEnvironment:
                     label=name,
                     confidence=1.0,
                     bbox=(0, 0, 1, 1),
-                    position_3d=np.array([lateral, 0.0, forward], dtype=float),
+                    # OpenCV optical coordinates: x right, y down, z forward.
+                    position_3d=np.array([-left, 0.0, forward], dtype=float),
                     distance=distance,
                 )
             )

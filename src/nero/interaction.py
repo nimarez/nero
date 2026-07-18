@@ -24,14 +24,14 @@ def announce_and_confirm(
     return response in {"y", "yes"}
 
 
-def deduce_target_distance(object_name: str, current_distance: float) -> float:
-    """Choose a safe stopping distance from object type and observed range."""
+def safe_stand_off_distance(object_name: str) -> float:
+    """Choose an internal safety radius from the detected object class."""
     furniture = {"table", "desk", "couch", "sofa", "bed", "chair", "cabinet", "shelf"}
     small_objects = {"bottle", "cup", "phone", "keys", "book", "lamp", "plant"}
     normalized_name = object_name.lower()
 
     if normalized_name in furniture:
-        return max(1.0, current_distance * 0.5)
+        return 1.0
     if normalized_name in small_objects:
-        return max(0.5, current_distance * 0.3)
-    return max(0.8, current_distance * 0.4)
+        return 0.7
+    return 0.8

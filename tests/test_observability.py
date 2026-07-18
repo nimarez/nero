@@ -17,6 +17,8 @@ def test_observability_topics_are_stable_and_namespaced():
     assert topics.rgb == "/nero/sensors/rgb"
     assert topics.pose == "/nero/slam/pose"
     assert topics.command == "/nero/navigation/cmd_vel"
+    assert topics.goal_pose == "/nero/navigation/goal_pose"
+    assert topics.object_position == "/nero/navigation/object_position"
     assert topics.reference_map == "/nero/reference/map_points"
 
 
@@ -121,6 +123,8 @@ def test_rerun_callbacks_create_a_real_recording():
     pose_stamped = SimpleNamespace(header=header, pose=pose)
     bridge._on_pose(pose_stamped)
     bridge._on_reference_pose(pose_stamped)
+    bridge._on_goal_pose(pose_stamped)
+    bridge._on_object_position(SimpleNamespace(header=header, point=position))
     bridge._on_path(SimpleNamespace(header=header, poses=[pose_stamped, pose_stamped]))
     bridge._on_reference_path(
         SimpleNamespace(header=header, poses=[pose_stamped, pose_stamped])
@@ -146,9 +150,7 @@ def test_rerun_callbacks_create_a_real_recording():
     bridge._on_detections(SimpleNamespace(header=header, detections=[detection]))
     bridge._on_status(SimpleNamespace(data='{"state":"navigating","message":"ok"}'))
     bridge._on_tracking(SimpleNamespace(data='{"status":"OK","map_points":1}'))
-    bridge._on_command(
-        SimpleNamespace(linear=vector, angular=SimpleNamespace(z=0.1))
-    )
+    bridge._on_command(SimpleNamespace(linear=vector, angular=SimpleNamespace(z=0.1)))
 
     recording.flush()
     assert len(memory.drain_as_bytes()) > 1_000

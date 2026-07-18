@@ -132,7 +132,9 @@ class BoosterStudioRobotInterface:
             else BoosterStudioTopics.IMU_CANDIDATES
         )
         self._subscriptions = [
-            self._node.create_subscription(CompressedImage, self._topics.rgb, self._on_rgb, 10),
+            self._node.create_subscription(
+                CompressedImage, self._topics.rgb, self._on_rgb, 10
+            ),
             self._node.create_subscription(
                 Image,
                 self._topics.depth,
@@ -142,10 +144,19 @@ class BoosterStudioRobotInterface:
             self._node.create_subscription(
                 CameraInfo, self._topics.camera_info, self._on_camera_info, 10
             ),
-            *(self._node.create_subscription(Imu, topic, self._on_imu, 50) for topic in imu_topics),
-            self._node.create_subscription(Pose2D, self._topics.pose, self._on_pose, 10),
-            self._node.create_subscription(Clock, self._topics.clock, self._on_clock, 50),
-            self._node.create_subscription(Odometry, self._topics.odom, self._on_odom, 10),
+            *(
+                self._node.create_subscription(Imu, topic, self._on_imu, 50)
+                for topic in imu_topics
+            ),
+            self._node.create_subscription(
+                Pose2D, self._topics.pose, self._on_pose, 10
+            ),
+            self._node.create_subscription(
+                Clock, self._topics.clock, self._on_clock, 50
+            ),
+            self._node.create_subscription(
+                Odometry, self._topics.odom, self._on_odom, 10
+            ),
             self._node.create_subscription(
                 Detection2DArray,
                 self._topics.detections,
@@ -294,7 +305,9 @@ class BoosterStudioRobotInterface:
         with self._ready:
             # The IMU header uses wall time, while camera headers use simulation
             # time. The latest /clock sample places both in one sensor domain.
-            timestamp = self._sim_time if self._sim_time is not None else time.monotonic()
+            timestamp = (
+                self._sim_time if self._sim_time is not None else time.monotonic()
+            )
             if self._imu_samples and timestamp <= self._imu_samples[-1][6]:
                 return
             sample = (*acceleration.tolist(), *gyro.tolist(), timestamp)
@@ -314,7 +327,9 @@ class BoosterStudioRobotInterface:
     def _on_pose(self, message: Any) -> None:
         with self._lock:
             self._pose = np.array([message.x, message.y, message.theta], dtype=float)
-            timestamp = self._sim_time if self._sim_time is not None else time.monotonic()
+            timestamp = (
+                self._sim_time if self._sim_time is not None else time.monotonic()
+            )
             self._pose_samples.append((timestamp, self._pose.copy()))
             if len(self._pose_samples) > 5000:
                 del self._pose_samples[:-2500]
@@ -325,7 +340,9 @@ class BoosterStudioRobotInterface:
                 # Discard any startup samples recorded with receipt time so the
                 # interpolation history contains exactly one clock domain.
                 self._pose_samples.clear()
-            self._sim_time = float(message.clock.sec) + float(message.clock.nanosec) * 1e-9
+            self._sim_time = (
+                float(message.clock.sec) + float(message.clock.nanosec) * 1e-9
+            )
 
     def _on_odom(self, message: Any) -> None:
         orientation = message.pose.pose.orientation
@@ -353,7 +370,9 @@ class BoosterStudioRobotInterface:
         after_time, after = self._pose_samples[index]
         weight = (timestamp - before_time) / (after_time - before_time)
         result = before + weight * (after - before)
-        yaw_delta = np.arctan2(np.sin(after[2] - before[2]), np.cos(after[2] - before[2]))
+        yaw_delta = np.arctan2(
+            np.sin(after[2] - before[2]), np.cos(after[2] - before[2])
+        )
         result[2] = before[2] + weight * yaw_delta
         return result
 
@@ -385,7 +404,7 @@ class BoosterStudioRobotInterface:
             # Booster Studio publishes the detection position in the K1 trunk
             # frame: +x forward, +y left. Nero's controller consumes
             # [lateral, vertical, forward].
-            position_3d = np.array([position.y, 0.0, position.x], dtype=float)
+            position_3d = np.array([position.x, position.y, position.z], dtype=float)
             center = getattr(item.bbox.center, "position", item.bbox.center)
             half_width = float(item.bbox.size_x) / 2.0
             half_height = float(item.bbox.size_y) / 2.0
@@ -402,6 +421,7 @@ class BoosterStudioRobotInterface:
                     bbox=bbox,
                     position_3d=position_3d,
                     distance=float(np.hypot(position.x, position.y)),
+                    coordinate_frame="body",
                 )
             )
         with self._lock:
@@ -413,7 +433,13 @@ class BoosterStudioRobotInterface:
         with self._ready:
             while not all(
                 value is not None
-                for value in (self._rgb, self._depth, self._camera_info, self._imu, self._odom)
+                for value in (
+                    self._rgb,
+                    self._depth,
+                    self._camera_info,
+                    self._imu,
+                    self._odom,
+                )
             ):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -450,8 +476,10 @@ class BoosterStudioRobotInterface:
                 )
             if self._expected_calibration is not None:
                 expected = (
-                    self._expected_calibration.depth_height or self._expected_calibration.height,
-                    self._expected_calibration.depth_width or self._expected_calibration.width,
+                    self._expected_calibration.depth_height
+                    or self._expected_calibration.height,
+                    self._expected_calibration.depth_width
+                    or self._expected_calibration.width,
                 )
                 if expected_shape != expected:
                     raise RuntimeError(
@@ -492,7 +520,9 @@ class BoosterStudioRobotInterface:
                 timeout=duration + 0.5,
             )
             rgb_times = [value for value in self._rgb_timestamps if value > rgb_marker]
-            imu_times = [sample[6] for sample in self._imu_samples if sample[6] > imu_marker]
+            imu_times = [
+                sample[6] for sample in self._imu_samples if sample[6] > imu_marker
+            ]
         return (
             estimate_frequency(rgb_times, "simulated camera"),
             estimate_frequency(imu_times, "simulated IMU"),
@@ -512,7 +542,8 @@ class BoosterStudioRobotInterface:
                     sample
                     for sample in self._imu_samples
                     if (
-                        self._last_frame_timestamp is None or sample[6] > self._last_frame_timestamp
+                        self._last_frame_timestamp is None
+                        or sample[6] > self._last_frame_timestamp
                     )
                     and sample[6] <= frame_timestamp
                 ]

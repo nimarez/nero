@@ -17,7 +17,7 @@ import time
 import cv2
 
 from nero.robot import RobotInterface
-from nero.interaction import announce_and_confirm, deduce_target_distance
+from nero.interaction import announce_and_confirm
 from nero.utils.visualization import Visualization
 from nero.navigation.policy import NavigationPolicy, PolicyState
 from nero.observability import RosObservabilityPublisher
@@ -130,15 +130,8 @@ def run_agent(
                         should_follow = False
                     if should_follow:
                         target_object = object_name
-                        target_distance = deduce_target_distance(
-                            object_name, detection.distance
-                        )
                         policy.set_target(object_name)
-                        policy._goal.target_distance = target_distance
-                        logger.info(
-                            f"Confirmed target: {object_name}; "
-                            f"stopping distance: {target_distance:.2f}m"
-                        )
+                        logger.info("Confirmed dynamic target: %s", object_name)
                         break
 
                 frame_with_text = viz.draw_navigation_info(

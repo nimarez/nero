@@ -109,10 +109,14 @@ takes precedence over the nominal profile.
 The default single-robot topics match Booster Studio's installed K1 simulator.
 For a named/multi-robot scene, override them with `--rgb-topic`, `--depth-topic`,
 `--camera-info-topic`, `--imu-topic`, `--pose-topic`, and `--detections-topic`.
-Object names and target
-distances remain intentionally absent from the CLI: detections are live, the
-simulated speaker announces each candidate in the terminal, and a human confirms
-before motion begins.
+Object names and target distances remain intentionally absent from the CLI:
+detections are live, the simulated speaker announces each candidate in the
+terminal, and a human confirms before motion begins. After confirmation, each
+fresh 3D observation is transformed into the SLAM world frame and filtered into
+an object track. Nero derives a dynamic `(x, y, yaw)` approach pose that faces the
+object from an internal safety radius; both position and heading must converge.
+Brief occlusions use the last world-frame goal, never stale camera-relative
+coordinates, and an expired track stops the robot.
 
 ### Sim-reference benchmark
 
@@ -164,10 +168,11 @@ Then start the bridge in a Booster Studio terminal:
 Run `nero-booster-studio`, `nero-mapping`, or `nero-sim-benchmark` in another
 Studio terminal. Rerun will show synchronized RGB and metric depth, intrinsics,
 IMU plots, estimated and reference transforms/paths/map points, detections,
-tracking and navigation status, and velocity commands. To record without a live
-viewer, run `uv run --extra viz nero-rerun --save output/nero.rrd` inside the
-ROS environment. The Rerun dependency is an optional uv extra so headless robot
-runtimes do not install visualization packages.
+the tracked world-space object, dynamic goal pose, tracking and navigation
+status, and velocity commands. To record without a live viewer, run
+`uv run --extra viz nero-rerun --save output/nero.rrd` inside the ROS environment.
+The Rerun dependency is an optional uv extra so headless robot runtimes do not
+install visualization packages.
 
 ### Furnished-room scene
 

@@ -21,6 +21,7 @@ class ObjectDetection:
     bbox: tuple[int, int, int, int]  # (x_min, y_min, x_max, y_max)
     position_3d: Optional[np.ndarray] = None  # [x, y, z] in camera frame
     distance: float = 0.0  # Euclidean distance to object
+    coordinate_frame: str = "camera"  # "camera" or "body"
 
     @property
     def center(self) -> tuple[float, float]:
