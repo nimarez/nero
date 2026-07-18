@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import socket
+from collections.abc import Iterator
 
 import numpy as np
 import pytest
@@ -90,3 +91,34 @@ def test_udp_loopback_tracks_sequence_and_latency() -> None:
     assert received_second.latency_s == pytest.approx(0.010)
     assert received_second.dropped_since_previous == 0
     assert not received_second.out_of_order
+
+
+def test_stream_filters_lighthouses_and_selects_device() -> None:
+    class FakeSource:
+        def poll(self) -> Iterator[TimedPose]:
+            for name in ("LH0", "WW0", "WW1"):
+                yield TimedPose(
+                    name=name,
+                    timestamp=0.0,
+                    position=np.zeros(3),
+                    quaternion_xyzw=np.array([0.0, 0.0, 0.0, 1.0]),
+                )
+
+    class FakeSocket:
+        def __init__(self) -> None:
+            self.datagrams: list[bytes] = []
+
+        def sendto(self, data: bytes, destination: tuple[str, int]) -> None:
+            self.datagrams.append(data)
+
+    fake_socket = FakeSocket()
+    publisher = PoseUdpPublisher(
+        sock=fake_socket,  # type: ignore[arg-type]
+        device_id="WW1",
+        wall_clock=lambda: 1000.0,
+        monotonic_clock=lambda: 10.0,
+    )
+    publisher.stream(FakeSource())
+
+    assert len(fake_socket.datagrams) == 1
+    assert PosePacket.decode(fake_socket.datagrams[0]).controller_id == "WW1"

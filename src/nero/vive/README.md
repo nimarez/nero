@@ -73,7 +73,7 @@ On the Pi, with this repo and libsurvive installed:
 ```bash
 export PYTHONPATH=$PWD/src:$HOME/src/libsurvive/bindings/python
 export LD_LIBRARY_PATH=$HOME/src/libsurvive/bin
-uv run nero-vive-udp-send --host 10.77.0.1 --port 43100 --lighthouse-count 1
+uv run nero-vive-udp-send --host 10.77.0.1 --port 43100 --device WW0 --lighthouse-count 1
 ```
 
 Each datagram is versioned JSON and contains:

@@ -181,11 +181,13 @@ class PoseUdpPublisher:
         wall_clock: Callable[[], float] = time.time,
         monotonic_clock: Callable[[], float] = time.monotonic,
         sock: socket.socket | None = None,
+        device_id: str | None = None,
     ) -> None:
         self.destination = (host, port)
         self._wall_clock = wall_clock
         self._monotonic_clock = monotonic_clock
         self._socket = sock or socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._device_id = device_id
         self._sequence = 0
         self._kinematics: dict[str, PoseKinematics] = {}
 
@@ -216,6 +218,10 @@ class PoseUdpPublisher:
 
     def stream(self, source: PoseSource) -> None:
         for pose in source.poll():
+            if pose.name.startswith("LH"):
+                continue
+            if self._device_id is not None and pose.name != self._device_id:
+                continue
             packet = self.send_pose(pose)
             if packet.sequence and packet.sequence % 100 == 0:
                 logger.info(
@@ -287,10 +293,11 @@ def publisher_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Publish libsurvive Vive poses over UDP")
     parser.add_argument("--host", default=DEFAULT_HOST, help="POS destination address")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--device", help="Only publish this libsurvive device, for example WW0")
     args, survive_args = parser.parse_known_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     source = VivePoseSource(survive_args or DEFAULT_SURVIVE_ARGS)
-    PoseUdpPublisher(args.host, args.port).stream(source)
+    PoseUdpPublisher(args.host, args.port, device_id=args.device).stream(source)
     return 0
 
 
