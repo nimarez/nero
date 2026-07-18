@@ -28,6 +28,7 @@ from nero.navigation.policy import NavigationPolicy, PolicyState
 from nero.navigation.map_policy import MapNavConfig
 from nero.navigation.global_localization import GlobalLocalizationConfig
 from nero.observability import RosObservabilityPublisher
+from nero.perception.object_detector import configure_qualcomm_cpu_partition
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +139,10 @@ def run_agent(
     announced_arrival = False
     commands = command_source or TerminalCommandSource()
     target_listener = NavigationTargetListener(
-        robot, commands, cancelled=lambda: shutdown_event
+        robot,
+        commands,
+        cancelled=lambda: shutdown_event,
+        target_validator=getattr(policy, "supports_target", None),
     )
     target_listener.start()
 
@@ -287,6 +291,8 @@ def main():
         level=log_level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+
+    configure_qualcomm_cpu_partition()
 
     logger.info("Starting Nero ORB-SLAM Agent")
     logger.info("Sensors: K1 built-in RGB-D camera")

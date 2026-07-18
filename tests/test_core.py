@@ -5,6 +5,7 @@ import stat
 import sys
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -124,9 +125,7 @@ def test_robot_consumes_official_battery_soc_and_waits_for_a_new_rgbd_frame():
 
     def image(stamp):
         return SimpleNamespace(
-            header=SimpleNamespace(
-                stamp=SimpleNamespace(sec=int(stamp), nanosec=0)
-            )
+            header=SimpleNamespace(stamp=SimpleNamespace(sec=int(stamp), nanosec=0))
         )
 
     robot._rgb = image(1)
@@ -214,7 +213,9 @@ def test_yolo_world_accepts_arbitrary_target_and_runs_asynchronously(
         "torch",
         SimpleNamespace(
             set_num_threads=thread_counts.append,
-            set_num_interop_threads=lambda count: thread_counts.append(("interop", count)),
+            set_num_interop_threads=lambda count: thread_counts.append(
+                ("interop", count)
+            ),
         ),
     )
     model_path = tmp_path / "world.pt"
@@ -222,7 +223,7 @@ def test_yolo_world_accepts_arbitrary_target_and_runs_asynchronously(
     detector = ObjectDetector(model_path=model_path)
     assert detector.initialize()
     assert thread_counts == [4, ("interop", 1)]
-    assert detector.inference_size == 384
+    assert detector.inference_size == 256
     detector.set_target("unusual brass umbrella stand")
     rgb = np.zeros((10, 10, 3), dtype=np.uint8)
     depth = np.full((10, 10), 1000, dtype=np.uint16)
@@ -255,6 +256,107 @@ def test_yolo_world_runtime_tuning_is_validated(tmp_path, monkeypatch):
         ObjectDetector(model_path=model_path, inference_size=400)
     with np.testing.assert_raises_regex(ValueError, "must be positive"):
         ObjectDetector(model_path=model_path, max_detections=0)
+
+
+def test_yoloe_cpu_backend_accepts_arbitrary_target_asynchronously(
+    monkeypatch, tmp_path
+):
+    class Tensor:
+        def __init__(self, values):
+            self._values = np.asarray(values)
+
+        def detach(self):
+            return self
+
+        def cpu(self):
+            return self
+
+        def numpy(self):
+            return self._values
+
+    models = []
+
+    class FakeYOLOE:
+        def __init__(self, path):
+            self.path = path
+            self.classes = []
+            models.append(self)
+
+        def set_classes(self, classes):
+            self.classes = list(classes)
+
+        def predict(self, *_args, **kwargs):
+            assert kwargs["device"] == "cpu"
+            assert kwargs["imgsz"] == 320
+            boxes = SimpleNamespace(
+                xyxy=Tensor([[2, 2, 8, 8]]),
+                conf=Tensor([0.91]),
+                cls=Tensor([0]),
+            )
+            return [SimpleNamespace(boxes=boxes, names={0: self.classes[0]})]
+
+    settings = {}
+    monkeypatch.setitem(
+        sys.modules,
+        "ultralytics",
+        SimpleNamespace(SETTINGS=settings, YOLOE=FakeYOLOE),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(set_num_threads=lambda _count: None),
+    )
+    model_path = tmp_path / "cpu-open-vocab.pt"
+    model_path.write_bytes(b"weights")
+    text_model_path = tmp_path / "mobileclip2_b.ts"
+    text_model_path.write_bytes(b"text weights")
+    detector = ObjectDetector(
+        backend="yoloe",
+        model_path=model_path,
+        text_model_path=text_model_path,
+    )
+
+    assert detector.backend == "yoloe"
+    assert detector.inference_size == 320
+    assert detector.initialize()
+    assert settings["weights_dir"] == str(tmp_path.resolve())
+    assert models[0].path == str(model_path)
+    detector.set_target("striped ceramic flower pot")
+
+    rgb = np.zeros((10, 10, 3), dtype=np.uint8)
+    assert detector.detect(rgb) == []
+    for _ in range(100):
+        detections = detector.detect(rgb)
+        if detector.result_revision:
+            break
+        time.sleep(0.001)
+
+    assert detector.result_revision == 1
+    assert detections[0].label == "striped ceramic flower pot"
+    assert detections[0].confidence == 0.91
+    assert detections[0].position_3d is None
+    detector.close()
+
+
+def test_object_backend_configuration_selects_defaults(monkeypatch):
+    monkeypatch.delenv("NERO_OBJECT_BACKEND", raising=False)
+    default = ObjectDetector()
+    assert default.backend == "yolo-world"
+    assert default.model_path == Path("config/yolov8s-worldv2.pt")
+    assert default.inference_size == 256
+
+    monkeypatch.setenv("NERO_OBJECT_BACKEND", "yoloe")
+    detector = ObjectDetector()
+    assert detector.backend == "yoloe"
+    assert detector.model_path == Path("config/yoloe-26n-seg.pt")
+    assert detector.inference_size == 320
+
+    monkeypatch.delenv("NERO_OBJECT_BACKEND")
+    inferred = ObjectDetector(model_path="weights/custom-yoloe-26n.pt")
+    assert inferred.backend == "yoloe"
+
+    with np.testing.assert_raises_regex(ValueError, "unsupported object detector"):
+        ObjectDetector(backend="not-a-backend")
 
 
 def test_hardware_agent_clis_use_k1_sensors_implicitly(monkeypatch):
@@ -314,6 +416,16 @@ def test_go_to_command_parser_accepts_natural_object_names():
     assert parse_go_to_command("go to") is None
 
 
+def test_terminal_target_normalizes_a_missing_to_typo():
+    from nero.interaction import _parse_bare_object_name
+
+    assert _parse_bare_object_name("go the green can") == "green can"
+    assert (
+        _parse_bare_object_name("please go to a fire extinguisher")
+        == "fire extinguisher"
+    )
+
+
 def test_direction_acknowledges_target_without_detection_confirmation():
     spoken = []
     events = []
@@ -332,6 +444,27 @@ def test_direction_acknowledges_target_without_detection_confirmation():
     assert events[:3] == ["start", "stop", "speak"]
 
 
+def test_direction_rejects_unsupported_fixed_vocabulary_target():
+    responses = iter(["fire extinguisher", "sofa"])
+    acknowledgements = []
+    commands = SimpleNamespace(
+        accepts_bare_object_names=True,
+        start_listening=lambda: None,
+        read_command=lambda _: next(responses),
+        acknowledge=acknowledgements.append,
+        stop_listening=lambda: None,
+    )
+
+    target = request_navigation_target(
+        SimpleNamespace(speak=lambda _: None),
+        commands,
+        target_validator=lambda name: name == "sofa",
+    )
+
+    assert target == "sofa"
+    assert acknowledgements == ["unsupported", "accepted"]
+
+
 def test_terminal_accepts_a_bare_object_name(monkeypatch):
     prompts = []
     monkeypatch.setattr(
@@ -339,9 +472,12 @@ def test_terminal_accepts_a_bare_object_name(monkeypatch):
         lambda prompt: (prompts.append(prompt), "the red chair")[1],
     )
 
-    assert request_navigation_target(
-        SimpleNamespace(speak=lambda _: None), TerminalCommandSource()
-    ) == "red chair"
+    assert (
+        request_navigation_target(
+            SimpleNamespace(speak=lambda _: None), TerminalCommandSource()
+        )
+        == "red chair"
+    )
     assert prompts == ["Object to follow (for example, 'chair'): "]
 
 
@@ -354,9 +490,7 @@ def test_unix_socket_command_source_accepts_object_and_is_private():
     result = []
     listener = threading.Thread(
         target=lambda: result.append(
-            request_navigation_target(
-                SimpleNamespace(speak=lambda _: None), commands
-            )
+            request_navigation_target(SimpleNamespace(speak=lambda _: None), commands)
         )
     )
     listener.start()
@@ -378,9 +512,7 @@ def test_unix_socket_rejects_invalid_commands_and_closes_admission_while_busy():
     result = []
     listener = threading.Thread(
         target=lambda: result.append(
-            request_navigation_target(
-                SimpleNamespace(speak=lambda _: None), commands
-            )
+            request_navigation_target(SimpleNamespace(speak=lambda _: None), commands)
         )
     )
     listener.start()
@@ -423,9 +555,12 @@ def test_unavailable_speaker_does_not_discard_terminal_target(monkeypatch):
     def unavailable_speaker(_: str) -> None:
         raise RuntimeError("LUI TTS unavailable")
 
-    assert request_navigation_target(
-        SimpleNamespace(speak=unavailable_speaker), TerminalCommandSource()
-    ) == "chair"
+    assert (
+        request_navigation_target(
+            SimpleNamespace(speak=unavailable_speaker), TerminalCommandSource()
+        )
+        == "chair"
+    )
 
 
 def test_direction_wait_can_be_cancelled_cleanly():
@@ -465,9 +600,7 @@ def test_navigation_target_listener_does_not_block_sensor_loop():
         stop_listening=lambda: None,
         close=lambda: None,
     )
-    listener = NavigationTargetListener(
-        SimpleNamespace(speak=lambda _: None), commands
-    )
+    listener = NavigationTargetListener(SimpleNamespace(speak=lambda _: None), commands)
     listener.start()
     assert listener.poll() is None
     released.set()

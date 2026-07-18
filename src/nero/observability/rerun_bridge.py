@@ -126,6 +126,7 @@ class RerunRosBridge:
             (String, self._topics.tracking, self._on_tracking, 10),
             (String, self._topics.status, self._on_status, 10),
             (Twist, self._topics.command, self._on_command, 10),
+            (RosPath, self._topics.plan, self._on_plan, 1),
             (PoseStamped, self._topics.goal_pose, self._on_goal_pose, 10),
             (PointStamped, self._topics.object_position, self._on_object_position, 10),
             (PoseStamped, self._topics.reference_pose, self._on_reference_pose, 10),
@@ -275,9 +276,14 @@ class RerunRosBridge:
         ]
         if len(points) >= 2:
             self._recording.log(entity, self._rr.LineStrips3D([points], colors=color, radii=0.01))
+        else:
+            self._recording.log(entity, self._rr.Clear(recursive=False))
 
     def _on_path(self, message: Any) -> None:
         self._log_path(message, "world/slam/trajectory", [0, 200, 255])
+
+    def _on_plan(self, message: Any) -> None:
+        self._log_path(message, "world/navigation/plan", [80, 255, 80])
 
     def _on_reference_path(self, message: Any) -> None:
         self._log_path(message, "world/reference/trajectory", [255, 180, 0])

@@ -15,6 +15,13 @@ dependencies = [
 
 [project.optional-dependencies]
 viz = ["rerun-sdk==0.22.1"]
+ai-hub = [
+    "onnx>=1.17,<2",
+    "onnxruntime>=1.20,<2",
+    "qai-hub==0.52.0",
+    "torch>=2.5,<3",
+    "ultralytics==8.3.228",
+]
 
 [dependency-groups]
 dev = [
@@ -36,6 +43,7 @@ nero-orb-slam = "nero.agents.orb_slam_agent:main"
 nero-sim = "nero.agents.sim_agent:main"
 nero-booster-studio = "nero.agents.booster_studio_agent:main"
 nero-sim-benchmark = "nero.agents.sim_benchmark_agent:main"
+nero-perception-benchmark = "nero.agents.perception_benchmark_agent:main"
 nero-mapping = "nero.agents.mapping_agent:main"
 nero-map-nav = "nero.agents.map_nav_agent:main"
 nero-pc2map = "nero.utils.pointcloud_converter:main"
@@ -45,6 +53,8 @@ nero-setup-booster-room = "nero.simulation.booster_studio_room:main"
 nero-rerun = "nero.observability.rerun_bridge:main"
 nero-command = "nero.remote_command:main"
 nero-command-relay = "nero.remote_command:relay_main"
+nero-export-yolo-world = "nero.perception.yolo_world_export:main"
+nero-ai-hub-profile = "nero.perception.ai_hub_profile:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

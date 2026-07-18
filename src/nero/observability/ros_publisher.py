@@ -103,6 +103,7 @@ class RosObservabilityPublisher:
             "tracking": self._node.create_publisher(String, self._topics.tracking, 10),
             "status": self._node.create_publisher(String, self._topics.status, 10),
             "command": self._node.create_publisher(Twist, self._topics.command, 10),
+            "plan": self._node.create_publisher(Path, self._topics.plan, 1),
             "goal_pose": self._node.create_publisher(PoseStamped, self._topics.goal_pose, 10),
             "object_position": self._node.create_publisher(
                 PointStamped, self._topics.object_position, 10
@@ -120,6 +121,8 @@ class RosObservabilityPublisher:
         }
         self._path = Path()
         self._path.header.frame_id = map_frame
+        self._plan = Path()
+        self._plan.header.frame_id = map_frame
         self._reference_path = Path()
         self._reference_path.header.frame_id = map_frame
         self._last_sensor_timestamp: float | None = None
@@ -266,6 +269,8 @@ class RosObservabilityPublisher:
             twist.angular.z = float(command.angular_z)
         self._publishers["command"].publish(twist)
 
+        self.publish_plan(getattr(status, "planned_path", None), timestamp)
+
         pose = getattr(status, "current_pose", None)
         if pose is not None:
             matrix = np.eye(4)
@@ -296,6 +301,25 @@ class RosObservabilityPublisher:
             )
             self._publishers["object_position"].publish(point)
         self.publish_detections(getattr(status, "detections", []), timestamp)
+
+    def publish_plan(self, points: Any, timestamp: float) -> None:
+        """Publish the current controller route, including an empty path to clear it."""
+        path = self._types["Path"]()
+        self._header(path, timestamp, self._map_frame)
+        if points is not None:
+            values = np.asarray(points, dtype=float)
+            if values.size:
+                values = values.reshape(-1, 3)
+                for value in values:
+                    pose = self._types["PoseStamped"]()
+                    self._header(pose, timestamp, self._map_frame)
+                    pose.pose.position.x = float(value[0])
+                    pose.pose.position.y = float(value[1])
+                    pose.pose.position.z = float(value[2])
+                    pose.pose.orientation.w = 1.0
+                    path.poses.append(pose)
+        self._plan = path
+        self._publishers["plan"].publish(path)
 
     def publish_pose(
         self, matrix: np.ndarray, timestamp: float, *, reference: bool = False

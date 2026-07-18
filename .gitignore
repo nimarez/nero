@@ -17,3 +17,5 @@ config/booster_studio_k1_calibration.json
 config/booster_studio_k1_imu_rgbd.yaml
 config/*.onnx
 config/*.pt
+config/*.ts
+.env.aihub

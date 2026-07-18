@@ -86,6 +86,9 @@ class PolicyStatus:
     message: str = ""
     detections: list[ObjectDetection] = field(default_factory=list)
     robot_pose: Optional[np.ndarray] = None  # [x, y, yaw] for sim mode
+    planned_path: np.ndarray = field(
+        default_factory=lambda: np.empty((0, 3), dtype=float)
+    )  # Nx3 active-frame path for observability
 
 
 class NavigationPolicy:
@@ -120,6 +123,10 @@ class NavigationPolicy:
         object_track_timeout: float = 1.0,
         object_position_filter: float = 0.35,
         goal_yaw_tolerance: float = 0.15,
+        slam_bootstrap_angular_velocity: float = 0.18,
+        slam_bootstrap_leg_seconds: float = 2.0,
+        slam_bootstrap_timeout: float = 20.0,
+        object_search_angular_velocity: float = 0.08,
         map_config: MapNavConfig | None = None,
         enable_object_detection: bool = True,
     ):
@@ -144,7 +151,9 @@ class NavigationPolicy:
 
         self.object_detector = None
         if enable_object_detection:
-            self.object_detector = object_detector or ObjectDetector()
+            self.object_detector = object_detector or ObjectDetector(
+                backend="yolo-world" if self._is_sim else None
+            )
         self.map_navigator = (
             MapNavigator(map_config) if map_config is not None else None
         )
@@ -170,19 +179,40 @@ class NavigationPolicy:
 
         # Tracking
         self._object_not_found_count = 0
-        self._max_object_not_found = 10  # frames before giving up
+        self._max_object_not_found = 20  # completed detector results before giving up
         self._navigation_timeout = 120.0  # seconds (longer for sim)
         self._last_detection: Optional[ObjectDetection] = None
         self._last_detection_revision: int | None = None
+        self._slam_ever_tracked = False
+        self._slam_bootstrap_started: float | None = None
+        self._object_search_started: float | None = None
         if object_track_timeout <= 0:
             raise ValueError("object_track_timeout must be positive")
         if not 0 < object_position_filter <= 1:
             raise ValueError("object_position_filter must be in (0, 1]")
         if goal_yaw_tolerance <= 0:
             raise ValueError("goal_yaw_tolerance must be positive")
+        if not (
+            0 < slam_bootstrap_angular_velocity <= self.controller.max_angular_velocity
+        ):
+            raise ValueError(
+                "slam_bootstrap_angular_velocity must be positive and within the controller limit"
+            )
+        if slam_bootstrap_leg_seconds <= 0 or slam_bootstrap_timeout <= 0:
+            raise ValueError("SLAM bootstrap durations must be positive")
+        if not (
+            0 < object_search_angular_velocity <= self.controller.max_angular_velocity
+        ):
+            raise ValueError(
+                "object_search_angular_velocity must be positive and within the controller limit"
+            )
         self._object_track_timeout = object_track_timeout
         self._object_position_filter = object_position_filter
         self._goal_yaw_tolerance = goal_yaw_tolerance
+        self._slam_bootstrap_angular_velocity = slam_bootstrap_angular_velocity
+        self._slam_bootstrap_leg_seconds = slam_bootstrap_leg_seconds
+        self._slam_bootstrap_timeout = slam_bootstrap_timeout
+        self._object_search_angular_velocity = object_search_angular_velocity
 
     def start(self) -> PolicyStatus:
         """Start the navigation policy.
@@ -192,6 +222,9 @@ class NavigationPolicy:
         logger.info(f"Starting navigation policy (sim={self._is_sim})")
         self._running = False
         self._start_time = time.time()
+        self._slam_ever_tracked = False
+        self._slam_bootstrap_started = None
+        self._object_search_started = None
 
         try:
             if self.map_navigator is not None and self.map_navigator.grid is None:
@@ -226,6 +259,13 @@ class NavigationPolicy:
         self._update_status(message="Camera stream ready. Waiting for object name...")
         return self._status
 
+    def supports_target(self, object_name: str) -> bool:
+        """Whether the configured detector can admit this object command."""
+        if self.object_detector is None:
+            return False
+        supports = getattr(self.object_detector, "supports_target", None)
+        return bool(supports(object_name)) if callable(supports) else True
+
     def set_target(self, object_name: str) -> PolicyStatus:
         """Set the target object to navigate to.
 
@@ -246,6 +286,14 @@ class NavigationPolicy:
         logger.info(f"Target object set: {object_name}")
         if self.object_detector is None:
             return self._update_status(message="Object detection is disabled")
+        resolve_target = getattr(self.object_detector, "resolve_target", None)
+        if callable(resolve_target):
+            resolved_target = resolve_target(object_name)
+            if resolved_target is None:
+                return self._update_status(
+                    message=f"Object class '{object_name}' is not supported"
+                )
+            object_name = resolved_target
         set_detector_target = getattr(self.object_detector, "set_target", None)
         if callable(set_detector_target):
             set_detector_target(object_name)
@@ -260,6 +308,8 @@ class NavigationPolicy:
             else PolicyState.DETECTING
         )
         self._object_not_found_count = 0
+        self._slam_bootstrap_started = None
+        self._object_search_started = None
         self._start_time = time.time()
         self._update_status(message=f"Searching for '{object_name}'...")
         return self._status
@@ -336,6 +386,22 @@ class NavigationPolicy:
                 )
             if not localized.safety_status.is_safe:
                 self._stop_robot()
+                min_distance = float(
+                    localized.obstacle_info.get("min_distance", float("inf"))
+                )
+                obstacle_limit = float(
+                    getattr(self.safety, "min_obstacle_distance", 0.25)
+                )
+                if min_distance < obstacle_limit:
+                    return self._update_status(
+                        current_pose=localized.fused_pose,
+                        safety_status=localized.safety_status,
+                        velocity_command=VelocityCommand(),
+                        message=(
+                            f"Motion blocked by obstacle at {min_distance:.2f}m; "
+                            "move it clear to resume"
+                        ),
+                    )
                 return self._update_status(
                     state=PolicyState.ERROR,
                     current_pose=localized.fused_pose,
@@ -345,20 +411,30 @@ class NavigationPolicy:
             if localized.slam_pose.tracking_status != "OK":
                 self._stop_robot()
                 waiting = self._goal is None
+                command = VelocityCommand()
                 self._state = (
-                    PolicyState.LOCALIZING
-                    if self.map_navigator is not None
-                    else PolicyState.WAITING_FOR_OBJECT if waiting else PolicyState.LOST
+                    PolicyState.WAITING_FOR_OBJECT
+                    if waiting and self.map_navigator is None
+                    else PolicyState.LOCALIZING
                 )
+                message = (
+                    "Waiting for ORB-SLAM tracking"
+                    if waiting
+                    else "ORB-SLAM tracking lost; holding target"
+                )
+                if not waiting and not self._slam_ever_tracked:
+                    command, message = self._slam_bootstrap_command(localized)
+                    if command.angular_z:
+                        send_velocity(self.robot, command)
                 return self._update_status(
                     current_pose=localized.fused_pose,
                     safety_status=localized.safety_status,
-                    message=(
-                        "Waiting for ORB-SLAM tracking"
-                        if waiting
-                        else "ORB-SLAM tracking lost"
-                    ),
+                    velocity_command=command,
+                    message=message,
                 )
+
+            self._slam_ever_tracked = True
+            self._slam_bootstrap_started = None
 
             if self.map_navigator is not None:
                 try:
@@ -402,6 +478,15 @@ class NavigationPolicy:
                         self._state = PolicyState.PLANNING
                     else:
                         self._state = PolicyState.DETECTING
+            elif self._state == PolicyState.LOCALIZING:
+                if self._goal is None:
+                    self._state = PolicyState.WAITING_FOR_OBJECT
+                elif self._goal.kind == "pose":
+                    self._state = PolicyState.PLANNING
+                elif self._goal.approach_pose is None:
+                    self._state = PolicyState.DETECTING
+                else:
+                    self._state = PolicyState.NAVIGATING
 
             # Process based on state
             if self._state == PolicyState.SHOWING_CAMERA:
@@ -412,7 +497,7 @@ class NavigationPolicy:
                 return self._update_status(message="Waiting for object name...")
 
             elif self._state == PolicyState.DETECTING:
-                return self._step_detecting(sensor_data)
+                return self._step_detecting(sensor_data, localized)
 
             elif self._state in (
                 PolicyState.PLANNING,
@@ -604,7 +689,63 @@ class NavigationPolicy:
         elif self.robot:
             send_velocity(self.robot)
 
-    def _step_detecting(self, sensor_data: SensorFrame) -> PolicyStatus:
+    def _slam_bootstrap_command(
+        self, localized: LocalizedFrame
+    ) -> tuple[VelocityCommand, str]:
+        """Create bounded in-place excitation for first IMU-RGBD initialization."""
+        obstacle_info = localized.obstacle_info
+        min_distance = float(obstacle_info.get("min_distance", 0.0))
+        if obstacle_info.get("sensor_blind", False) or obstacle_info.get(
+            "has_obstacle", True
+        ):
+            return VelocityCommand(), (
+                "IMU-RGBD initialization needs motion, but the localization spin "
+                f"is blocked by depth at {min_distance:.2f}m"
+            )
+
+        now = time.monotonic()
+        if self._slam_bootstrap_started is None:
+            self._slam_bootstrap_started = now
+        elapsed = now - self._slam_bootstrap_started
+        if elapsed >= self._slam_bootstrap_timeout:
+            self._state = PolicyState.LOST
+            return VelocityCommand(), "IMU-RGBD initialization motion timed out"
+
+        leg = int(elapsed / self._slam_bootstrap_leg_seconds)
+        direction = 1.0 if leg % 2 == 0 else -1.0
+        command = VelocityCommand(
+            angular_z=direction * self._slam_bootstrap_angular_velocity
+        )
+        return command, (
+            "Initializing IMU-RGBD with guarded in-place motion "
+            f"({elapsed:.1f}/{self._slam_bootstrap_timeout:.0f}s)"
+        )
+
+    def _object_search_command(
+        self, localized: LocalizedFrame
+    ) -> tuple[VelocityCommand, str]:
+        """Scan slowly for the requested object without translating."""
+        obstacle_info = localized.obstacle_info
+        min_distance = float(obstacle_info.get("min_distance", 0.0))
+        if obstacle_info.get("sensor_blind", False) or obstacle_info.get(
+            "has_obstacle", True
+        ):
+            return (
+                VelocityCommand(),
+                f"search spin blocked by depth at {min_distance:.2f}m",
+            )
+        if self._object_search_started is None:
+            self._object_search_started = time.monotonic()
+        elapsed = time.monotonic() - self._object_search_started
+        direction = 1.0 if int(elapsed / 15.0) % 2 == 0 else -1.0
+        return (
+            VelocityCommand(angular_z=direction * self._object_search_angular_velocity),
+            "scanning in place",
+        )
+
+    def _step_detecting(
+        self, sensor_data: SensorFrame, localized: LocalizedFrame
+    ) -> PolicyStatus:
         """Step in DETECTING state."""
         rgb = sensor_data.rgb
         depth = sensor_data.depth
@@ -614,11 +755,23 @@ class NavigationPolicy:
         detections = self._matching_target_detections(
             self.object_detector.detect(rgb, depth, camera_info)
         )
+        local_pose = localized.fused_pose.position_2d
+        robot_pose = (
+            self.map_navigator.to_map_pose(local_pose)
+            if self.map_navigator is not None
+            else local_pose
+        )
+        status_pose = self._pose_in_active_frame(localized.fused_pose, robot_pose)
+        search_command, search_detail = self._object_search_command(localized)
         revision = getattr(self.object_detector, "result_revision", None)
         if revision is not None and revision == self._last_detection_revision:
+            send_velocity(self.robot, search_command)
             return self._update_status(
+                current_pose=status_pose,
+                safety_status=localized.safety_status,
+                velocity_command=search_command,
                 detections=detections,
-                message=f"Searching for '{self._goal.object_name}'...",
+                message=f"Searching for '{self._goal.object_name}'; {search_detail}",
             )
         self._last_detection_revision = revision
         target = self.object_detector.find_object(detections, self._goal.object_name)
@@ -628,8 +781,13 @@ class NavigationPolicy:
             self._goal.detection = target
             self._goal.last_observed_monotonic = time.monotonic()
             self._object_not_found_count = 0
+            self._object_search_started = None
             self._state = PolicyState.NAVIGATING
+            self._stop_robot()
             return self._update_status(
+                current_pose=status_pose,
+                safety_status=localized.safety_status,
+                velocity_command=VelocityCommand(),
                 detections=detections,
                 message=f"Found '{self._goal.object_name}'; acquiring world-frame goal",
             )
@@ -637,13 +795,25 @@ class NavigationPolicy:
             self._object_not_found_count += 1
             if self._object_not_found_count >= self._max_object_not_found:
                 self._state = PolicyState.LOST
+                self._stop_robot()
                 return self._update_status(
+                    current_pose=status_pose,
+                    safety_status=localized.safety_status,
+                    velocity_command=VelocityCommand(),
                     detections=detections,
                     message=f"Could not find '{self._goal.object_name}'",
                 )
+            send_velocity(self.robot, search_command)
             return self._update_status(
+                current_pose=status_pose,
+                safety_status=localized.safety_status,
+                velocity_command=search_command,
                 detections=detections,
-                message=f"Searching for '{self._goal.object_name}'... ({self._object_not_found_count}/{self._max_object_not_found})",
+                message=(
+                    f"Searching for '{self._goal.object_name}'... "
+                    f"({self._object_not_found_count}/{self._max_object_not_found}); "
+                    f"{search_detail}"
+                ),
             )
 
     def _step_navigating(
@@ -940,6 +1110,8 @@ class NavigationPolicy:
                     map_pose = self.map_navigator.to_map_pose(pose.position_2d)
                     pose = self._pose_in_active_frame(pose, map_pose)
 
+        planned_path = self._planned_path(pose, robot_pose)
+
         self._status = PolicyStatus(
             state=self._state,
             current_goal=self._goal,
@@ -949,8 +1121,42 @@ class NavigationPolicy:
             message=message,
             detections=detections or [],
             robot_pose=robot_pose,
+            planned_path=planned_path,
         )
         return self._status
+
+    def _planned_path(
+        self, pose: FusedPose | None, robot_pose: np.ndarray | None
+    ) -> np.ndarray:
+        """Expose the current controller route in the active world frame."""
+        visible_states = {
+            PolicyState.PLANNING,
+            PolicyState.NAVIGATING,
+            PolicyState.TRACKING_OBJECT,
+            PolicyState.ARRIVED,
+        }
+        if (
+            self._state not in visible_states
+            or self._goal is None
+            or self._goal.approach_pose is None
+        ):
+            return np.empty((0, 3), dtype=float)
+        if self.map_navigator is not None:
+            map_path = self.map_navigator.current_path
+            if len(map_path):
+                return map_path
+        current = (
+            np.asarray(robot_pose, dtype=float)
+            if robot_pose is not None
+            else pose.position_2d if pose is not None else None
+        )
+        if current is None:
+            return np.empty((0, 3), dtype=float)
+        goal = np.asarray(self._goal.approach_pose, dtype=float)
+        return np.asarray(
+            [[current[0], current[1], 0.0], [goal[0], goal[1], 0.0]],
+            dtype=float,
+        )
 
     def reset(self) -> PolicyStatus:
         """Reset the policy to initial state."""
@@ -959,6 +1165,8 @@ class NavigationPolicy:
         self._object_not_found_count = 0
         self._last_detection = None
         self._last_detection_revision = None
+        self._slam_bootstrap_started = None
+        self._object_search_started = None
         if self.map_navigator is not None:
             self.map_navigator.reset()
         self._stop_robot()
