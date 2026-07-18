@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class FrameData:
     """Single frame captured during mapping."""
+
     timestamp: float
     image: np.ndarray
     depth: Optional[np.ndarray]
@@ -31,6 +32,7 @@ class FrameData:
 @dataclass
 class MappingResult:
     """Result of Gaussian splat training."""
+
     output_dir: str
     num_frames: int
     num_gaussians: int
@@ -114,6 +116,7 @@ class GaussianSplatMapper:
         # Save image
         img_path = self.images_dir / f"frame_{frame.frame_id:06d}.png"
         import cv2
+
         cv2.imwrite(str(img_path), frame.image)
 
         # Save depth if available
@@ -214,38 +217,70 @@ class GaussianSplatMapper:
         sparse_dir.mkdir(exist_ok=True)
 
         # Feature extraction
-        subprocess.run([
-            self.colmap_path, "feature_extractor",
-            "--database_path", str(self.colmap_dir / "database.db"),
-            "--image_path", str(self.images_dir),
-            "--ImageReader.single_camera", "1",
-            "--ImageReader.camera_model", "PINHOLE",
-        ], check=True, capture_output=True)
+        subprocess.run(
+            [
+                self.colmap_path,
+                "feature_extractor",
+                "--database_path",
+                str(self.colmap_dir / "database.db"),
+                "--image_path",
+                str(self.images_dir),
+                "--ImageReader.single_camera",
+                "1",
+                "--ImageReader.camera_model",
+                "PINHOLE",
+            ],
+            check=True,
+            capture_output=True,
+        )
 
         # Feature matching
-        subprocess.run([
-            self.colmap_path, "exhaustive_matcher",
-            "--database_path", str(self.colmap_dir / "database.db"),
-        ], check=True, capture_output=True)
+        subprocess.run(
+            [
+                self.colmap_path,
+                "exhaustive_matcher",
+                "--database_path",
+                str(self.colmap_dir / "database.db"),
+            ],
+            check=True,
+            capture_output=True,
+        )
 
         # Mapper
-        subprocess.run([
-            self.colmap_path, "mapper",
-            "--database_path", str(self.colmap_dir / "database.db"),
-            "--image_path", str(self.images_dir),
-            "--output_path", str(sparse_dir),
-        ], check=True, capture_output=True)
+        subprocess.run(
+            [
+                self.colmap_path,
+                "mapper",
+                "--database_path",
+                str(self.colmap_dir / "database.db"),
+                "--image_path",
+                str(self.images_dir),
+                "--output_path",
+                str(sparse_dir),
+            ],
+            check=True,
+            capture_output=True,
+        )
 
         # Undistort
         dense_dir = self.colmap_dir / "dense"
         dense_dir.mkdir(exist_ok=True)
-        subprocess.run([
-            self.colmap_path, "image_undistorter",
-            "--image_path", str(self.images_dir),
-            "--input_path", str(sparse_dir / "0"),
-            "--output_path", str(dense_dir),
-            "--output_type", "COLMAP",
-        ], check=True, capture_output=True)
+        subprocess.run(
+            [
+                self.colmap_path,
+                "image_undistorter",
+                "--image_path",
+                str(self.images_dir),
+                "--input_path",
+                str(sparse_dir / "0"),
+                "--output_path",
+                str(dense_dir),
+                "--output_type",
+                "COLMAP",
+            ],
+            check=True,
+            capture_output=True,
+        )
 
     def _convert_colmap_output(self) -> None:
         """Convert COLMAP output to gsplat format."""
@@ -261,21 +296,24 @@ class GaussianSplatMapper:
             # Parse COLMAP binary format
             with open(cameras_path, "rb") as f:
                 import struct
+
                 num_cameras = struct.unpack("<I", f.read(4))[0]
                 cameras = []
                 for _ in range(num_cameras):
                     cam_id, model, width, height = struct.unpack("<IIII", f.read(16))
                     params = struct.unpack("<" + "d" * 4, f.read(32))
-                    cameras.append({
-                        "id": cam_id,
-                        "model": model,
-                        "width": width,
-                        "height": height,
-                        "fx": params[0],
-                        "fy": params[1],
-                        "cx": params[2],
-                        "cy": params[3],
-                    })
+                    cameras.append(
+                        {
+                            "id": cam_id,
+                            "model": model,
+                            "width": width,
+                            "height": height,
+                            "fx": params[0],
+                            "fy": params[1],
+                            "cx": params[2],
+                            "cy": params[3],
+                        }
+                    )
 
             # Save as JSON
             with open(self.output_dir / "cameras.json", "w") as f:
@@ -287,6 +325,7 @@ class GaussianSplatMapper:
             poses = {}
             with open(images_path, "rb") as f:
                 import struct
+
                 num_images = struct.unpack("<I", f.read(4))[0]
                 for _ in range(num_images):
                     img_id, qw, qx, qy, qz, tx, ty, tz, cam_id = struct.unpack(
@@ -303,6 +342,7 @@ class GaussianSplatMapper:
 
                     # Convert quaternion to rotation matrix
                     from scipy.spatial.transform import Rotation
+
                     R = Rotation.from_quat([qx, qy, qz, qw]).as_matrix()
                     t = np.array([tx, ty, tz])
 
@@ -329,12 +369,21 @@ class GaussianSplatMapper:
             return self._train_fallback()
 
         # Run gsplat training
-        result = subprocess.run([
-            "python", "-m", "gsplat.train",
-            "--data_dir", str(self.output_dir),
-            "--output_dir", str(self.splat_dir),
-            "--iterations", "30000",
-        ], capture_output=True, text=True)
+        result = subprocess.run(
+            [
+                "python",
+                "-m",
+                "gsplat.train",
+                "--data_dir",
+                str(self.output_dir),
+                "--output_dir",
+                str(self.splat_dir),
+                "--iterations",
+                "30000",
+            ],
+            capture_output=True,
+            text=True,
+        )
 
         if result.returncode != 0:
             logger.error(f"gsplat training failed: {result.stderr}")
@@ -415,8 +464,10 @@ class GaussianSplatMapper:
             f.write("end_header\n")
 
             for pt, col in zip(points, colors):
-                f.write(f"{pt[0]:.6f} {pt[1]:.6f} {pt[2]:.6f} "
-                        f"{int(col[0])} {int(col[1])} {int(col[2])}\n")
+                f.write(
+                    f"{pt[0]:.6f} {pt[1]:.6f} {pt[2]:.6f} "
+                    f"{int(col[0])} {int(col[1])} {int(col[2])}\n"
+                )
 
         logger.info(f"Saved point cloud to {path}")
 

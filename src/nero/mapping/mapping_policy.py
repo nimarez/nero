@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 class MappingState(Enum):
     """Mapping policy states."""
+
     IDLE = "idle"
     INITIALIZING = "initializing"
     EXPLORING = "exploring"
@@ -37,6 +38,7 @@ class MappingState(Enum):
 @dataclass
 class MappingStatus:
     """Current mapping status."""
+
     state: MappingState
     message: str
     frames_collected: int
@@ -50,6 +52,7 @@ class MappingStatus:
 @dataclass
 class MappingConfig:
     """Configuration for mapping mission."""
+
     max_frames: int = 500
     frame_skip: int = 5
     exploration_speed: float = 0.3
@@ -81,8 +84,14 @@ class MappingPolicy:
 
         # Initialize SLAM
         self._slam = ORBSLAM3Node(
-            voc_path=slam_config.get("voc_path", "config/ORBvoc.txt") if slam_config else "",
-            settings_path=slam_config.get("settings_path", "config/orbslam3_settings.yaml") if slam_config else "",
+            voc_path=(
+                slam_config.get("voc_path", "config/ORBvoc.txt") if slam_config else ""
+            ),
+            settings_path=(
+                slam_config.get("settings_path", "config/orbslam3_settings.yaml")
+                if slam_config
+                else ""
+            ),
         )
         self._pose_estimator = PoseEstimator()
         self._depth_processor = DepthProcessor()
@@ -103,7 +112,9 @@ class MappingPolicy:
 
         # Safety
         self._safety_config = safety_config or {}
-        self._min_obstacle_distance = self._safety_config.get("min_obstacle_distance", 0.5)
+        self._min_obstacle_distance = self._safety_config.get(
+            "min_obstacle_distance", 0.5
+        )
 
     def start(self) -> None:
         """Start mapping mission."""
@@ -339,10 +350,12 @@ class MappingPolicy:
             pose = np.eye(4)
             pose[0, 3] = x
             pose[1, 3] = y
-            pose[:2, :2] = np.array([
-                [np.cos(yaw), -np.sin(yaw)],
-                [np.sin(yaw), np.cos(yaw)],
-            ])
+            pose[:2, :2] = np.array(
+                [
+                    [np.cos(yaw), -np.sin(yaw)],
+                    [np.sin(yaw), np.cos(yaw)],
+                ]
+            )
             return pose
 
         return self._last_pose

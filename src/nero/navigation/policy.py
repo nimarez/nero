@@ -295,7 +295,7 @@ class NavigationPolicy:
             self._goal.detection = target
             self._object_not_found_count = 0
 
-            if target.distance < self._goal.target_distance:
+            if self._has_arrived(target.distance):
                 self._state = PolicyState.ARRIVED
                 return self._update_status(
                     robot_pose=pose,
@@ -334,7 +334,7 @@ class NavigationPolicy:
             self._goal.detection = target
             self._object_not_found_count = 0
 
-            if target.distance < self._goal.target_distance:
+            if self._has_arrived(target.distance):
                 self._state = PolicyState.ARRIVED
                 self._stop_robot()
                 return self._update_status(
@@ -382,6 +382,10 @@ class NavigationPolicy:
 
         return VelocityCommand(linear_x=linear_x, linear_y=0.0, angular_z=angular_z)
 
+    def _has_arrived(self, distance: float) -> bool:
+        """Check the target distance with a small numerical/control tolerance."""
+        return distance <= self._goal.target_distance + 0.01
+
     def _stop_robot(self) -> None:
         """Stop the robot."""
         if self._is_sim:
@@ -405,7 +409,7 @@ class NavigationPolicy:
             self._object_not_found_count = 0
 
             # Check if object is close enough
-            if target.distance < self._goal.target_distance:
+            if self._has_arrived(target.distance):
                 self._state = PolicyState.ARRIVED
                 return self._update_status(
                     detections=detections,
@@ -483,7 +487,7 @@ class NavigationPolicy:
             self._object_not_found_count = 0
 
             # Check if arrived
-            if target.distance < self._goal.target_distance:
+            if self._has_arrived(target.distance):
                 self._state = PolicyState.ARRIVED
                 return self._update_status(
                     detections=detections,

@@ -19,11 +19,12 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Pose2D:
     """2D pose (x, y, theta)."""
+
     x: float = 0.0
     y: float = 0.0
     theta: float = 0.0  # radians
 
-    def __add__(self, other: 'Pose2D') -> 'Pose2D':
+    def __add__(self, other: "Pose2D") -> "Pose2D":
         return Pose2D(
             x=self.x + other.x,
             y=self.y + other.y,
@@ -37,11 +38,13 @@ class Pose2D:
         """Convert to 3x3 transform matrix."""
         cos_t = np.cos(self.theta)
         sin_t = np.sin(self.theta)
-        return np.array([
-            [cos_t, -sin_t, self.x],
-            [sin_t, cos_t, self.y],
-            [0, 0, 1],
-        ])
+        return np.array(
+            [
+                [cos_t, -sin_t, self.x],
+                [sin_t, cos_t, self.y],
+                [0, 0, 1],
+            ]
+        )
 
 
 class VisualOdometry:
@@ -117,8 +120,17 @@ class VisualOdometry:
         gray = self._to_gray(frame)
         kp, desc = self._orb.detectAndCompute(gray, None)
 
-        if kp is None or desc is None or self._prev_kp is None or self._prev_desc is None:
-            self._prev_kp = np.array([p.pt for p in kp], dtype=np.float32) if kp is not None else None
+        if (
+            kp is None
+            or desc is None
+            or self._prev_kp is None
+            or self._prev_desc is None
+        ):
+            self._prev_kp = (
+                np.array([p.pt for p in kp], dtype=np.float32)
+                if kp is not None
+                else None
+            )
             self._prev_desc = desc
             return None
 
@@ -177,7 +189,8 @@ class VisualOdometry:
         # Try essential matrix for general motion
         if len(pts1) >= 8:
             E, mask = cv2.findEssentialMat(
-                pts1, pts2,
+                pts1,
+                pts2,
                 focal=self._fx,
                 pp=(self._cx, self._cy),
                 method=cv2.RANSAC,
@@ -186,7 +199,9 @@ class VisualOdometry:
             )
             if E is not None:
                 _, R, t, mask = cv2.recoverPose(
-                    E, pts1, pts2,
+                    E,
+                    pts1,
+                    pts2,
                     focal=self._fx,
                     pp=(self._cx, self._cy),
                 )
@@ -247,6 +262,11 @@ class VisualOdometry:
         matches = sorted(matches, key=lambda m: m.distance)[:50]
 
         return cv2.drawMatches(
-            frame1, kp1, frame2, kp2, matches, None,
+            frame1,
+            kp1,
+            frame2,
+            kp2,
+            matches,
+            None,
             flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
         )

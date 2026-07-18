@@ -42,6 +42,7 @@ def load_pointcloud(path: str | Path) -> np.ndarray:
     if path.suffix == ".ply":
         try:
             import open3d as o3d
+
             pcd = o3d.io.read_point_cloud(str(path))
             return np.asarray(pcd.points)
         except ImportError:
@@ -51,6 +52,7 @@ def load_pointcloud(path: str | Path) -> np.ndarray:
     if path.suffix == ".pcd":
         try:
             import open3d as o3d
+
             pcd = o3d.io.read_point_cloud(str(path))
             return np.asarray(pcd.points)
         except ImportError:
@@ -59,6 +61,7 @@ def load_pointcloud(path: str | Path) -> np.ndarray:
     if path.suffix in (".las", ".laz"):
         try:
             import pylas
+
             las = pylas.read(str(path))
             return np.column_stack([las.x, las.y, las.z])
         except ImportError:
@@ -85,7 +88,9 @@ def _parse_ply(path: Path) -> np.ndarray:
             else:
                 values = line.split()
                 if len(values) >= 3:
-                    points.append([float(values[0]), float(values[1]), float(values[2])])
+                    points.append(
+                        [float(values[0]), float(values[1]), float(values[2])]
+                    )
 
     if not points:
         raise ValueError(f"No points found in {path}")
@@ -94,11 +99,19 @@ def _parse_ply(path: Path) -> np.ndarray:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Convert point cloud to occupancy grid")
+    parser = argparse.ArgumentParser(
+        description="Convert point cloud to occupancy grid"
+    )
     parser.add_argument("input", help="Input point cloud file (.ply, .pcd, .npy, .las)")
-    parser.add_argument("-o", "--output", required=True, help="Output directory for map files")
-    parser.add_argument("--resolution", type=float, default=0.05, help="Grid resolution (m/px)")
-    parser.add_argument("--grid-size", type=float, default=20.0, help="Grid size in meters")
+    parser.add_argument(
+        "-o", "--output", required=True, help="Output directory for map files"
+    )
+    parser.add_argument(
+        "--resolution", type=float, default=0.05, help="Grid resolution (m/px)"
+    )
+    parser.add_argument(
+        "--grid-size", type=float, default=20.0, help="Grid size in meters"
+    )
     parser.add_argument(
         "--height-thresh",
         type=float,
@@ -130,9 +143,7 @@ def main() -> None:
         grid_size=args.grid_size,
         height_threshold=args.height_thresh,
     )
-    logger.info(
-        f"Grid: {grid.width}x{grid.height} at {grid.resolution}m/px"
-    )
+    logger.info(f"Grid: {grid.width}x{grid.height} at {grid.resolution}m/px")
 
     # Save
     output_dir = Path(args.output)

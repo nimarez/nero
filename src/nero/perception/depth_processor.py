@@ -79,7 +79,7 @@ class DepthProcessor:
         width = image_width or w
 
         # Look at lower portion of image (ground level)
-        region = depth_m[h - self.obstacle_region_height:, :]
+        region = depth_m[h - self.obstacle_region_height :, :]
 
         # Create obstacle mask
         obstacle_mask = region < self.obstacle_threshold
@@ -89,13 +89,15 @@ class DepthProcessor:
 
         # Get minimum distance (ignoring NaN)
         valid_depth = region[~np.isnan(region)]
-        min_distance = float(np.min(valid_depth)) if len(valid_depth) > 0 else self.max_depth
+        min_distance = (
+            float(np.min(valid_depth)) if len(valid_depth) > 0 else self.max_depth
+        )
 
         # Check left, center, right thirds
         third_w = width // 3
         left_region = obstacle_mask[:, :third_w]
-        center_region = obstacle_mask[:, third_w:2*third_w]
-        right_region = obstacle_mask[:, 2*third_w:]
+        center_region = obstacle_mask[:, third_w : 2 * third_w]
+        right_region = obstacle_mask[:, 2 * third_w :]
 
         return {
             "has_obstacle": has_obstacle,
@@ -143,9 +145,9 @@ class DepthProcessor:
 
         # Determine preferred direction
         third_w = w // 3
-        center_depth = np.nanmedian(depth_m[h//2:, third_w:2*third_w])
-        left_depth = np.nanmedian(depth_m[h//2:, :third_w])
-        right_depth = np.nanmedian(depth_m[h//2:, 2*third_w:])
+        center_depth = np.nanmedian(depth_m[h // 2 :, third_w : 2 * third_w])
+        left_depth = np.nanmedian(depth_m[h // 2 :, :third_w])
+        right_depth = np.nanmedian(depth_m[h // 2 :, 2 * third_w :])
 
         # Handle NaN values
         if np.isnan(center_depth):

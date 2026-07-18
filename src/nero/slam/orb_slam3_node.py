@@ -39,6 +39,7 @@ class SLAMPose:
         """Extract yaw from quaternion."""
         x, y, z, w = self.orientation
         import math
+
         siny_cosp = 2 * (w * z + x * y)
         cosy_cosp = 1 - 2 * (y * y + z * z)
         return math.atan2(siny_cosp, cosy_cosp)
@@ -46,6 +47,7 @@ class SLAMPose:
     def to_matrix(self) -> np.ndarray:
         """Convert to 4x4 transformation matrix."""
         from scipy.spatial.transform import Rotation
+
         mat = np.eye(4)
         mat[:3, 3] = self.position
         mat[:3, :3] = Rotation.from_quat(self.orientation).as_matrix()
@@ -101,7 +103,9 @@ class ORBSLAM3Node:
     mode when ORB-SLAM3 is not available.
     """
 
-    def __init__(self, config: Optional[SLAMConfig] = None, vocab_path: Optional[str] = None):
+    def __init__(
+        self, config: Optional[SLAMConfig] = None, vocab_path: Optional[str] = None
+    ):
         self.config = config or SLAMConfig()
         self.vocab_path = vocab_path
         self._is_initialized = False
@@ -179,6 +183,7 @@ class ORBSLAM3Node:
             SLAMPose with current tracking estimate
         """
         import time
+
         ts = timestamp or time.time()
 
         with self._lock:
@@ -231,8 +236,16 @@ class ORBSLAM3Node:
 
         if descriptors is None or len(keypoints) < 8:
             return SLAMPose(
-                position=self._current_pose.position.copy() if self._current_pose else np.zeros(3),
-                orientation=self._current_pose.orientation.copy() if self._current_pose else np.array([0, 0, 0, 1]),
+                position=(
+                    self._current_pose.position.copy()
+                    if self._current_pose
+                    else np.zeros(3)
+                ),
+                orientation=(
+                    self._current_pose.orientation.copy()
+                    if self._current_pose
+                    else np.array([0, 0, 0, 1])
+                ),
                 timestamp=timestamp,
                 tracking_status="LOST",
             )
@@ -268,13 +281,17 @@ class ORBSLAM3Node:
         curr_pts = np.float32([keypoints[m.trainIdx].pt for m in matches])
 
         # Estimate pose using essential matrix
-        K = np.array([
-            [self.config.fx, 0, self.config.cx],
-            [0, self.config.fy, self.config.cy],
-            [0, 0, 1]
-        ])
+        K = np.array(
+            [
+                [self.config.fx, 0, self.config.cx],
+                [0, self.config.fy, self.config.cy],
+                [0, 0, 1],
+            ]
+        )
 
-        E, mask = cv2.findEssentialMat(prev_pts, curr_pts, K, method=cv2.RANSAC, prob=0.999, threshold=1.0)
+        E, mask = cv2.findEssentialMat(
+            prev_pts, curr_pts, K, method=cv2.RANSAC, prob=0.999, threshold=1.0
+        )
         if E is None:
             return SLAMPose(
                 position=self._current_pose.position.copy(),
@@ -359,7 +376,10 @@ class ORBSLAM3Node:
 
     def is_tracking(self) -> bool:
         """Check if SLAM is currently tracking."""
-        return self._current_pose is not None and self._current_pose.tracking_status == "OK"
+        return (
+            self._current_pose is not None
+            and self._current_pose.tracking_status == "OK"
+        )
 
     def reset(self) -> None:
         """Reset SLAM state."""
