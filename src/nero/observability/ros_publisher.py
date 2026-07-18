@@ -62,7 +62,14 @@ class RosObservabilityPublisher:
             PointField,
         )
         from std_msgs.msg import String
-        from vision_msgs.msg import Detection2DArray
+
+        try:
+            from vision_msgs.msg import Detection2DArray
+        except ImportError:
+            Detection2DArray = None
+            logger.warning(
+                "vision_msgs is unavailable; detection telemetry is disabled"
+            )
 
         if not rclpy.ok():
             rclpy.init(args=None)
@@ -85,8 +92,9 @@ class RosObservabilityPublisher:
             "PointCloud2": PointCloud2,
             "PointField": PointField,
             "String": String,
-            "Detection2DArray": Detection2DArray,
         }
+        if Detection2DArray is not None:
+            self._types["Detection2DArray"] = Detection2DArray
         sensor_qos = rclpy.qos.qos_profile_sensor_data
         self._publishers = {
             "rgb": self._node.create_publisher(Image, self._topics.rgb, sensor_qos),
@@ -103,9 +111,6 @@ class RosObservabilityPublisher:
                 PointCloud2, self._topics.map_points, sensor_qos
             ),
             "tracking": self._node.create_publisher(String, self._topics.tracking, 10),
-            "detections": self._node.create_publisher(
-                Detection2DArray, self._topics.detections, sensor_qos
-            ),
             "status": self._node.create_publisher(String, self._topics.status, 10),
             "command": self._node.create_publisher(Twist, self._topics.command, 10),
             "goal_pose": self._node.create_publisher(PoseStamped, self._topics.goal_pose, 10),
@@ -120,6 +125,10 @@ class RosObservabilityPublisher:
                 PointCloud2, self._topics.reference_map, sensor_qos
             ),
         }
+        if Detection2DArray is not None:
+            self._publishers["detections"] = self._node.create_publisher(
+                Detection2DArray, self._topics.detections, sensor_qos
+            )
         self._path = Path()
         self._path.header.frame_id = map_frame
         self._reference_path = Path()
@@ -322,6 +331,8 @@ class RosObservabilityPublisher:
         self._publishers["tracking"].publish(message)
 
     def publish_detections(self, detections: list[Any], timestamp: float) -> None:
+        if "Detection2DArray" not in self._types:
+            return
         message = self._types["Detection2DArray"]()
         self._header(message, timestamp, self._camera_frame)
         try:

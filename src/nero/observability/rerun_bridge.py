@@ -82,7 +82,14 @@ class RerunRosBridge:
         from nav_msgs.msg import Odometry, Path as RosPath
         from sensor_msgs.msg import CameraInfo, Image, Imu, JointState, PointCloud2
         from std_msgs.msg import String
-        from vision_msgs.msg import Detection2DArray
+
+        try:
+            from vision_msgs.msg import Detection2DArray
+        except ImportError:
+            Detection2DArray = None
+            logger.warning(
+                "vision_msgs is unavailable; detection visualization is disabled"
+            )
 
         self._rr = rr
         self._recording = recording
@@ -101,7 +108,6 @@ class RerunRosBridge:
             (RosPath, self._topics.path, self._on_path, 1),
             (PointCloud2, self._topics.map_points, self._on_map, sensor_qos),
             (String, self._topics.tracking, self._on_tracking, 10),
-            (Detection2DArray, self._topics.detections, self._on_detections, sensor_qos),
             (String, self._topics.status, self._on_status, 10),
             (Twist, self._topics.command, self._on_command, 10),
             (PoseStamped, self._topics.goal_pose, self._on_goal_pose, 10),
@@ -110,8 +116,14 @@ class RerunRosBridge:
             (RosPath, self._topics.reference_path, self._on_reference_path, 1),
             (PointCloud2, self._topics.reference_map, self._on_reference_map, sensor_qos),
         ]
+        if Detection2DArray is not None:
+            specs.append(
+                (Detection2DArray, self._topics.detections, self._on_detections, sensor_qos)
+            )
         self._subscription_topics = tuple(spec[1] for spec in specs)
         expected_topics = set(vars(self._topics).values())
+        if Detection2DArray is None:
+            expected_topics.remove(self._topics.detections)
         if set(self._subscription_topics) != expected_topics:
             missing = expected_topics - set(self._subscription_topics)
             extra = set(self._subscription_topics) - expected_topics
