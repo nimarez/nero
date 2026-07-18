@@ -17,6 +17,7 @@ VOCAB_URL = (
 VOCAB_ARCHIVE_SHA256 = (
     "ff2d0e82a69a8f4c5c002e3a0dff82a00e5872e1659fac1b996f41166b92693b"
 )
+VOCAB_SHA256 = "f8dd027f7a6cb88129821341194d7f2c75b77b3394257ddd0d2229863d1a3570"
 DEBIAN_RUNTIME_PACKAGES = (
     "libopengl0 libglx0 libglu1-mesa libsm6 libice6 " "libx11-6 libxext6 libegl1 libgl1"
 )
@@ -43,7 +44,13 @@ def install_vocabulary(destination: Path, *, force: bool = False) -> Path:
     """Download, verify, and extract the official vocabulary atomically."""
     destination = destination.resolve()
     if destination.exists() and not force:
-        return destination
+        digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+        if digest == VOCAB_SHA256:
+            return destination
+        raise RuntimeError(
+            f"existing ORB vocabulary checksum mismatch: {digest}; "
+            "rerun with --force to replace it"
+        )
 
     with urllib.request.urlopen(VOCAB_URL, timeout=120) as response:
         archive = response.read()
@@ -57,6 +64,9 @@ def install_vocabulary(destination: Path, *, force: bool = False) -> Path:
         if source is None:
             raise RuntimeError("ORBvoc.txt is missing from the official archive")
         payload = source.read()
+    payload_digest = hashlib.sha256(payload).hexdigest()
+    if payload_digest != VOCAB_SHA256:
+        raise RuntimeError(f"ORB vocabulary payload checksum mismatch: {payload_digest}")
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + ".tmp")

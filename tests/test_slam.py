@@ -346,7 +346,20 @@ def test_vocabulary_installer_verifies_and_extracts_atomically(tmp_path, monkeyp
         "urlopen",
         lambda *args, **kwargs: Response(),
     )
-    monkeypatch.setattr(setup_orbslam, "VOCAB_ARCHIVE_SHA256", hashlib.sha256(archive).hexdigest())
+    monkeypatch.setattr(
+        setup_orbslam,
+        "VOCAB_ARCHIVE_SHA256",
+        hashlib.sha256(archive).hexdigest(),
+    )
+    monkeypatch.setattr(setup_orbslam, "VOCAB_SHA256", hashlib.sha256(payload).hexdigest())
     destination = tmp_path / "nested" / "ORBvoc.txt"
     assert setup_orbslam.install_vocabulary(destination) == destination.resolve()
     assert destination.read_bytes() == payload
+
+
+def test_vocabulary_installer_rejects_corrupt_existing_file(tmp_path):
+    destination = tmp_path / "ORBvoc.txt"
+    destination.write_bytes(b"truncated")
+
+    with pytest.raises(RuntimeError, match="existing ORB vocabulary checksum mismatch"):
+        setup_orbslam.install_vocabulary(destination)

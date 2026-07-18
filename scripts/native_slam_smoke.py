@@ -23,24 +23,11 @@ def main() -> None:
     if not hasattr(orbslam3.Sensor, "IMU_RGBD"):
         raise SystemExit("ORB binding has no IMU_RGBD sensor mode")
 
-    calibration = K1Calibration(
-        camera_frame="camera",
-        imu_frame="imu",
-        width=320,
-        height=240,
-        camera_fps=30,
-        camera_matrix=[216.5, 0, 160, 0, 216.5, 120, 0, 0, 1],
-        distortion=[0, 0, 0, 0, 0],
-        depth_map_factor=1000,
-        camera_rgb=True,
-        tbc=np.eye(4).tolist(),
-        imu_frequency=200,
-        imu_noise_gyro=0.001,
-        imu_noise_acc=0.01,
-        imu_gyro_walk=0.0001,
-        imu_acc_walk=0.001,
-        source="Docker native smoke fixture",
+    calibration_path = Path(__file__).resolve().parents[1] / (
+        "config/k1_geek_nominal_calibration.json"
     )
+    calibration = K1Calibration.load(calibration_path)
+    calibration.validate_geek_profile()
 
     with tempfile.TemporaryDirectory() as directory:
         settings = Path(directory) / "imu_rgbd.yaml"
@@ -52,15 +39,21 @@ def main() -> None:
             system.set_use_viewer(False)
         system.initialize()
         try:
-            rows, columns = np.indices((240, 320))
+            rows, columns = np.indices((calibration.height, calibration.width))
             checkerboard = (((rows // 12) + (columns // 12)) % 2 * 255).astype(np.uint8)
             rgb = np.ascontiguousarray(np.repeat(checkerboard[..., None], 3, axis=2))
-            depth = np.full((240, 320), 1000, dtype=np.uint16)
+            depth = np.full(
+                (calibration.height, calibration.width), 1000, dtype=np.uint16
+            )
+            imu_dt = 1.0 / calibration.imu_frequency
+            frame_timestamp = 1.0 / calibration.camera_fps
             imu = [
                 (0.0, 0.0, 9.81, 0.0, 0.0, 0.0, timestamp)
-                for timestamp in (0.005, 0.01, 0.015, 0.02, 0.025, 0.03)
+                for timestamp in np.arange(imu_dt, frame_timestamp + imu_dt / 2, imu_dt)
             ]
-            result = system.process_rgbd_inertial_enhanced(rgb, depth, 0.03, imu)
+            result = system.process_rgbd_inertial_enhanced(
+                rgb, depth, frame_timestamp, imu
+            )
             if not all(
                 hasattr(result, field)
                 for field in ("success", "is_valid", "state", "num_map_points")
@@ -69,7 +62,11 @@ def main() -> None:
         finally:
             system.shutdown()
 
-    print("Native Booster + ORB-SLAM3 IMU_RGBD smoke test passed")
+    print(
+        "Native Booster + ORB-SLAM3 IMU_RGBD smoke test passed "
+        f"at {calibration.width}x{calibration.height}@{calibration.camera_fps:g}fps "
+        f"with {calibration.imu_frequency:g}Hz IMU"
+    )
 
 
 if __name__ == "__main__":
