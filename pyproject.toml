@@ -1,0 +1,45 @@
+[project]
+name = "nero"
+version = "0.1.0"
+description = "ORB-SLAM3 navigation policy for Booster K1 robot"
+requires-python = ">=3.10"
+dependencies = [
+    "boosteros>=1.0.0",
+    "boosteros[brain]>=1.0.0",
+    "numpy>=1.24.0",
+    "opencv-python>=4.8.0",
+    "Pillow>=10.0.0",
+    "pyyaml>=6.0",
+    "scipy>=1.11.0",
+    "matplotlib>=3.7.0",
+]
+
+[project.optional-dependencies]
+slam = [
+    "orb-slam3-python>=0.1.0",
+]
+dev = [
+    "pytest>=7.0",
+    "black>=23.0",
+    "ruff>=0.1.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[project.scripts]
+nero-goto = "nero.agents.goto_agent:main"
+nero-mapping = "nero.agents.mapping_agent:main"
+nero-map-nav = "nero.agents.map_nav_agent:main"
+nero-pc2map = "nero.utils.pointcloud_converter:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,79 @@
+# ORB-SLAM3 Configuration for K1 Robot
+# Based on K1 depth camera specifications
+
+#--------------------------------------------------------------------------------------------
+# Camera Parameters
+#--------------------------------------------------------------------------------------------
+
+# Camera calibration (K1 depth camera approximate values)
+Camera.fx: 216.5
+Camera.fy: 216.5
+Camera.cx: 160.0
+Camera.cy: 120.0
+
+# Distortion coefficients (approximate for K1)
+Camera.k1: 0.0
+Camera.k2: 0.0
+Camera.p1: 0.0
+Camera.p2: 0.0
+
+# Camera resolution
+Camera.width: 320
+Camera.height: 240
+
+# Camera FPS
+Camera.fps: 30.0
+
+# Color order (RGB for K1)
+Camera.RGB: 1
+
+# Depth camera baseline/focal length ratio for depth scale
+Camera.bf: 46.0
+
+# Near and far depth thresholds (meters)
+ThDepth: 5.0
+DepthMapFactor: 1000.0  # Depth values in mm
+
+#--------------------------------------------------------------------------------------------
+# ORB Extractor Parameters
+#--------------------------------------------------------------------------------------------
+
+# Number of ORB features per image
+ORBextractor.nFeatures: 1000
+
+# Number of pyramid levels
+ORBextractor.nLevels: 8
+
+# Scale factor between levels
+ORBextractor.scaleFactor: 1.2
+
+# Fast threshold
+ORBextractor.fastTh: 20
+
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters
+#--------------------------------------------------------------------------------------------
+
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3
+Viewer.ViewpointX: 0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -1.8
+Viewer.ViewpointF: 500
+
+#--------------------------------------------------------------------------------------------
+# System Parameters
+#--------------------------------------------------------------------------------------------
+
+# Use depth images
+System.useDepth: 1
+
+# Enable IMU integration (K1 has IMU)
+System.useIMU: 1
+
+# Atlas mode (multi-map)
+System.atlasMode: 1
