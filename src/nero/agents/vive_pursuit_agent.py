@@ -22,6 +22,7 @@ from nero.navigation.vive_pursuit import (
 from nero.observability import RosObservabilityPublisher
 from nero.observability.topics import ObservabilityTopics
 from nero.robot import RobotInterface
+from nero.vive.projector_navigation import ProjectorNavigationSource
 
 logger = logging.getLogger(__name__)
 
@@ -130,8 +131,8 @@ def run_agent(
             max_angular_velocity=args.max_angular_velocity,
         )
     )
-    object_pose = np.asarray(args.goal, dtype=float)
-    goal_pose = object_approach_pose(object_pose, args.stand_off)
+    object_pose = None if args.goal is None else np.asarray(args.goal, dtype=float)
+    goal_pose = None if object_pose is None else object_approach_pose(object_pose, args.stand_off)
     initializer = getattr(robot, "initialize_locomotion_only", robot.initialize)
     initializer()
     robot.stop()
@@ -145,17 +146,33 @@ def run_agent(
         now = monotonic()
         if now - started > args.max_runtime:
             raise RuntimeError("blind Vive pursuit exceeded --max-runtime")
-        pose = pose_source.current_pose()
-        if pose is None:
+        navigation_reader = getattr(pose_source, "current_navigation", None)
+        navigation = navigation_reader() if navigation_reader is not None else None
+        if navigation_reader is not None:
+            pose = None if navigation is None else navigation[0]
+            latest_object_pose = None if navigation is None else navigation[1]
+        else:
+            pose = pose_source.current_pose()
+            latest_object_pose = object_pose
+        if pose is None or latest_object_pose is None:
             robot.stop()
             unavailable_since = now if unavailable_since is None else unavailable_since
             limit = args.loss_timeout if pose_seen else args.startup_timeout
             if now - unavailable_since > limit:
-                raise RuntimeError("calibrated Vive pose/tracking is unavailable or stale")
+                raise RuntimeError(
+                    "calibrated Vive pose, tracking, or projector goal is unavailable or stale"
+                )
             sleep(1.0 / args.rate)
             continue
         unavailable_since = None
         pose_seen = True
+        if object_pose is None or not np.allclose(latest_object_pose, object_pose, atol=1e-9):
+            robot.stop()
+            object_pose = latest_object_pose.copy()
+            goal_pose = object_approach_pose(object_pose, args.stand_off)
+            path = None
+            tracker = None
+        assert goal_pose is not None
         if controller.has_reached_pose(pose, goal_pose):
             robot.stop()
             logger.info(
@@ -179,6 +196,12 @@ def run_agent(
             except ValueError as error:
                 raise RuntimeError(f"Vive approach path planning failed: {error}") from error
             tracker = VivePathTracker(path.points)
+            trajectory_publisher = getattr(pose_source, "publish_trajectory", None)
+            if trajectory_publisher is not None:
+                try:
+                    trajectory_publisher(path.points)
+                except (OSError, TypeError, ValueError) as error:
+                    logger.warning("could not publish path to projector: %s", error)
             if telemetry is not None:
                 telemetry.publish_plan(
                     np.column_stack((path.points, np.zeros(len(path.points)))),
@@ -213,13 +236,19 @@ def run_agent(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    goal_source = parser.add_mutually_exclusive_group(required=True)
+    goal_source.add_argument(
         "--goal",
         nargs=3,
         type=float,
-        required=True,
         metavar=("X", "Y", "YAW"),
         help="Object pose in the calibrated map frame; yaw is its forward direction",
+    )
+    goal_source.add_argument(
+        "--projector-url",
+        nargs="?",
+        const=os.getenv("NERO_PROJECTOR_URL", "http://10.2.4.14:8765"),
+        help="Use PR 8 room_floor robot/object poses; default: %(const)s",
     )
     parser.add_argument("--stand-off", type=float, default=0.5)
     parser.add_argument("--lookahead", type=float, default=0.30)
@@ -267,7 +296,13 @@ def main(argv: list[str] | None = None) -> int:
     telemetry = None
     try:
         robot = RobotInterface(network_interface=args.iface)
-        pose_source = VivePoseSubscriber(stale_after_s=args.stale_after)
+        if args.projector_url:
+            pose_source = ProjectorNavigationSource(
+                args.projector_url,
+                stale_after_s=args.stale_after,
+            )
+        else:
+            pose_source = VivePoseSubscriber(stale_after_s=args.stale_after)
         telemetry = RosObservabilityPublisher.try_create(enabled=True)
         run_agent(robot, pose_source, args, telemetry=telemetry)
     except KeyboardInterrupt:

@@ -76,12 +76,31 @@ curl -X POST http://10.2.4.14:8765/api/navigation/goal \
   -d '{"x":1.8,"y":0.7,"yaw":0.0,"source":"operator"}'
 ```
 
-Until Nima supplies a plan, the projector previews a straight vector from robot to goal. Nima replaces it with A* waypoints:
+Until Nero supplies a plan, the projector previews a straight vector from robot to goal. The Vive pursuit agent replaces it with its smooth object-approach path:
 
 ```bash
 curl -X POST http://10.2.4.14:8765/api/navigation/trajectory \
   -H 'content-type: application/json' \
-  -d '{"waypoints":[[0.4,-0.2],[1.1,0.1],[1.8,0.7]],"source":"nima-a-star"}'
+  -d '{"waypoints":[[0.4,-0.2],[1.1,0.1],[1.8,0.7]],"source":"nero-vive-pursuit"}'
 ```
 
-ROS mapping is direct: `robot_pose` maps to `/nero/reference/pose`, `goal_pose` to `/nero/navigation/goal_pose`, and `trajectory.waypoints` to `/nero/navigation/plan`. The existing `ViveRosBridge` remains the ROS adapter; robot control stays on Nima's side.
+On the K1, connect the blind Vive controller directly to this contract:
+
+```bash
+uv run nero-vive-pursuit \
+  --projector-url http://10.2.4.14:8765 \
+  --stand-off 0.5 \
+  --acknowledge-blind-motion
+```
+
+The client fails closed unless the HTTP snapshot is fresh, Vive tracking is
+valid, the floor mapping exists, the robot heading has been calibrated, and an
+operator goal exists. It replans when the goal changes and posts the sampled
+approach trajectory back to the projector. The goal is the box pose; the
+published trajectory correctly ends at the robot's stand-off pose in front of
+the box.
+
+ROS mapping remains available for observability: `robot_pose` maps to
+`/nero/reference/pose`, `goal_pose` to `/nero/navigation/goal_pose`, and
+`trajectory.waypoints` to `/nero/navigation/plan`. Robot control remains on the
+K1 side.
