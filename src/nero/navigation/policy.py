@@ -1019,6 +1019,9 @@ class NavigationPolicy:
     def _cleanup_components(self) -> None:
         """Best-effort cleanup, including partially initialized startup."""
         cleanup = [self._stop_robot]
+        close_robot = getattr(self.robot, "close", None)
+        if callable(close_robot):
+            cleanup.append(close_robot)
         shutdown_slam = getattr(self.slam, "shutdown", None)
         if callable(shutdown_slam):
             cleanup.append(shutdown_slam)

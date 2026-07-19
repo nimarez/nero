@@ -120,7 +120,8 @@ class DirectPursuitPolicy:
             except Exception:
                 logger.exception("Detector cleanup failed during startup")
             try:
-                self.robot.stop()
+                close = getattr(self.robot, "close", self.robot.stop)
+                close()
             except Exception:
                 logger.exception("Robot cleanup failed during startup")
             raise
@@ -475,7 +476,8 @@ def run_agent(robot, args, *, object_detector=None, command_source=None) -> None
             except Exception:
                 logger.exception("Direct pursuit policy cleanup failed")
         try:
-            robot.stop()
+            close = getattr(robot, "close", robot.stop)
+            close()
         except Exception:
             logger.exception("Robot cleanup failed")
         if listener is not None:

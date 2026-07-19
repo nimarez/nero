@@ -26,6 +26,7 @@ class K1Topics:
     rgb: str = "/boostercamera/head/rgb"
     depth: str = "/boostercamera/head/depth"
     camera_info: str = "/boostercamera/head/rgb/camera_info"
+    raw_rgb: str = "/boostercamera/head/raw/rgb"
     odom: str = "/odometer_state"
     joints: str = "/joint_states"
 
@@ -46,19 +47,11 @@ class RobotState:
 
     @property
     def position_2d(self) -> np.ndarray:
-        return (
-            np.asarray(self.odom.pose_2d, dtype=float)
-            if self.odom is not None
-            else np.zeros(3)
-        )
+        return np.asarray(self.odom.pose_2d, dtype=float) if self.odom is not None else np.zeros(3)
 
     @property
     def orientation_rpy(self) -> np.ndarray:
-        return (
-            np.asarray(self.imu.rpy, dtype=float)
-            if self.imu is not None
-            else np.zeros(3)
-        )
+        return np.asarray(self.imu.rpy, dtype=float) if self.imu is not None else np.zeros(3)
 
     @property
     def angular_velocity(self) -> np.ndarray:
@@ -96,6 +89,8 @@ class RobotInterface:
         network_interface: str = "",
         virtual_robot_name: str = "",
         timeout: float = 10.0,
+        sensor_startup_timeout: float = 90.0,
+        rgbd_sync_tolerance: float = 0.02,
         topics: K1Topics | None = None,
     ):
         try:
@@ -117,6 +112,12 @@ class RobotInterface:
 
         self._rclpy = rclpy
         self._timeout = float(timeout)
+        self._sensor_startup_timeout = float(sensor_startup_timeout)
+        if self._timeout <= 0 or self._sensor_startup_timeout <= 0:
+            raise ValueError("K1 timeouts must be positive")
+        if rgbd_sync_tolerance < 0:
+            raise ValueError("RGB-D synchronization tolerance must be non-negative")
+        self._rgbd_sync_tolerance_ns = int(rgbd_sync_tolerance * 1_000_000_000)
         self._topics = topics or K1Topics()
         self._lock = threading.Lock()
         self._ready = threading.Condition(self._lock)
@@ -128,6 +129,10 @@ class RobotInterface:
         self._joints: Any = None
         self._pending_rgb: dict[int, Any] = {}
         self._pending_depth: dict[int, Any] = {}
+        self._rgb_message_count = 0
+        self._depth_message_count = 0
+        self._camera_info_message_count = 0
+        self._closest_rgbd_offset_ns: int | None = None
         self._imu_samples: list[tuple[float, ...]] = []
         self._battery_level: float | None = None
         self._last_frame_timestamp: float | None = None
@@ -143,9 +148,7 @@ class RobotInterface:
         else:
             self._loco.Init()
         if not self._loco.WaitForService(int(self._timeout * 1000)):
-            raise RuntimeError(
-                f"K1 locomotion service unavailable on {self._network_interface!r}"
-            )
+            raise RuntimeError(f"K1 locomotion service unavailable on {self._network_interface!r}")
 
         info = self._json_body(self._loco.GetRobotInfo())
         self._info = SimpleNamespace(
@@ -176,19 +179,13 @@ class RobotInterface:
                 CameraInfo, self._topics.camera_info, self._on_camera_info, qos
             ),
             self._node.create_subscription(Odometer, self._topics.odom, self._on_odom, qos),
-            self._node.create_subscription(
-                JointState, self._topics.joints, self._on_joints, qos
-            ),
+            self._node.create_subscription(JointState, self._topics.joints, self._on_joints, qos),
         ]
         self._low_state_subscriber = B1LowStateSubscriber(self._on_low_state)
         self._low_state_subscriber.InitChannel()
-        self._battery_state_subscriber = B1BatteryStateSubscriber(
-            self._on_battery_state
-        )
+        self._battery_state_subscriber = B1BatteryStateSubscriber(self._on_battery_state)
         self._battery_state_subscriber.InitChannel()
-        self._spin_thread = threading.Thread(
-            target=self._spin, name="nero-k1-ros", daemon=True
-        )
+        self._spin_thread = threading.Thread(target=self._spin, name="nero-k1-ros", daemon=True)
         self._spin_thread.start()
         logger.info("Connected to %s (%s)", self._info.model, self._info.serial_number)
 
@@ -218,32 +215,75 @@ class RobotInterface:
             self._rclpy.spin_once(self._node, timeout_sec=0.05)
 
     def _commit_frame(self, stamp_ns: int) -> None:
-        rgb = self._pending_rgb.get(stamp_ns)
-        depth = self._pending_depth.get(stamp_ns)
-        if rgb is None or depth is None:
+        self._prune_pending(stamp_ns)
+        if stamp_ns in self._pending_rgb:
+            rgb_stamp = stamp_ns
+            candidates = self._pending_depth
+        elif stamp_ns in self._pending_depth:
+            candidates = self._pending_rgb
+            rgb_stamp = min(candidates, key=lambda value: abs(value - stamp_ns), default=None)
+            if rgb_stamp is None:
+                return
+            depth_stamp = stamp_ns
+            offset = abs(rgb_stamp - depth_stamp)
+            self._closest_rgbd_offset_ns = (
+                offset
+                if self._closest_rgbd_offset_ns is None
+                else min(self._closest_rgbd_offset_ns, offset)
+            )
+            if offset > getattr(self, "_rgbd_sync_tolerance_ns", 0):
+                return
+            rgb, depth = self._pending_rgb[rgb_stamp], self._pending_depth[depth_stamp]
+            self._finish_frame_pair(rgb_stamp, depth_stamp, rgb, depth)
             return
+        depth_stamp = min(candidates, key=lambda value: abs(value - rgb_stamp), default=None)
+        if depth_stamp is None:
+            return
+        offset = abs(rgb_stamp - depth_stamp)
+        self._closest_rgbd_offset_ns = (
+            offset
+            if self._closest_rgbd_offset_ns is None
+            else min(self._closest_rgbd_offset_ns, offset)
+        )
+        if offset > getattr(self, "_rgbd_sync_tolerance_ns", 0):
+            return
+        self._finish_frame_pair(
+            rgb_stamp,
+            depth_stamp,
+            self._pending_rgb[rgb_stamp],
+            self._pending_depth[depth_stamp],
+        )
+
+    def _finish_frame_pair(self, rgb_stamp: int, depth_stamp: int, rgb: Any, depth: Any) -> None:
         self._rgb, self._depth = rgb, depth
-        self._pending_rgb.pop(stamp_ns, None)
-        self._pending_depth.pop(stamp_ns, None)
-        cutoff = stamp_ns - 1_000_000_000
+        self._pending_rgb.pop(rgb_stamp, None)
+        self._pending_depth.pop(depth_stamp, None)
+        self._prune_pending(max(rgb_stamp, depth_stamp))
+        self._ready.notify_all()
+
+    def _prune_pending(self, newest_stamp: int) -> None:
+        """Bound unmatched full-resolution image storage to roughly one second."""
+        cutoff = newest_stamp - 1_000_000_000
         self._pending_rgb = {k: v for k, v in self._pending_rgb.items() if k >= cutoff}
         self._pending_depth = {k: v for k, v in self._pending_depth.items() if k >= cutoff}
-        self._ready.notify_all()
 
     def _on_rgb(self, message: Any) -> None:
         with self._ready:
+            self._rgb_message_count += 1
             stamp = self._stamp_ns(message)
             self._pending_rgb[stamp] = message
             self._commit_frame(stamp)
 
     def _on_depth(self, message: Any) -> None:
         with self._ready:
+            self._depth_message_count += 1
             stamp = self._stamp_ns(message)
             self._pending_depth[stamp] = message
             self._commit_frame(stamp)
 
     def _on_camera_info(self, message: Any) -> None:
         with self._ready:
+            self._camera_info_message_count += 1
             self._camera_info = SimpleNamespace(
                 header=message.header,
                 width=int(message.width),
@@ -311,20 +351,15 @@ class RobotInterface:
         """Verify all sensors and walking mode, then arm velocity output at zero."""
         if self._initialized:
             return
-        deadline = time.monotonic() + self._timeout
+        deadline = time.monotonic() + self._sensor_startup_timeout
         with self._ready:
             while not self._sensor_ready():
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    missing = [
-                        name for name, value in (
-                            ("rgb", self._rgb), ("depth", self._depth),
-                            ("camera_info", self._camera_info), ("imu", self._imu),
-                            ("odometry", self._odom),
-                            ("battery", self._battery_level),
-                        ) if value is None
-                    ]
-                    raise RuntimeError("K1 sensor preflight timed out: " + ", ".join(missing))
+                    raise RuntimeError(
+                        "K1 sensor preflight timed out after "
+                        f"{self._sensor_startup_timeout:g}s: {self.sensor_diagnostics()}"
+                    )
                 self._ready.wait(timeout=min(0.25, remaining))
         self._mode = self.get_mode()
         if self._mode != 2:
@@ -335,6 +370,24 @@ class RobotInterface:
         self._loco.Move(0.0, 0.0, 0.0)
         self._initialized = True
         logger.info("K1 preflight passed; velocity output armed at zero")
+
+    def sensor_diagnostics(self) -> str:
+        """Describe which live inputs arrived and whether RGB-D paired."""
+        rgb_count = int(getattr(self, "_rgb_message_count", 0))
+        depth_count = int(getattr(self, "_depth_message_count", 0))
+        info_count = int(getattr(self, "_camera_info_message_count", 0))
+        values = [
+            f"aligned RGB={'ready' if self._rgb is not None else f'no pair ({rgb_count} messages)'}",
+            f"depth={'ready' if self._depth is not None else f'no pair ({depth_count} messages)'}",
+            f"camera_info={'ready' if self._camera_info is not None else f'no frames ({info_count} messages)'}",
+            f"IMU={'ready' if self._imu is not None else 'missing'}",
+            f"odometry={'ready' if self._odom is not None else 'missing'}",
+            f"battery={'ready' if self._battery_level is not None else 'missing'}",
+        ]
+        offset = getattr(self, "_closest_rgbd_offset_ns", None)
+        if rgb_count and depth_count and self._rgb is None and offset is not None:
+            values.append(f"closest RGB-D offset={offset / 1_000_000.0:.1f}ms")
+        return ", ".join(values)
 
     @property
     def robot_info(self) -> Any:
@@ -360,16 +413,21 @@ class RobotInterface:
             timestamp = self._stamp(self._rgb)
             start = self._last_frame_timestamp
             samples = [
-                sample for sample in self._imu_samples
+                sample
+                for sample in self._imu_samples
                 if (start is None or sample[-1] > start) and sample[-1] <= timestamp
             ]
             self._imu_samples = [s for s in self._imu_samples if s[-1] > timestamp]
             self._last_frame_timestamp = timestamp
             return RobotState(
-                mode=self._mode, imu=self._imu, odom=self._odom,
-                joints=self._joints, rgb=self._rgb if include_images else None,
+                mode=self._mode,
+                imu=self._imu,
+                odom=self._odom,
+                joints=self._joints,
+                rgb=self._rgb if include_images else None,
                 depth=self._depth if include_images else None,
-                camera_info=self._camera_info, imu_samples=samples,
+                camera_info=self._camera_info,
+                imu_samples=samples,
                 battery_level=self._battery_level,
             )
 
@@ -379,10 +437,14 @@ class RobotInterface:
             if not self._sensor_ready():
                 raise RuntimeError("K1 sensor snapshot is not ready")
             return RobotState(
-                mode=self._mode, imu=self._imu, odom=self._odom,
-                joints=self._joints, rgb=self._rgb if include_images else None,
+                mode=self._mode,
+                imu=self._imu,
+                odom=self._odom,
+                joints=self._joints,
+                rgb=self._rgb if include_images else None,
                 depth=self._depth if include_images else None,
-                camera_info=self._camera_info, imu_samples=[],
+                camera_info=self._camera_info,
+                imu_samples=[],
                 battery_level=self._battery_level,
             )
 
@@ -462,9 +524,7 @@ class RobotInterface:
                     timeout=30,
                 )
         except (OSError, subprocess.SubprocessError) as exc:
-            raise RuntimeError(
-                "Speech playback requires K1 LUI TTS or flite and aplay"
-            ) from exc
+            raise RuntimeError("Speech playback requires K1 LUI TTS or flite and aplay") from exc
 
     def set_velocity(self, vx: float, vy: float, vyaw: float) -> None:
         if not self._initialized:
@@ -479,7 +539,10 @@ class RobotInterface:
             self._loco.Move(0.0, 0.0, 0.0)
 
     def close(self) -> None:
+        if self._closed:
+            return
         self.stop()
+        self._initialized = False
         self._closed = True
         if hasattr(self, "_low_state_subscriber"):
             self._low_state_subscriber.CloseChannel()

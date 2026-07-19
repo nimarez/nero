@@ -91,9 +91,7 @@ def parse_args() -> argparse.Namespace:
         help="Known startup pose in the map; omit for depth-scan localization",
     )
     parser.add_argument("--map-resolution", type=float, default=0.05)
-    parser.add_argument(
-        "--map-origin", nargs=2, type=float, metavar=("X", "Y"), default=(0.0, 0.0)
-    )
+    parser.add_argument("--map-origin", nargs=2, type=float, metavar=("X", "Y"), default=(0.0, 0.0))
     parser.add_argument("--map-inflation", type=float, default=0.3)
     parser.add_argument(
         "--camera-height", type=float, default=GlobalLocalizationConfig.camera_height
@@ -133,7 +131,8 @@ def run_agent(
         policy.start()
     except Exception:
         try:
-            robot.stop()
+            close = getattr(robot, "close", robot.stop)
+            close()
         except Exception:
             logger.exception("Robot cleanup failed after policy startup error")
         raise
@@ -275,9 +274,7 @@ def run_agent(
                     target_listener.start()
                     logger.info("Ready for another object command")
                 else:
-                    logger.info(
-                        "Press 'r' to reset and find another object, 'q' to quit"
-                    )
+                    logger.info("Press 'r' to reset and find another object, 'q' to quit")
 
             if status.state == PolicyState.LOST and target_object is not None:
                 logger.info("Target lost; ready for another object command")
@@ -305,7 +302,8 @@ def run_agent(
         logger.info("Shutting down...")
         policy.stop()
         try:
-            robot.stop()
+            close = getattr(robot, "close", robot.stop)
+            close()
         except RuntimeError as exc:
             logger.warning("Robot locomotion controller rejected final stop: %s", exc)
         target_listener.close()

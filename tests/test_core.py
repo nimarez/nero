@@ -64,24 +64,18 @@ def test_velocity_controller_stops_and_clamps():
     assert command.linear_x == 0.3
     assert command.angular_z == 1.0
 
-    turn_in_place = controller.compute_goal_velocity(
-        np.zeros(3), np.array([0.1, 0.0, 1.0])
-    )
+    turn_in_place = controller.compute_goal_velocity(np.zeros(3), np.array([0.1, 0.0, 1.0]))
     assert turn_in_place.linear_x == 0.0
     assert turn_in_place.angular_z > 0.0
     assert not controller.has_reached_pose(np.zeros(3), np.array([0.1, 0.0, 1.0]))
 
-    reverse = controller.compute_avoidance_velocity(
-        {"has_obstacle": True, "min_distance": 0.2}
-    )
+    reverse = controller.compute_avoidance_velocity({"has_obstacle": True, "min_distance": 0.2})
     assert reverse.linear_x == -0.1
 
 
 def test_robot_image_helpers_normalize_k1_images():
     image = np.arange(12).reshape(2, 2, 3)
-    np.testing.assert_array_equal(
-        RobotInterface.image_to_array(SimpleNamespace(data=image)), image
-    )
+    np.testing.assert_array_equal(RobotInterface.image_to_array(SimpleNamespace(data=image)), image)
     np.testing.assert_array_equal(RobotInterface.image_to_array(image), image)
     stamped = SimpleNamespace(
         header=SimpleNamespace(stamp=SimpleNamespace(sec=12, nanosec=500_000_000))
@@ -91,18 +85,12 @@ def test_robot_image_helpers_normalize_k1_images():
 
 def test_robot_image_helpers_decode_production_k1_encodings():
     depth = np.arange(12, dtype=np.uint16).reshape(3, 4)
-    depth_message = SimpleNamespace(
-        encoding="mono16", height=3, width=4, data=depth.tobytes()
-    )
+    depth_message = SimpleNamespace(encoding="mono16", height=3, width=4, data=depth.tobytes())
     np.testing.assert_array_equal(RobotInterface.image_to_array(depth_message), depth)
 
     # Neutral NV12 encodes a gray image and exercises the K1's exact wire layout.
-    nv12 = np.concatenate(
-        [np.full(4 * 4, 128, np.uint8), np.full(4 * 2, 128, np.uint8)]
-    )
-    rgb_message = SimpleNamespace(
-        encoding="nv12", height=4, width=4, data=nv12.tobytes()
-    )
+    nv12 = np.concatenate([np.full(4 * 4, 128, np.uint8), np.full(4 * 2, 128, np.uint8)])
+    rgb_message = SimpleNamespace(encoding="nv12", height=4, width=4, data=nv12.tobytes())
     decoded = RobotInterface.image_to_array(rgb_message)
     assert decoded.shape == (4, 4, 3)
     assert decoded.dtype == np.uint8
@@ -149,6 +137,67 @@ def test_robot_consumes_official_battery_soc_and_waits_for_a_new_rgbd_frame():
     assert RobotInterface.image_timestamp(states[0].rgb) == 2.0
 
 
+def test_robot_pairs_rgbd_within_tolerance_and_reports_larger_offsets():
+    robot = RobotInterface.__new__(RobotInterface)
+    robot._lock = threading.Lock()
+    robot._ready = threading.Condition(robot._lock)
+    robot._pending_rgb = {}
+    robot._pending_depth = {}
+    robot._rgb = None
+    robot._depth = None
+    robot._rgbd_sync_tolerance_ns = 20_000_000
+    robot._closest_rgbd_offset_ns = None
+    robot._rgb_message_count = 0
+    robot._depth_message_count = 0
+    robot._camera_info_message_count = 0
+    robot._camera_info = None
+    robot._imu = None
+    robot._odom = None
+    robot._battery_level = None
+
+    def image(nanosec):
+        return SimpleNamespace(
+            header=SimpleNamespace(stamp=SimpleNamespace(sec=1, nanosec=nanosec))
+        )
+
+    robot._on_rgb(image(0))
+    robot._on_depth(image(30_000_000))
+    assert robot._rgb is None
+    assert "closest RGB-D offset=30.0ms" in robot.sensor_diagnostics()
+
+    robot._on_depth(image(10_000_000))
+    assert robot._rgb is not None
+    assert robot._depth is not None
+
+
+def test_robot_bounds_unmatched_full_resolution_frame_queues():
+    robot = RobotInterface.__new__(RobotInterface)
+    robot._lock = threading.Lock()
+    robot._ready = threading.Condition(robot._lock)
+    robot._pending_rgb = {}
+    robot._pending_depth = {}
+    robot._rgb = None
+    robot._depth = None
+    robot._rgbd_sync_tolerance_ns = 1_000_000
+    robot._closest_rgbd_offset_ns = None
+    robot._rgb_message_count = 0
+
+    for index in range(60):
+        nanoseconds = index * 50_000_000
+        robot._on_rgb(
+            SimpleNamespace(
+                header=SimpleNamespace(
+                    stamp=SimpleNamespace(
+                        sec=nanoseconds // 1_000_000_000,
+                        nanosec=nanoseconds % 1_000_000_000,
+                    )
+                )
+            )
+        )
+
+    assert len(robot._pending_rgb) <= 21
+
+
 def test_opencv_yolo_backend_decodes_coco_detection_with_depth():
     class FakeNet:
         def setInput(self, blob):
@@ -173,9 +222,7 @@ def test_opencv_yolo_backend_decodes_coco_detection_with_depth():
     assert detections[0].position_3d[2] == 1.0
 
 
-def test_yolo_world_accepts_arbitrary_target_and_runs_asynchronously(
-    monkeypatch, tmp_path
-):
+def test_yolo_world_accepts_arbitrary_target_and_runs_asynchronously(monkeypatch, tmp_path):
     class Tensor:
         def __init__(self, values):
             self._values = np.asarray(values)
@@ -204,18 +251,14 @@ def test_yolo_world_accepts_arbitrary_target_and_runs_asynchronously(
             )
             return [SimpleNamespace(boxes=boxes, names={0: self.classes[0]})]
 
-    monkeypatch.setitem(
-        sys.modules, "ultralytics", SimpleNamespace(YOLOWorld=FakeWorld)
-    )
+    monkeypatch.setitem(sys.modules, "ultralytics", SimpleNamespace(YOLOWorld=FakeWorld))
     thread_counts = []
     monkeypatch.setitem(
         sys.modules,
         "torch",
         SimpleNamespace(
             set_num_threads=thread_counts.append,
-            set_num_interop_threads=lambda count: thread_counts.append(
-                ("interop", count)
-            ),
+            set_num_interop_threads=lambda count: thread_counts.append(("interop", count)),
         ),
     )
     model_path = tmp_path / "world.pt"
@@ -258,9 +301,7 @@ def test_yolo_world_runtime_tuning_is_validated(tmp_path, monkeypatch):
         ObjectDetector(model_path=model_path, max_detections=0)
 
 
-def test_yoloe_cpu_backend_accepts_arbitrary_target_asynchronously(
-    monkeypatch, tmp_path
-):
+def test_yoloe_cpu_backend_accepts_arbitrary_target_asynchronously(monkeypatch, tmp_path):
     class Tensor:
         def __init__(self, values):
             self._values = np.asarray(values)
@@ -416,9 +457,7 @@ def test_hardware_agent_clis_use_k1_sensors_implicitly(monkeypatch):
 def test_go_to_command_parser_accepts_natural_object_names():
     assert parse_go_to_command("go to chair") == "chair"
     assert parse_go_to_command("Go to the red chair, please!") == "red chair"
-    assert (
-        parse_go_to_command("please go to a fire extinguisher") == "fire extinguisher"
-    )
+    assert parse_go_to_command("please go to a fire extinguisher") == "fire extinguisher"
     assert parse_go_to_command("chair detected") is None
     assert parse_go_to_command("follow the chair") is None
     assert parse_go_to_command("go to") is None
@@ -428,18 +467,13 @@ def test_terminal_target_normalizes_a_missing_to_typo():
     from nero.interaction import _parse_bare_object_name
 
     assert _parse_bare_object_name("go the green can") == "green can"
-    assert (
-        _parse_bare_object_name("please go to a fire extinguisher")
-        == "fire extinguisher"
-    )
+    assert _parse_bare_object_name("please go to a fire extinguisher") == "fire extinguisher"
 
 
 def test_direction_acknowledges_target_without_detection_confirmation():
     spoken = []
     events = []
-    speaker = SimpleNamespace(
-        speak=lambda text: (events.append("speak"), spoken.append(text))
-    )
+    speaker = SimpleNamespace(speak=lambda text: (events.append("speak"), spoken.append(text)))
     responses = iter(["what can you see?", "go to", "go to the chair"])
     commands = SimpleNamespace(
         start_listening=lambda: events.append("start"),
@@ -481,9 +515,7 @@ def test_terminal_accepts_a_bare_object_name(monkeypatch):
     )
 
     assert (
-        request_navigation_target(
-            SimpleNamespace(speak=lambda _: None), TerminalCommandSource()
-        )
+        request_navigation_target(SimpleNamespace(speak=lambda _: None), TerminalCommandSource())
         == "red chair"
     )
     assert prompts == ["Object to follow (for example, 'chair'): "]
@@ -721,9 +753,7 @@ def test_real_agent_exits_immediately_on_terminal_policy_error(monkeypatch):
     monkeypatch.setattr(agent, "NavigationPolicy", FailedPolicy)
     monkeypatch.setattr(agent, "NavigationTargetListener", Listener)
     monkeypatch.setattr(agent.signal, "signal", lambda *args: None)
-    monkeypatch.setattr(
-        agent.RosObservabilityPublisher, "try_create", lambda **kwargs: None
-    )
+    monkeypatch.setattr(agent.RosObservabilityPublisher, "try_create", lambda **kwargs: None)
     robot = SimpleNamespace(stop=lambda: events.append("robot stop"))
 
     agent.run_agent(
@@ -797,7 +827,9 @@ def test_real_agent_announces_missing_object_once_per_command(monkeypatch):
     monkeypatch.setattr(agent, "NavigationTargetListener", Listener)
     monkeypatch.setattr(agent.signal, "signal", lambda *args: None)
     monkeypatch.setattr(agent.RosObservabilityPublisher, "try_create", lambda **kwargs: None)
-    monkeypatch.setattr(agent.Visualization, "draw_navigation_info", lambda self, frame, **kwargs: frame)
+    monkeypatch.setattr(
+        agent.Visualization, "draw_navigation_info", lambda self, frame, **kwargs: frame
+    )
     robot = SimpleNamespace(stop=lambda: None, speak=spoken.append)
 
     agent.run_agent(

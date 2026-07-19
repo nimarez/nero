@@ -25,8 +25,8 @@ The physical runtime uses interfaces verified on K1 Geek firmware
 | SLAM | Native ORB-SLAM3 `Sensor.IMU_RGBD` |
 
 Only the interfaces in this table are part of the physical runtime. RGB and depth
-must have the same timestamp. IMU samples are synchronized to each pair before
-native SLAM.
+must arrive within the 20 ms synchronization tolerance. IMU samples are
+synchronized to each pair before native SLAM.
 
 Startup is fail-closed. Nero requires live RGB, depth, CameraInfo, IMU, odometry,
 the configured detector, ORB vocabulary, robot calibration, walking mode, and
@@ -90,6 +90,13 @@ combines those measurements with the nominal K1 Geek camera mount. It writes:
 
 These robot-specific generated files are ignored by Git.
 
+The K1 setup also makes the vendor RGB-D bridge persistent by setting
+`EnableCameraBridge: true` and enabling `booster-daemon-perception.service`.
+It preserves the original vendor configuration as
+`/opt/booster/perception_info.yaml.nero-backup` and asks for a reboot; it does
+not restart perception inside the active SSH session because Booster resets its
+USB controller during that operation.
+
 In every new robot shell, source the installed ROS prefixes before using Nero:
 
 ```bash
@@ -136,6 +143,28 @@ prompt and the viewer, or pass `--no-rerun` to leave visualization off. SSH
 connection and keepalive failures are bounded, and a command that the robot
 policy does not acknowledge returns after five seconds; tune that with
 `--ack-timeout` if needed.
+
+Before starting a missing policy, `nero-command` now waits for actual 544×448
+RGB, depth, and CameraInfo messages and a synchronized RGB-D pair. DDS publisher
+discovery alone does not pass this gate. The camera and policy startup windows
+default to 120 and 240 seconds respectively because Booster's first-launch
+perception sequence can take more than a minute and the isolated QNN worker has
+its own 180-second startup ceiling. Override them with
+`--camera-start-timeout` and `--policy-start-timeout`.
+
+To diagnose the camera without launching navigation or issuing locomotion
+commands, run this on the robot after sourcing ROS:
+
+```bash
+uv run nero-k1-preflight --timeout 120
+```
+
+If raw RGB is live but aligned RGB/depth are silent, use Booster's supported
+recovery command and expect the SSH connection to drop temporarily:
+
+```bash
+booster-cli launch -c restart -m perception
+```
 
 For deterministic tagged-object navigation instead of YOLO, copy the example
 marker map and start the same command interface with ArUco options:

@@ -9,18 +9,14 @@ from nero.perception.object_detector import ObjectDetection
 
 
 def test_pure_pursuit_drives_straight_to_centered_target():
-    command = PurePursuitController().compute_command(
-        np.array([0.0, 0.0, 2.0]), stand_off=0.8
-    )
+    command = PurePursuitController().compute_command(np.array([0.0, 0.0, 2.0]), stand_off=0.8)
 
     assert command.linear_x > 0
     assert command.angular_z == 0
 
 
 def test_pure_pursuit_curves_toward_camera_right():
-    command = PurePursuitController().compute_command(
-        np.array([0.5, 0.0, 2.0]), stand_off=0.8
-    )
+    command = PurePursuitController().compute_command(np.array([0.5, 0.0, 2.0]), stand_off=0.8)
 
     assert command.linear_x > 0
     assert command.angular_z < 0
@@ -139,9 +135,7 @@ def test_direct_policy_expires_replayed_async_detection(monkeypatch):
         find_object=lambda detections, _name: detections[0],
         close=lambda: None,
     )
-    policy = DirectPursuitPolicy(
-        robot, object_detector=detector, target_timeout=1.0
-    )
+    policy = DirectPursuitPolicy(robot, object_detector=detector, target_timeout=1.0)
     policy.start()
     policy.set_target("chair")
     assert policy.step().state == PursuitState.NAVIGATING
@@ -361,3 +355,19 @@ def test_run_agent_cleans_up_when_listener_start_fails(monkeypatch):
     assert "detector close" in events
     assert "robot stop" in events
     assert "listener close" in events
+
+
+def test_direct_policy_closes_robot_when_sensor_startup_fails():
+    events = []
+    robot = SimpleNamespace(
+        initialize=lambda: (_ for _ in ()).throw(RuntimeError("camera silent")),
+        stop=lambda: events.append("robot stop"),
+        close=lambda: events.append("robot close"),
+    )
+    detector = SimpleNamespace(close=lambda: events.append("detector close"))
+    policy = pursuit_agent.DirectPursuitPolicy(robot, object_detector=detector)
+
+    with np.testing.assert_raises_regex(RuntimeError, "camera silent"):
+        policy.start()
+
+    assert events == ["detector close", "robot close"]

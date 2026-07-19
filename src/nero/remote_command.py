@@ -17,7 +17,8 @@ DEFAULT_ACK_TIMEOUT = 5.0
 DEFAULT_CONNECT_TIMEOUT = 5
 DEFAULT_KEEPALIVE_INTERVAL = 5
 DEFAULT_KEEPALIVE_COUNT = 3
-DEFAULT_POLICY_START_TIMEOUT = 60.0
+DEFAULT_POLICY_START_TIMEOUT = 240.0
+DEFAULT_CAMERA_START_TIMEOUT = 120.0
 
 
 def _mac_address_for(robot_host: str) -> str:
@@ -97,9 +98,7 @@ def _stop_viewer(viewer: subprocess.Popen[bytes] | None) -> None:
 
 def relay_main() -> None:
     """Run on the K1 and relay SSH stdin into the agent's Unix socket."""
-    parser = argparse.ArgumentParser(
-        description="Relay object names to a local Nero agent"
-    )
+    parser = argparse.ArgumentParser(description="Relay object names to a local Nero agent")
     parser.add_argument("--socket", default="/tmp/nero-navigation.sock")
     parser.add_argument(
         "--ack-timeout",
@@ -142,17 +141,15 @@ def _policy_bootstrap_script(
     policy_log: str,
     policy_args: tuple[str, ...] = (),
     policy_command: str = "nero-orb-slam",
+    camera_start_timeout: float | None = None,
 ) -> str:
     """Return a robot-side shell fragment that leaves one policy running."""
     socket_arg = shlex.quote(socket_path)
     log_arg = shlex.quote(policy_log)
     timeout_arg = str(max(1, math.ceil(start_timeout)))
-    startup_failure = shlex.quote(
-        f"{policy_command} exited during startup; log follows:"
-    )
+    startup_failure = shlex.quote(f"{policy_command} exited during startup; log follows:")
     timeout_failure = shlex.quote(
-        f"{policy_command} did not create {socket_path} within "
-        f"{timeout_arg}s; log follows:"
+        f"{policy_command} did not create {socket_path} within {timeout_arg}s; log follows:"
     )
     launch = " ".join(
         ("uv", "run", policy_command, "--no-display")
@@ -164,23 +161,31 @@ def _policy_bootstrap_script(
         "another Nero navigation policy is already running; stop it before "
         f"selecting {policy_command}"
     )
+    camera_gate = ()
+    if camera_start_timeout is not None:
+        camera_timeout = str(max(1, math.ceil(camera_start_timeout)))
+        camera_gate = (
+            '  echo "Checking live K1 RGB-D messages..."',
+            f"  if ! uv run nero-k1-preflight --timeout {camera_timeout}; then",
+            '    echo "Nero will not start without live synchronized RGB-D." >&2',
+            "    exit 1",
+            "  fi",
+        )
     return "\n".join(
         (
-            "if [ -f /opt/ros/humble/setup.bash ]; then "
-            ". /opt/ros/humble/setup.bash; fi",
+            "if [ -f /opt/ros/humble/setup.bash ]; then . /opt/ros/humble/setup.bash; fi",
             "if [ -f /opt/booster/BoosterAgent/install/setup.bash ]; then "
             ". /opt/booster/BoosterAgent/install/setup.bash; fi",
-            "policy_pid=$(pgrep -u \"$(id -u)\" -f "
-            f"{process_pattern} | head -n 1 || true)",
-            "any_policy_pid=$(pgrep -u \"$(id -u)\" -f "
-            f"{any_policy_pattern} | head -n 1 || true)",
+            f'policy_pid=$(pgrep -u "$(id -u)" -f {process_pattern} | head -n 1 || true)',
+            f'any_policy_pid=$(pgrep -u "$(id -u)" -f {any_policy_pattern} | head -n 1 || true)',
             'if [ -z "$policy_pid" ]; then',
             '  if [ -n "$any_policy_pid" ]; then',
             f"    echo {conflict} >&2",
             "    exit 1",
             "  fi",
+            *camera_gate,
             f"  if [ -S {socket_arg} ]; then rm -f -- {socket_arg}; fi",
-            f"  echo \"Starting {policy_command} on the robot...\"",
+            f'  echo "Starting {policy_command} on the robot..."',
             f"  nohup {launch} >{log_arg} 2>&1 </dev/null &",
             "  policy_pid=$!",
             "fi",
@@ -226,9 +231,7 @@ def main() -> None:
     )
     parser.add_argument("--rerun-port", type=int, default=DEFAULT_RERUN_PORT)
     parser.add_argument("--rerun-memory-limit", default="4GB")
-    parser.add_argument(
-        "--no-rerun", action="store_true", help="Open only the command terminal"
-    )
+    parser.add_argument("--no-rerun", action="store_true", help="Open only the command terminal")
     parser.add_argument(
         "--connect-timeout",
         type=int,
@@ -260,6 +263,12 @@ def main() -> None:
         help="Seconds to wait for the robot policy to create its command socket",
     )
     parser.add_argument(
+        "--camera-start-timeout",
+        type=float,
+        default=DEFAULT_CAMERA_START_TIMEOUT,
+        help="Seconds to wait for live synchronized K1 RGB-D messages",
+    )
+    parser.add_argument(
         "--policy-log",
         help="Robot-side startup log (default: /tmp/<policy>.log)",
     )
@@ -282,6 +291,8 @@ def main() -> None:
         parser.error("--ack-timeout must be positive")
     if args.policy_start_timeout <= 0:
         parser.error("--policy-start-timeout must be positive")
+    if args.camera_start_timeout <= 0:
+        parser.error("--camera-start-timeout must be positive")
     if args.aruco_map and args.object_backend != "aruco":
         parser.error("--aruco-map requires --object-backend aruco")
     for name in ("connect_timeout", "keepalive_interval", "keepalive_count"):
@@ -306,6 +317,7 @@ def main() -> None:
             policy_log,
             tuple(policy_args),
             policy_command,
+            args.camera_start_timeout,
         )
         if args.no_rerun:
             remote_script = "\n".join(

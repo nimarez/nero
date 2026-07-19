@@ -23,8 +23,7 @@ def test_no_rerun_opens_only_the_remote_command_relay(monkeypatch):
     monkeypatch.setattr(
         subprocess,
         "run",
-        lambda command, check: calls.append((command, check))
-        or SimpleNamespace(returncode=0),
+        lambda command, check: calls.append((command, check)) or SimpleNamespace(returncode=0),
     )
 
     remote_command.main()
@@ -38,6 +37,8 @@ def test_no_rerun_opens_only_the_remote_command_relay(monkeypatch):
     assert "nero-command-relay" in command[-1]
     assert "--ack-timeout 5" in command[-1]
     assert "nohup uv run nero-orb-slam --no-display" in command[-1]
+    assert "if ! uv run nero-k1-preflight --timeout 120" in command[-1]
+    assert "Nero will not start without live synchronized RGB-D" in command[-1]
     assert "while [ ! -S /tmp/nero-navigation.sock ]" in command[-1]
     assert "run_rerun_bridge" not in command[-1]
     assert check is False
@@ -54,8 +55,7 @@ def test_default_command_owns_viewer_and_remote_bridge(monkeypatch):
     monkeypatch.setattr(
         subprocess,
         "run",
-        lambda command, check: calls.append((command, check))
-        or SimpleNamespace(returncode=0),
+        lambda command, check: calls.append((command, check)) or SimpleNamespace(returncode=0),
     )
 
     remote_command.main()
@@ -72,6 +72,7 @@ def test_default_command_owns_viewer_and_remote_bridge(monkeypatch):
     assert "nero-command-relay" in command[-1]
     assert "nohup uv run nero-orb-slam --no-display" in command[-1]
     assert "nero-orb-slam.log" in command[-1]
+    assert "if ! uv run nero-k1-preflight --timeout 120" in command[-1]
     assert stopped == [viewer]
 
 
@@ -147,9 +148,7 @@ def test_stop_viewer_escalates_when_process_group_survives(monkeypatch):
     clock = iter([0.0, 0.0, 6.0])
     monkeypatch.setattr(time, "monotonic", lambda: next(clock))
     monkeypatch.setattr(time, "sleep", lambda _: None)
-    monkeypatch.setattr(
-        os, "killpg", lambda pid, sent_signal: signals.append((pid, sent_signal))
-    )
+    monkeypatch.setattr(os, "killpg", lambda pid, sent_signal: signals.append((pid, sent_signal)))
 
     remote_command._stop_viewer(viewer)
 
@@ -178,9 +177,7 @@ def test_ssh_failure_still_closes_owned_viewer(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["nero-command", "--rerun-host", "127.0.0.1"])
     monkeypatch.setattr(remote_command, "_start_viewer", lambda *args: viewer)
     monkeypatch.setattr(remote_command, "_stop_viewer", stopped.append)
-    monkeypatch.setattr(
-        subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=255)
-    )
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=255))
 
     with pytest.raises(SystemExit) as error:
         remote_command.main()
@@ -244,8 +241,7 @@ def test_aruco_options_are_forwarded_only_to_policy_start(monkeypatch):
     remote = shlex.split(calls[0][-1])[2]
     assert (
         "nero-orb-slam --no-display --object-backend aruco "
-        "--aruco-map 'config/my markers.json' --aruco-dictionary DICT_5X5_50"
-        in remote
+        "--aruco-map 'config/my markers.json' --aruco-dictionary DICT_5X5_50" in remote
     )
     relay = remote.rsplit("uv run nero-command-relay", 1)[1]
     assert "--object-backend" not in relay
@@ -290,9 +286,7 @@ def test_policy_bootstrap_really_waits_for_a_new_unix_socket(tmp_path):
         "time.sleep(10)\n"
     )
     fake_uv.chmod(0o755)
-    script = remote_command._policy_bootstrap_script(
-        socket_path, 3.0, str(log_path)
-    )
+    script = remote_command._policy_bootstrap_script(socket_path, 3.0, str(log_path))
     script += '\nkill "$policy_pid"\nwait "$policy_pid" 2>/dev/null || true\n'
     environment = os.environ.copy()
     environment["PATH"] = f"{bin_path}:{environment['PATH']}"
@@ -311,6 +305,40 @@ def test_policy_bootstrap_really_waits_for_a_new_unix_socket(tmp_path):
     assert "Starting nero-orb-slam on the robot" in completed.stdout
     assert os.path.exists(socket_path)
     os.unlink(socket_path)
+
+
+def test_policy_bootstrap_fails_closed_when_camera_messages_are_silent(tmp_path):
+    bin_path = tmp_path / "bin"
+    bin_path.mkdir()
+    invocation_log = tmp_path / "uv.log"
+    fake_pgrep = bin_path / "pgrep"
+    fake_pgrep.write_text("#!/bin/sh\nexit 1\n")
+    fake_pgrep.chmod(0o755)
+    fake_uv = bin_path / "uv"
+    fake_uv.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >>"$NERO_TEST_UV_LOG"\nexit 2\n')
+    fake_uv.chmod(0o755)
+    script = remote_command._policy_bootstrap_script(
+        "/tmp/never-created.sock",
+        3.0,
+        str(tmp_path / "policy.log"),
+        camera_start_timeout=1.0,
+    )
+    environment = os.environ.copy()
+    environment["PATH"] = f"{bin_path}:{environment['PATH']}"
+    environment["NERO_TEST_UV_LOG"] = str(invocation_log)
+
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert invocation_log.read_text().strip() == "run nero-k1-preflight --timeout 1"
+    assert "Nero will not start without live synchronized RGB-D" in completed.stderr
 
 
 def test_relay_round_trips_over_a_real_unix_socket(monkeypatch, capsys):
@@ -381,6 +409,8 @@ def test_relay_times_out_if_policy_never_acknowledges(monkeypatch, capsys):
         ["nero-command", "--keepalive-interval", "0"],
         ["nero-command", "--keepalive-count", "0"],
         ["nero-command", "--ack-timeout", "0"],
+        ["nero-command", "--camera-start-timeout", "0"],
+        ["nero-command", "--policy-start-timeout", "0"],
     ],
 )
 def test_main_rejects_unsafe_network_settings(monkeypatch, arguments):
