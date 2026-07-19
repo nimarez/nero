@@ -56,17 +56,20 @@ class MotionTracker:
         pose_path: str | Path = "/run/nero/vive_pose.json",
         center_path: str | Path = "~/.config/nero/controller-center.json",
         mapping_path: str | Path = "~/.config/nero/controller-floor-mapping.json",
+        height_path: str | Path = "~/.config/nero/controller-height-compensation.json",
         *,
         stale_after_s: float = 0.15,
     ) -> None:
         self.pose_path = Path(pose_path)
         self.center_path = Path(center_path).expanduser()
         self.mapping_path = Path(mapping_path).expanduser()
+        self.height_path = Path(height_path).expanduser()
         self.stale_after_s = stale_after_s
         self._lock = threading.Lock()
         self._latest: MotionPose | None = None
         self._origin = self._load_origin()
         self._mapping = self._load_mapping()
+        self._vertical_xy_per_z = self._load_height_compensation()
         self._calibration_samples: list[tuple[tuple[float, float], tuple[float, float]]] = []
         self._calibration_active = False
         self._stop = threading.Event()
@@ -87,6 +90,13 @@ class MotionTracker:
             matrix = tuple(tuple(float(value) for value in row) for row in rows)
             return matrix if len(matrix) == 2 and all(len(row) == 3 for row in matrix) else None
         except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+
+    def _load_height_compensation(self) -> tuple[float, float] | None:
+        try:
+            values = json.loads(self.height_path.read_text(encoding="utf-8"))["xy_per_z"]
+            return (float(values[0]), float(values[1]))
+        except (FileNotFoundError, KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
             return None
 
     def start(self) -> "MotionTracker":
@@ -157,6 +167,67 @@ class MotionTracker:
                 pass
             raise
         return True
+
+    def capture_height_at_center(self) -> dict[str, Any]:
+        """Learn the tilted Lighthouse vertical from a pose above floor center."""
+
+        with self._lock:
+            pose = self._latest
+            origin = self._origin
+            if not self._valid_locked(pose):
+                raise ValueError("controller is not currently tracked")
+            if origin is None:
+                raise ValueError("floor center has not been captured")
+            assert pose is not None
+            delta_z = pose.position[2] - origin[2]
+            if abs(delta_z) < 0.15:
+                raise ValueError("hold the controller at least 15 cm above the floor center")
+            slopes = (
+                (pose.position[0] - origin[0]) / delta_z,
+                (pose.position[1] - origin[1]) / delta_z,
+            )
+            self._vertical_xy_per_z = slopes
+
+        self.height_path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{self.height_path.name}.", dir=self.height_path.parent
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                json.dump(
+                    {
+                        "version": 1,
+                        "floor_center": list(origin),
+                        "above_center": list(pose.position),
+                        "xy_per_z": list(slopes),
+                    },
+                    stream,
+                    indent=2,
+                )
+                stream.write("\n")
+            os.replace(temporary, self.height_path)
+        except Exception:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+            raise
+        return self.snapshot()
+
+    def _floor_equivalent(
+        self,
+        position: tuple[float, float, float],
+        origin: tuple[float, float, float] | None,
+        slopes: tuple[float, float] | None,
+    ) -> tuple[float, float, float]:
+        if origin is None or slopes is None:
+            return position
+        delta_z = position[2] - origin[2]
+        return (
+            position[0] - slopes[0] * delta_z,
+            position[1] - slopes[1] * delta_z,
+            origin[2],
+        )
 
     def begin_floor_calibration(self) -> dict[str, Any]:
         with self._lock:
@@ -259,32 +330,34 @@ class MotionTracker:
             pose = self._latest
             origin = self._origin
             mapping = self._mapping
+            slopes = self._vertical_xy_per_z
             valid = self._valid_locked(pose)
         uv = None
         ring_uv = None
         if valid and pose:
+            floor_position = self._floor_equivalent(pose.position, origin, slopes)
             if mapping:
-                uv = self._apply_mapping(pose.position, mapping)
+                uv = self._apply_mapping(floor_position, mapping)
                 radius_m = 0.28
                 ring_uv = [
                     self._apply_mapping(
                         (
-                            pose.position[0] + radius_m * cos(index * 2 * pi / 96),
-                            pose.position[1] + radius_m * sin(index * 2 * pi / 96),
-                            pose.position[2],
+                            floor_position[0] + radius_m * cos(index * 2 * pi / 96),
+                            floor_position[1] + radius_m * sin(index * 2 * pi / 96),
+                            floor_position[2],
                         ),
                         mapping,
                     )
                     for index in range(96)
                 ]
             elif origin:
-                uv = map_floor_position(pose.position, origin)
+                uv = map_floor_position(floor_position, origin)
                 ring_uv = [
                     map_floor_position(
                         (
-                            pose.position[0] + 0.28 * cos(index * 2 * pi / 96),
-                            pose.position[1] + 0.28 * sin(index * 2 * pi / 96),
-                            pose.position[2],
+                            floor_position[0] + 0.28 * cos(index * 2 * pi / 96),
+                            floor_position[1] + 0.28 * sin(index * 2 * pi / 96),
+                            floor_position[2],
                         ),
                         origin,
                     )
@@ -300,5 +373,6 @@ class MotionTracker:
             "uv": list(uv) if uv else None,
             "ring_uv": [list(point) for point in ring_uv] if ring_uv else None,
             "age_ms": (time.time() - pose.received_at) * 1000 if pose else None,
+            "height_compensated": slopes is not None,
             "calibration": self.calibration_status(),
         }
