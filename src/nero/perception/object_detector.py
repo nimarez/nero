@@ -75,14 +75,14 @@ def _parse_cpu_list(value: str) -> set[int]:
     return cpus
 
 
-def configure_qualcomm_cpu_partition() -> tuple[set[int], set[int]] | None:
+def configure_qualcomm_cpu_partition(backend: str | None = None) -> tuple[set[int], set[int]] | None:
     """Reserve the fastest two K1 CPUs for the isolated detector process."""
     if os.getenv("NERO_CPU_PARTITION", "1") == "0":
         return None
-    configured_backend = os.getenv("NERO_OBJECT_BACKEND", QNN_BACKEND)
+    configured_backend = backend or os.getenv("NERO_OBJECT_BACKEND", QNN_BACKEND)
     normalized_backend = configured_backend.strip().lower().replace("_", "-")
     backend = _BACKEND_ALIASES.get(normalized_backend, normalized_backend)
-    if backend in {QNN_BACKEND, MODAL_BACKEND, "opencv"}:
+    if backend in {QNN_BACKEND, MODAL_BACKEND, "aruco", "opencv"}:
         logger.info(
             "CPU partition disabled for %s; navigation retains every K1 CPU",
             backend,
@@ -253,6 +253,41 @@ _FIXED_VOCAB_ALIASES = {
     "table": "dining table",
     "television": "tv",
 }
+
+
+def project_bbox_to_3d(
+    bbox: tuple[int, int, int, int],
+    depth: np.ndarray,
+    camera_info=None,
+    *,
+    depth_threshold_min: float = 0.2,
+    depth_threshold_max: float = 5.0,
+) -> Optional[np.ndarray]:
+    """Back-project a bounding-box center through the registered depth image."""
+    x_min, y_min, x_max, y_max = bbox
+    cx = (x_min + x_max) // 2
+    cy = (y_min + y_max) // 2
+    region_size = 5
+    region_depth = depth[
+        max(0, cy - region_size) : min(depth.shape[0], cy + region_size),
+        max(0, cx - region_size) : min(depth.shape[1], cx + region_size),
+    ]
+    if region_depth.dtype == np.uint16:
+        region_depth = region_depth.astype(np.float32) / 1000.0
+    valid = region_depth[
+        (region_depth >= depth_threshold_min) & (region_depth <= depth_threshold_max)
+    ]
+    if len(valid) == 0:
+        return None
+    z = float(np.median(valid))
+    if camera_info is not None:
+        matrix = np.asarray(getattr(camera_info, "k", camera_info), dtype=float).reshape(3, 3)
+        fx, fy = matrix[0, 0], matrix[1, 1]
+        cx_cam, cy_cam = matrix[0, 2], matrix[1, 2]
+    else:
+        fx = fy = 216.5
+        cx_cam, cy_cam = 160.0, 120.0
+    return np.array([(cx - cx_cam) * z / fx, (cy - cy_cam) * z / fy, z])
 
 
 @dataclass
@@ -1121,50 +1156,10 @@ class ObjectDetector:
         Returns:
             [x, y, z] in camera frame, or None if invalid
         """
-        x_min, y_min, x_max, y_max = bbox
-        cx = (x_min + x_max) // 2
-        cy = (y_min + y_max) // 2
-
-        # Get depth in a small region around center
-        region_size = 5
-        y_start = max(0, cy - region_size)
-        y_end = min(depth.shape[0], cy + region_size)
-        x_start = max(0, cx - region_size)
-        x_end = min(depth.shape[1], cx + region_size)
-
-        region_depth = depth[y_start:y_end, x_start:x_end]
-
-        # Filter invalid depths
-        if region_depth.dtype == np.uint16:
-            region_depth = region_depth.astype(np.float32) / 1000.0  # mm to m
-
-        valid = region_depth[
-            (region_depth >= self.depth_threshold_min)
-            & (region_depth <= self.depth_threshold_max)
-        ]
-
-        if len(valid) == 0:
-            return None
-
-        z = float(np.median(valid))
-
-        # Get camera intrinsics
-        if camera_info is not None:
-            matrix = np.asarray(
-                getattr(camera_info, "k", camera_info), dtype=float
-            ).reshape(3, 3)
-            fx = matrix[0, 0]
-            fy = matrix[1, 1]
-            cx_cam = matrix[0, 2]
-            cy_cam = matrix[1, 2]
-        else:
-            # Default intrinsics for K1
-            fx = fy = 216.5
-            cx_cam = 160.0
-            cy_cam = 120.0
-
-        # Back-project to 3D
-        x = (cx - cx_cam) * z / fx
-        y = (cy - cy_cam) * z / fy
-
-        return np.array([x, y, z])
+        return project_bbox_to_3d(
+            bbox,
+            depth,
+            camera_info,
+            depth_threshold_min=self.depth_threshold_min,
+            depth_threshold_max=self.depth_threshold_max,
+        )

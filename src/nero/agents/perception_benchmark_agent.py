@@ -78,6 +78,7 @@ def main() -> None:
     revision = detector.result_revision or 0
     submitted = None
     elapsed_results: list[float] = []
+    slam_results: list[float] = []
 
     try:
         while len(elapsed_results) < args.results:
@@ -92,12 +93,14 @@ def main() -> None:
                 depth = robot.image_to_array(state.depth)
                 camera_info = state.camera_info
                 if slam is not None:
+                    slam_started = time.perf_counter()
                     slam.track_frame(
                         rgb,
                         depth,
                         imu_data=state.imu_samples,
                         timestamp=robot.image_timestamp(state.rgb),
                     )
+                    slam_results.append(time.perf_counter() - slam_started)
             if submitted is None:
                 submitted = time.perf_counter()
             detections = detector.detect(rgb, depth, camera_info)
@@ -126,6 +129,13 @@ def main() -> None:
         f"samples={len(elapsed_results)}",
         flush=True,
     )
+    if slam_results:
+        slam_median = statistics.median(slam_results)
+        print(
+            f"SLAM median: {slam_median:.3f}s ({1.0 / slam_median:.2f} FPS), "
+            f"samples={len(slam_results)}",
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

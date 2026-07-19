@@ -1,0 +1,10 @@
+{
+  "map_from_lighthouse": {
+    "translation": [0.0, 0.0, 0.0],
+    "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]
+  },
+  "base_from_controller": {
+    "translation": [0.0, 0.0, 0.0],
+    "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]
+  }
+}

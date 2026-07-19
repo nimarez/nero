@@ -683,11 +683,21 @@ class NavigationPolicy:
         )
 
     def _stop_robot(self) -> None:
-        """Stop the robot."""
-        if self._is_sim:
-            self.sim_env.set_velocity(0.0, 0.0, 0.0)
-        elif self.robot:
-            send_velocity(self.robot)
+        """Best-effort stop that cannot turn a safety hold into a process crash."""
+        try:
+            if self._is_sim:
+                self.sim_env.set_velocity(0.0, 0.0, 0.0)
+            elif self.robot:
+                stop = getattr(self.robot, "stop", None)
+                if callable(stop):
+                    stop()
+                else:
+                    send_velocity(self.robot)
+        except RuntimeError:
+            # Booster returns code 400 when its walking controller is already
+            # unavailable. There is no accepted velocity command in that state;
+            # preserve the policy and its safety telemetry instead of crashing.
+            logger.exception("Robot locomotion controller rejected the stop command")
 
     def _slam_bootstrap_command(
         self, localized: LocalizedFrame

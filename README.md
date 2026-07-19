@@ -127,12 +127,28 @@ uv run nero-command
 ```
 
 Enter any target description, such as `green can`, at the `object>` prompt. The
-command uses your normal SSH authentication, starts a live-only telemetry bridge
-on the robot, and removes that bridge when the terminal exits. It does not create
-a Rerun recording. Use `quit` to close both the prompt and the viewer, or pass
-`--no-rerun` to leave visualization off. SSH connection and keepalive failures
-are bounded, and a command that the robot policy does not acknowledge returns
-after five seconds; tune that with `--ack-timeout` if needed.
+command uses your normal SSH authentication. If the robot policy is absent, it
+starts `nero-orb-slam --no-display`, waits for its command socket, and prints the
+robot-side policy log if startup fails. It also starts a live-only telemetry
+bridge and removes that bridge when the terminal exits; the navigation policy is
+left running. It does not create a Rerun recording. Use `quit` to close both the
+prompt and the viewer, or pass `--no-rerun` to leave visualization off. SSH
+connection and keepalive failures are bounded, and a command that the robot
+policy does not acknowledge returns after five seconds; tune that with
+`--ack-timeout` if needed.
+
+For deterministic tagged-object navigation instead of YOLO, copy the example
+marker map and start the same command interface with ArUco options:
+
+```bash
+cp config/aruco_markers.example.json config/aruco_markers.json
+uv run nero-command --object-backend aruco \
+  --aruco-map config/aruco_markers.json
+```
+
+The map path is robot-side. The marker detector uses the same K1 RGB-D stream,
+goal-pose controller, ROS detection topic, and Rerun overlay. See
+[`docs/aruco_navigation.md`](docs/aruco_navigation.md) for marker setup details.
 
 The real Linux ARM64 K1 defaults to `yolo-world-qnn`: a 256-pixel visual graph on
 the QCS8550 HTP/NPU and an exact CLIP text embedding computed only when the
@@ -153,6 +169,42 @@ inference. It reserves the two fastest available cores for detection and leaves
 the remaining allowed cores to camera, SLAM, ROS, and control. Disable this only
 for diagnostics with `NERO_CPU_PARTITION=0`; disable process isolation with
 `NERO_DETECTOR_PROCESS=0`.
+
+### Modal GPU perception path
+
+Modal is an optional remote perception backend. It sends one JPEG at a time to
+an authenticated L4-backed YOLO-World endpoint and returns only 2D boxes. Depth
+projection, object/world tracking, SLAM, safety, and control remain on the K1.
+Keeping IMU-RGBD SLAM local avoids putting the 20 Hz localization critical path
+behind network jitter or a serverless cold start.
+
+Deploy the endpoint from the Mac and create a proxy token:
+
+```bash
+uvx modal setup
+uvx modal deploy deploy/modal_perception.py
+uvx modal workspace proxy-tokens create
+```
+
+The deploy command prints the `detect` URL. Configure the robot with that URL
+and the proxy token pair, then validate and warm the endpoint before starting
+navigation:
+
+```bash
+export NERO_OBJECT_BACKEND=yolo-world-modal
+export NERO_MODAL_URL=https://YOUR-WORKSPACE--nero-perception-yoloworldendpoint-detect.modal.run
+export NERO_MODAL_KEY=wk-...
+export NERO_MODAL_SECRET=ws-...
+./scripts/setup_object_detector.sh
+uv run nero-orb-slam --no-display
+```
+
+The endpoint is proxy-authenticated; do not commit the token values. Tune the
+request with `NERO_MODAL_TIMEOUT` (default `120` seconds),
+`NERO_MODAL_JPEG_QUALITY` (default `85`), and the usual
+`NERO_OBJECT_IMGSZ`/`NERO_YOLO_MAX_DETECTIONS` settings. Set
+`NERO_MODAL_WARMUP=0` only for diagnostics; the default startup warmup makes an
+unreachable endpoint fail before the policy enables motion.
 
 YOLOE-26n is an optional open-vocabulary alternative. Install and run it with:
 
@@ -231,6 +283,9 @@ without commanding robot motion using:
 uv run nero-perception-benchmark --live --with-slam --target "green can"
 ```
 
+This benchmark reports both completed detector round-trip latency and native
+SLAM frame latency, so the slower path can be identified on the actual robot.
+
 The robot announces an accepted command before movement. Nero stops when the
 target track expires, a safety check fails, SLAM loses the required state, or the
 process receives an interrupt.
@@ -247,6 +302,7 @@ All commands run through uv:
 | Command | Purpose |
 |---|---|
 | `uv run nero-orb-slam` | Spoken/typed object navigation on a real K1 |
+| `uv run nero-pure-pursuit` | Same command/arrival loop using direct RGB-D pursuit, without SLAM or a map |
 | `uv run nero-command` | Mac object-command prompt plus live K1 Rerun viewer |
 | `uv run nero-sim --demo` | Fast deterministic in-process policy test |
 | `uv run nero-booster-studio` | Full policy on a Booster Studio virtual K1 |
@@ -263,6 +319,7 @@ All commands run through uv:
 | `uv run nero-pc2map CLOUD -o MAP` | Convert a point cloud to an occupancy map |
 | `uv run nero-k1-calibration` | Capture real K1 IMU-RGBD calibration |
 | `uv run --extra viz nero-rerun` | Bridge normalized Nero ROS topics into Rerun |
+| `uv run nero-vive-ros` | Publish jscore's fail-closed Vive pose into ROS 2 |
 
 `nero-mapping` is a separate reconstruction pipeline. COLMAP and the configured
 gsplat training command must already be installed; they are intentionally not
@@ -272,6 +329,12 @@ object-derived goal pose. With a map,
 an optional `MapNavigator` aligns that same SLAM session to the fixed map and
 routes the same goal through A*. `nero-map-nav` is only an explicit pose-goal
 front end; it does not own a second sensor, safety, localization, or control loop.
+
+`nero-pure-pursuit` is the intentionally smaller alternative for visible-object
+goals. It uses the target's live camera-frame RGB-D position as the pursuit point,
+keeps the tilt/depth/battery safety gate, and stops at the same class-aware
+stand-off distance. Because it has no persistent world pose, it stops and searches
+when the object leaves view and cannot route around occlusions or map obstacles.
 
 The bundled real main-room splat can be converted without Open3D. The alias
 `assets/main_room.ply` resolves to its Git-LFS location:
@@ -397,7 +460,7 @@ Hardware, Studio, mapping, and benchmark runtimes publish normalized telemetry:
 | `/nero/sensors` | RGB, metric depth, CameraInfo, IMU, odometry, joint states |
 | `/nero/slam` | Pose, path, tracking state, map points |
 | `/nero/navigation` | Detections, object/goal poses, controller plan, status, velocity |
-| `/nero/reference` | Simulator-only truth for visualization and benchmarks |
+| `/nero/reference` | Simulator or calibrated external truth for visualization and benchmarks |
 
 Control never consumes `/nero/reference`. Pass `--no-ros-observability` to a
 supported agent to disable publication.
@@ -412,7 +475,7 @@ uv run --extra viz nero-rerun
 The bridge plots RGB, metric depth, camera calibration, IMU orientation/rates,
 odometry, every available joint position/velocity/effort, SLAM pose/path/map,
 detection boxes/labels/confidence/depth centroids, goals, the green controller
-plan, commands, and simulator reference data. Print the exact
+plan, commands, and simulator or calibrated Vive reference data. Print the exact
 subscription contract without requiring ROS or Rerun to be installed:
 
 ```bash

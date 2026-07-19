@@ -1,0 +1,18 @@
+[Unit]
+Description=Nero Vive pose receiver on jscore
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jon
+WorkingDirectory=/home/jon/nero
+RuntimeDirectory=nero
+RuntimeDirectoryMode=0755
+Environment=PYTHONPATH=/home/jon/nero/src
+ExecStart=/usr/bin/python3 -c "from nero.vive.udp_transport import receiver_main; raise SystemExit(receiver_main(['--bind','10.77.0.1','--port','43100','--latest-file','/run/nero/vive_pose.json']))"
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

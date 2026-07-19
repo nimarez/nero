@@ -1,5 +1,6 @@
 import builtins
 import os
+import shlex
 import signal
 import socket
 import subprocess
@@ -36,6 +37,8 @@ def test_no_rerun_opens_only_the_remote_command_relay(monkeypatch):
     assert command[-2] == "booster@robot.local"
     assert "nero-command-relay" in command[-1]
     assert "--ack-timeout 5" in command[-1]
+    assert "nohup uv run nero-orb-slam --no-display" in command[-1]
+    assert "while [ ! -S /tmp/nero-navigation.sock ]" in command[-1]
     assert "run_rerun_bridge" not in command[-1]
     assert check is False
 
@@ -67,6 +70,8 @@ def test_default_command_owns_viewer_and_remote_bridge(monkeypatch):
     assert 'wait "$relay_pid"' in command[-1]
     assert "nero-rerun-bridge.log" in command[-1]
     assert "nero-command-relay" in command[-1]
+    assert "nohup uv run nero-orb-slam --no-display" in command[-1]
+    assert "nero-orb-slam.log" in command[-1]
     assert stopped == [viewer]
 
 
@@ -206,9 +211,85 @@ def test_main_quotes_remote_repo_and_socket(monkeypatch):
 
     remote_command.main()
 
-    remote = calls[0][-1]
+    remote = shlex.split(calls[0][-1])[2]
     assert "cd '/tmp/repo with '\"'\"' quote'" in remote
     assert "--socket '/tmp/socket with space'" in remote
+    assert "[ ! -S '/tmp/socket with space' ]" in remote
+
+
+def test_aruco_options_are_forwarded_only_to_policy_start(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "nero-command",
+            "--no-rerun",
+            "--object-backend",
+            "aruco",
+            "--aruco-map",
+            "config/my markers.json",
+            "--aruco-dictionary",
+            "DICT_5X5_50",
+        ],
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, check: calls.append(command) or SimpleNamespace(returncode=0),
+    )
+
+    remote_command.main()
+
+    remote = shlex.split(calls[0][-1])[2]
+    assert (
+        "nero-orb-slam --no-display --object-backend aruco "
+        "--aruco-map 'config/my markers.json' --aruco-dictionary DICT_5X5_50"
+        in remote
+    )
+    relay = remote.rsplit("uv run nero-command-relay", 1)[1]
+    assert "--object-backend" not in relay
+
+
+def test_policy_bootstrap_really_waits_for_a_new_unix_socket(tmp_path):
+    socket_path = f"/tmp/nero-bootstrap-{os.getpid()}-{time.time_ns()}.sock"
+    log_path = tmp_path / "policy.log"
+    bin_path = tmp_path / "bin"
+    bin_path.mkdir()
+    fake_pgrep = bin_path / "pgrep"
+    fake_pgrep.write_text("#!/bin/sh\nexit 1\n")
+    fake_pgrep.chmod(0o755)
+    fake_uv = bin_path / "uv"
+    fake_uv.write_text(
+        f"#!{sys.executable}\n"
+        "import os, socket, time\n"
+        "server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+        "server.bind(os.environ['NERO_TEST_POLICY_SOCKET'])\n"
+        "server.listen(1)\n"
+        "time.sleep(10)\n"
+    )
+    fake_uv.chmod(0o755)
+    script = remote_command._policy_bootstrap_script(
+        socket_path, 3.0, str(log_path)
+    )
+    script += '\nkill "$policy_pid"\nwait "$policy_pid" 2>/dev/null || true\n'
+    environment = os.environ.copy()
+    environment["PATH"] = f"{bin_path}:{environment['PATH']}"
+    environment["NERO_TEST_POLICY_SOCKET"] = socket_path
+
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Starting nero-orb-slam on the robot" in completed.stdout
+    assert os.path.exists(socket_path)
+    os.unlink(socket_path)
 
 
 def test_relay_round_trips_over_a_real_unix_socket(monkeypatch, capsys):

@@ -15,9 +15,9 @@ class DepthProcessor:
 
     def __init__(
         self,
-        min_depth: float = 0.2,
-        max_depth: float = 5.0,
-        obstacle_threshold: float = 0.5,
+        min_depth: float = 0.5,
+        max_depth: float = 6.0,
+        obstacle_threshold: float = 0.6,
         obstacle_region_height: int = 60,
     ):
         """Initialize depth processor.
@@ -47,15 +47,14 @@ class DepthProcessor:
         else:
             depth_m = depth.astype(np.float32).copy()
 
-        # A positive return below the reliable range is still evidence of a
-        # near-field hazard. Clamp it so filtering cannot turn a dangerously
-        # close object into "no obstacle". Zero/non-finite and over-range
-        # returns remain invalid.
-        near = np.isfinite(depth_m) & (depth_m > 0) & (depth_m < self.min_depth)
-        depth_m[near] = self.min_depth
-        depth_m[(depth_m <= 0) | ~np.isfinite(depth_m) | (depth_m > self.max_depth)] = (
-            np.nan
-        )
+        # The K1 Geek depth camera is specified only for 0.5-6 m. Its lower
+        # image frequently contains self/floor artifacts around 0.2 m; those
+        # out-of-range returns must not permanently inhibit walking.
+        depth_m[
+            (depth_m < self.min_depth)
+            | (depth_m > self.max_depth)
+            | ~np.isfinite(depth_m)
+        ] = np.nan
 
         return depth_m
 

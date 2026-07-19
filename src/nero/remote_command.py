@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import shlex
 import signal
@@ -16,6 +17,8 @@ DEFAULT_ACK_TIMEOUT = 5.0
 DEFAULT_CONNECT_TIMEOUT = 5
 DEFAULT_KEEPALIVE_INTERVAL = 5
 DEFAULT_KEEPALIVE_COUNT = 3
+DEFAULT_POLICY_START_TIMEOUT = 60.0
+DEFAULT_POLICY_LOG = "/tmp/nero-orb-slam.log"
 
 
 def _mac_address_for(robot_host: str) -> str:
@@ -134,6 +137,59 @@ def relay_main() -> None:
         print(f"{acknowledgement}: {command}", flush=True)
 
 
+def _policy_bootstrap_script(
+    socket_path: str,
+    start_timeout: float,
+    policy_log: str,
+    policy_args: tuple[str, ...] = (),
+) -> str:
+    """Return a robot-side shell fragment that leaves one policy running."""
+    socket_arg = shlex.quote(socket_path)
+    log_arg = shlex.quote(policy_log)
+    timeout_arg = str(max(1, math.ceil(start_timeout)))
+    startup_failure = shlex.quote(
+        "nero-orb-slam exited during startup; log follows:"
+    )
+    timeout_failure = shlex.quote(
+        f"nero-orb-slam did not create {socket_path} within "
+        f"{timeout_arg}s; log follows:"
+    )
+    launch = " ".join(
+        ("uv", "run", "nero-orb-slam", "--no-display")
+        + tuple(shlex.quote(argument) for argument in policy_args)
+    )
+    return "\n".join(
+        (
+            "if [ -f /opt/ros/humble/setup.bash ]; then "
+            ". /opt/ros/humble/setup.bash; fi",
+            "if [ -f /opt/booster/BoosterAgent/install/setup.bash ]; then "
+            ". /opt/booster/BoosterAgent/install/setup.bash; fi",
+            "policy_pid=$(pgrep -u \"$(id -u)\" -f "
+            "'[/]nero-orb-slam( |$)' | head -n 1 || true)",
+            'if [ -z "$policy_pid" ]; then',
+            f"  if [ -S {socket_arg} ]; then rm -f -- {socket_arg}; fi",
+            '  echo "Starting nero-orb-slam on the robot..."',
+            f"  nohup {launch} >{log_arg} 2>&1 </dev/null &",
+            "  policy_pid=$!",
+            "fi",
+            "policy_deadline=$((SECONDS + " + timeout_arg + "))",
+            f"while [ ! -S {socket_arg} ]; do",
+            '  if ! kill -0 "$policy_pid" 2>/dev/null; then',
+            f"    echo {startup_failure} >&2",
+            f"    tail -n 120 {log_arg} >&2 2>/dev/null || true",
+            "    exit 1",
+            "  fi",
+            '  if [ "$SECONDS" -ge "$policy_deadline" ]; then',
+            f"    echo {timeout_failure} >&2",
+            f"    tail -n 120 {log_arg} >&2 2>/dev/null || true",
+            "    exit 1",
+            "  fi",
+            "  sleep 0.25",
+            "done",
+        )
+    )
+
+
 def main() -> None:
     """Start Rerun and open the interactive relay through the user's SSH client."""
     parser = argparse.ArgumentParser(
@@ -179,23 +235,68 @@ def main() -> None:
         default=DEFAULT_KEEPALIVE_COUNT,
         help="Missed SSH keepalives before disconnecting",
     )
+    parser.add_argument(
+        "--policy-start-timeout",
+        type=float,
+        default=DEFAULT_POLICY_START_TIMEOUT,
+        help="Seconds to wait for nero-orb-slam to create its command socket",
+    )
+    parser.add_argument(
+        "--policy-log",
+        default=DEFAULT_POLICY_LOG,
+        help="Robot-side log used when nero-command starts nero-orb-slam",
+    )
+    parser.add_argument(
+        "--object-backend",
+        help="Robot detector backend to use when starting nero-orb-slam",
+    )
+    parser.add_argument(
+        "--aruco-map",
+        help="Robot-side ArUco marker mapping passed to nero-orb-slam",
+    )
+    parser.add_argument(
+        "--aruco-dictionary",
+        help="OpenCV ArUco dictionary passed to nero-orb-slam",
+    )
     args = parser.parse_args()
     if not 1 <= args.rerun_port <= 65535:
         parser.error("--rerun-port must be between 1 and 65535")
     if args.ack_timeout <= 0:
         parser.error("--ack-timeout must be positive")
+    if args.policy_start_timeout <= 0:
+        parser.error("--policy-start-timeout must be positive")
+    if args.aruco_map and args.object_backend != "aruco":
+        parser.error("--aruco-map requires --object-backend aruco")
     for name in ("connect_timeout", "keepalive_interval", "keepalive_count"):
         if getattr(args, name) <= 0:
             parser.error(f"--{name.replace('_', '-')} must be positive")
 
     viewer = None
     try:
+        policy_args = []
+        for option, value in (
+            ("--object-backend", args.object_backend),
+            ("--aruco-map", args.aruco_map),
+            ("--aruco-dictionary", args.aruco_dictionary),
+        ):
+            if value:
+                policy_args.extend((option, value))
+        bootstrap = _policy_bootstrap_script(
+            args.socket,
+            args.policy_start_timeout,
+            args.policy_log,
+            tuple(policy_args),
+        )
         if args.no_rerun:
-            remote_command = (
-                f"cd {shlex.quote(args.repo)} && uv run nero-command-relay "
-                f"--socket {shlex.quote(args.socket)} "
-                f"--ack-timeout {args.ack_timeout:g}"
+            remote_script = "\n".join(
+                (
+                    f"cd {shlex.quote(args.repo)}",
+                    bootstrap,
+                    f"uv run nero-command-relay --socket {shlex.quote(args.socket)} "
+                    f"--ack-timeout {args.ack_timeout:g}",
+                )
             )
+            remote_command = f"bash -lc {shlex.quote(remote_script)}"
         else:
             viewer = _start_viewer(args.rerun_port, args.rerun_memory_limit)
             rerun_host = args.rerun_host or _mac_address_for(args.host)
@@ -203,6 +304,7 @@ def main() -> None:
             remote_script = "\n".join(
                 (
                     f"cd {shlex.quote(args.repo)}",
+                    bootstrap,
                     f"NERO_RERUN_URL={shlex.quote(rerun_url)} "
                     "./scripts/run_rerun_bridge.sh >/tmp/nero-rerun-bridge.log 2>&1 &",
                     "bridge_pid=$!",

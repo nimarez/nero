@@ -1,0 +1,19 @@
+[Unit]
+Description=Nero Vive pose publisher on Raspberry Pi
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=boosterpi
+WorkingDirectory=/home/boosterpi/nero
+Environment=PYTHONPATH=/home/boosterpi/nero/src:/home/boosterpi/src/libsurvive/bindings/python
+Environment=LD_LIBRARY_PATH=/home/boosterpi/src/libsurvive/bin
+ExecStart=/usr/bin/python3 -c "from nero.vive.udp_transport import publisher_main; raise SystemExit(publisher_main(['--host','10.77.0.1','--port','43100','--device','WW0','--lighthouse-count','2']))"
+Restart=always
+RestartSec=2
+TimeoutStopSec=5
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

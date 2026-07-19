@@ -734,6 +734,73 @@ def test_real_agent_exits_immediately_on_terminal_policy_error(monkeypatch):
     ]
 
 
+def test_real_agent_announces_missing_object_once_per_command(monkeypatch):
+    import nero.agents.orb_slam_agent as agent
+
+    spoken = []
+
+    class LostPolicy:
+        slam = None
+        map_navigator = None
+        last_sensor = SimpleNamespace(
+            rgb=np.zeros((4, 4, 3), dtype=np.uint8),
+            timestamp=1.0,
+            raw_state=None,
+        )
+
+        def __init__(self, **kwargs):
+            self.calls = 0
+
+        def start(self):
+            pass
+
+        def set_target(self, target):
+            self.target = target
+
+        def step(self):
+            self.calls += 1
+            state = agent.PolicyState.LOST if self.calls == 1 else agent.PolicyState.ERROR
+            return SimpleNamespace(
+                state=state,
+                message="not found",
+                velocity_command=None,
+            )
+
+        def reset(self):
+            pass
+
+        def stop(self):
+            pass
+
+    class Listener:
+        def __init__(self, *args, **kwargs):
+            self.commands = ["green cup"]
+
+        def start(self):
+            pass
+
+        def poll(self):
+            return self.commands.pop(0) if self.commands else None
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(agent, "NavigationPolicy", LostPolicy)
+    monkeypatch.setattr(agent, "NavigationTargetListener", Listener)
+    monkeypatch.setattr(agent.signal, "signal", lambda *args: None)
+    monkeypatch.setattr(agent.RosObservabilityPublisher, "try_create", lambda **kwargs: None)
+    monkeypatch.setattr(agent.Visualization, "draw_navigation_info", lambda self, frame, **kwargs: frame)
+    robot = SimpleNamespace(stop=lambda: None, speak=spoken.append)
+
+    agent.run_agent(
+        robot,
+        SimpleNamespace(no_ros_observability=True, no_display=True),
+        command_source=SimpleNamespace(),
+    )
+
+    assert spoken == ["I could not detect the green cup."]
+
+
 def test_robot_speak_uses_booster_speaker_service():
     spoken = []
     robot = RobotInterface.__new__(RobotInterface)

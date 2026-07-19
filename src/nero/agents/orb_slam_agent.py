@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import time
 
@@ -28,7 +29,8 @@ from nero.navigation.policy import NavigationPolicy, PolicyState
 from nero.navigation.map_policy import MapNavConfig
 from nero.navigation.global_localization import GlobalLocalizationConfig
 from nero.observability import RosObservabilityPublisher
-from nero.perception.object_detector import configure_qualcomm_cpu_partition
+from nero.perception.aruco_detector import ArucoObjectDetector
+from nero.perception.object_detector import ObjectDetector, configure_qualcomm_cpu_partition
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +67,19 @@ def parse_args() -> argparse.Namespace:
         help="Robot-local Unix socket used by the socket command source",
     )
     parser.add_argument(
+        "--object-backend",
+        help="Detector backend (default: NERO_OBJECT_BACKEND or K1 QNN; use 'aruco' for markers)",
+    )
+    parser.add_argument(
+        "--aruco-map",
+        help="JSON marker-ID to object-name mapping (or set NERO_ARUCO_MAP)",
+    )
+    parser.add_argument(
+        "--aruco-dictionary",
+        default=None,
+        help="OpenCV dictionary name (default: NERO_ARUCO_DICTIONARY or DICT_4X4_50)",
+    )
+    parser.add_argument(
         "--map",
         help="Optional occupancy map; enables map alignment and A* for object goals",
     )
@@ -86,6 +101,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--localization-spin-speed", type=float, default=0.3)
     return parser.parse_args()
+
+
+def build_object_detector(args: argparse.Namespace):
+    """Build the selected detector without exposing K1 camera parameters."""
+    backend = getattr(args, "object_backend", None) or os.getenv("NERO_OBJECT_BACKEND")
+    if backend and backend.strip().lower().replace("_", "-") == "aruco":
+        return ArucoObjectDetector(
+            mapping_path=getattr(args, "aruco_map", None),
+            dictionary=getattr(args, "aruco_dictionary", None),
+        )
+    if getattr(args, "aruco_map", None):
+        raise ValueError("--aruco-map requires --object-backend aruco")
+    return ObjectDetector(backend=backend)
 
 
 def run_agent(
@@ -137,6 +165,7 @@ def run_agent(
     viz = Visualization()
     target_object = None
     announced_arrival = False
+    announced_failure = False
     commands = command_source or TerminalCommandSource()
     target_listener = NavigationTargetListener(
         robot,
@@ -161,6 +190,7 @@ def run_agent(
                 if target_object is not None:
                     policy.set_target(target_object)
                     announced_arrival = False
+                    announced_failure = False
                     logger.info("Accepted navigation target: %s", target_object)
 
             # The policy owns the single synchronized K1 sensor read used by
@@ -256,6 +286,12 @@ def run_agent(
 
             if status.state == PolicyState.LOST and target_object is not None:
                 logger.info("Target lost; ready for another object command")
+                if not announced_failure:
+                    try:
+                        robot.speak(f"I could not detect the {target_object}.")
+                    except RuntimeError as e:
+                        logger.warning("Could not announce missing object: %s", e)
+                    announced_failure = True
                 policy.reset()
                 target_object = None
                 announced_arrival = False
@@ -273,7 +309,10 @@ def run_agent(
         # Cleanup
         logger.info("Shutting down...")
         policy.stop()
-        robot.stop()
+        try:
+            robot.stop()
+        except RuntimeError as exc:
+            logger.warning("Robot locomotion controller rejected final stop: %s", exc)
         target_listener.close()
         if telemetry is not None:
             telemetry.close()
@@ -292,7 +331,7 @@ def main():
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    configure_qualcomm_cpu_partition()
+    configure_qualcomm_cpu_partition(args.object_backend)
 
     logger.info("Starting Nero ORB-SLAM Agent")
     logger.info("Sensors: K1 built-in RGB-D camera")
@@ -335,7 +374,19 @@ def main():
             "automatic" if auto_localize else "known-pose",
         )
 
-    run_agent(robot, args, command_source=command_source, map_config=map_config)
+    try:
+        object_detector = build_object_detector(args)
+    except ValueError as exc:
+        logger.error("Invalid object detector configuration: %s", exc)
+        raise SystemExit(2) from exc
+
+    run_agent(
+        robot,
+        args,
+        object_detector=object_detector,
+        command_source=command_source,
+        map_config=map_config,
+    )
 
 
 if __name__ == "__main__":

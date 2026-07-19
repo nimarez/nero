@@ -1,0 +1,21 @@
+[Unit]
+Description=Publish jscore Vive tracking into Nero ROS 2
+After=docker.service nero-vive-receiver.service
+Requires=docker.service nero-vive-receiver.service
+
+[Service]
+Type=simple
+User=jon
+EnvironmentFile=-/etc/nero/vive_ros.env
+ExecStartPre=-/usr/bin/docker rm -f nero-vive-ros
+ExecStart=/usr/bin/docker run --rm --name nero-vive-ros --network host \
+  --env ROS_DOMAIN_ID=0 --env NERO_VIVE_CALIBRATION \
+  --volume /run/nero/vive_pose.json:/run/nero/vive_pose.json:ro \
+  --volume /home/jon/nero/config:/app/config:ro nero-vive-ros:humble
+ExecStop=/usr/bin/docker stop -t 5 nero-vive-ros
+Restart=always
+RestartSec=2
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

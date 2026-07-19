@@ -158,15 +158,15 @@ def test_astar_heuristic_uses_the_same_metric_units_as_path_cost():
 def test_depth_preprocessing_obstacles_clear_path_and_ground_plane():
     processor = DepthProcessor(obstacle_region_height=2)
     raw = np.array(
-        [[100, 1000, 6000], [1000, 1000, 1000], [1000, 300, 1000]],
+        [[100, 1000, 7000], [1000, 1000, 1000], [1000, 550, 1000]],
         dtype=np.uint16,
     )
     depth = processor.preprocess(raw)
-    assert depth[0, 0] == pytest.approx(processor.min_depth)
+    assert np.isnan(depth[0, 0])
     assert np.isnan(depth[0, 2])
     obstacles = processor.detect_obstacles(depth)
     assert obstacles["has_obstacle"]
-    assert obstacles["min_distance"] == pytest.approx(0.3)
+    assert obstacles["min_distance"] == pytest.approx(0.55)
     clear = processor.get_clear_path(depth)
     assert not clear["is_clear"]
 
@@ -176,17 +176,19 @@ def test_depth_preprocessing_obstacles_clear_path_and_ground_plane():
     assert np.isfinite(plane["normal"]).all()
 
 
-def test_depth_processor_fails_closed_for_near_and_missing_depth():
+def test_depth_processor_ignores_out_of_range_speckles_but_fails_closed_if_blind():
     processor = DepthProcessor(obstacle_region_height=60)
 
-    near = processor.detect_obstacles(
-        processor.preprocess(np.full((60, 80), 100, dtype=np.uint16))
+    raw = np.full((60, 80), 1000, dtype=np.uint16)
+    raw[-1, -1] = 200
+    clear = processor.detect_obstacles(
+        processor.preprocess(raw)
     )
-    assert near["has_obstacle"]
-    assert near["min_distance"] == pytest.approx(processor.min_depth)
+    assert not clear["has_obstacle"]
+    assert clear["min_distance"] == pytest.approx(1.0)
 
     missing = processor.detect_obstacles(
-        processor.preprocess(np.zeros((60, 80), dtype=np.uint16))
+        processor.preprocess(np.full((60, 80), 200, dtype=np.uint16))
     )
     assert missing["has_obstacle"]
     assert missing["sensor_blind"]
@@ -195,9 +197,7 @@ def test_depth_processor_fails_closed_for_near_and_missing_depth():
     assert not missing["center_clear"]
     assert not missing["right_clear"]
 
-    status = SafetyMonitor().check_safety(
-        obstacle_distance=near["min_distance"]
-    )
+    status = SafetyMonitor().check_safety(obstacle_distance=missing["min_distance"])
     assert not status.is_safe
     assert status.emergency_stop
 

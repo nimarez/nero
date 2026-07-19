@@ -44,6 +44,18 @@ def test_sensor_failure_stops_robot_before_entering_terminal_error():
     assert robot.commands[-1] == (0.0, 0.0, 0.0)
 
 
+def test_rejected_stop_does_not_crash_the_policy(caplog):
+    class UnavailableLocomotionRobot:
+        def stop(self):
+            raise RuntimeError("API call failed, code = 400")
+
+    policy = NavigationPolicy(robot=UnavailableLocomotionRobot())
+
+    policy._stop_robot()
+
+    assert "rejected the stop command" in caplog.text
+
+
 def test_real_policy_projects_camera_detection_into_world_goal():
     camera_to_world = np.eye(4)
     camera_to_world[:3, :3] = [
