@@ -51,7 +51,11 @@ while True:
     try:
         with open(path, encoding="utf-8") as handle:
             payload = json.load(handle)
-        key = (payload.get("controller_id"), payload.get("sequence"))
+        key = (
+            payload.get("controller_id"),
+            payload.get("sequence"),
+            payload.get("tracking_valid"),
+        )
         if key != last:
             print(json.dumps(payload, separators=(",", ":")), flush=True)
             last = key

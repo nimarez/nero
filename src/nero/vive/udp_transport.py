@@ -248,11 +248,12 @@ class ReceivedPose:
             return self.packet
         return replace(self.packet, tracking_valid=False)
 
-    def state_dict(self) -> dict[str, Any]:
+    def state_dict(self, stale_after_s: float | None = None) -> dict[str, Any]:
         """Serializable state for local consumers on jscore."""
+        packet = self.current_packet(stale_after_s) if stale_after_s is not None else self.packet
         return {
-            **self.packet.to_dict(),
-            "robot_pose": self.packet.robot_pose(),
+            **packet.to_dict(),
+            "robot_pose": packet.robot_pose(),
             "transport": {
                 "sender": [self.sender[0], self.sender[1]],
                 "received_at": self.received_at,
@@ -270,10 +271,10 @@ class LatestPoseWriter:
         self.path = Path(path)
         self._temporary_path = self.path.with_name(f".{self.path.name}.tmp")
 
-    def write(self, received: ReceivedPose) -> None:
+    def write(self, received: ReceivedPose, stale_after_s: float | None = None) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._temporary_path.write_text(
-            json.dumps(received.state_dict(), separators=(",", ":")) + "\n",
+            json.dumps(received.state_dict(stale_after_s), separators=(",", ":")) + "\n",
             encoding="utf-8",
         )
         self._temporary_path.replace(self.path)
@@ -342,9 +343,26 @@ def receiver_main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     receiver = PoseUdpReceiver(args.bind, args.port)
     latest_writer = LatestPoseWriter(args.latest_file) if args.latest_file else None
+    last_received: ReceivedPose | None = None
+    stale_state_written = False
     logger.info("listening for Vive poses on %s:%d", *receiver.address)
     while True:
-        received = receiver.receive()
+        try:
+            received = receiver.receive(
+                timeout_s=DEFAULT_STALE_AFTER_S if latest_writer is not None else None
+            )
+        except socket.timeout:
+            if latest_writer is not None and last_received is not None and not stale_state_written:
+                latest_writer.write(last_received, stale_after_s=0.0)
+                stale_state_written = True
+                logger.warning(
+                    "%s tracking stale: no packet for %.0fms",
+                    last_received.packet.controller_id,
+                    DEFAULT_STALE_AFTER_S * 1000,
+                )
+            continue
+        last_received = received
+        stale_state_written = False
         if latest_writer is not None:
             latest_writer.write(received)
         if args.json:
