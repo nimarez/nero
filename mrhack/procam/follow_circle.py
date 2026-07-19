@@ -7,23 +7,26 @@ Transform chain (fixed once at calibration, then each tick is cheap):
 Each tick: read the Vive pose -> floor -> draw the ANSI safety circle (+ heading) at the K1's floor
 position -> warp to the projector -> project. The circle tracks the robot.
 
+Vive input is the team's UDP transport (PR #6): `nero-vive-udp-send` on the Pi ->
+`nero-vive-udp-receive` on jscore writes /run/nero/vive_pose.json (atomic latest pose, 150 ms fresh).
+We just poll that file.
+
 Run on the box (jscore), once the rig is up:
     PYTHONPATH=<nero>/src ~/Prismos-x/venv/bin/python follow_circle.py            # real
     ... --mock                                                                   # synthetic motion, real projector
-Verify the transform math with NO hardware:
+Verify the transform math + the pose parser with NO hardware:
     uv run --with numpy --with opencv-python-headless python follow_circle.py --selftest
 
 Box inputs it expects:
-  - /tmp/procam_calib.json : the 4 dragged projector handles (mapper GUI)
-  - /tmp/vive_floor.json   : SE(2) vive->floor from vive_floor_cal.py -> {"R":2x2,"t":2}
+  - /tmp/procam_calib.json  : the 4 dragged projector handles (mapper GUI)
+  - /tmp/vive_floor.json    : SE(2) vive->floor from vive_floor_cal.py -> {"R":2x2,"t":2}
   - 4 ArUco tags (DICT_4X4_50, ids 0-3) visible to the RealSense (IR)
-  - Vive pose on UDP :9101 (vive_bridge.py forwards it from the Pi)
+  - /run/nero/vive_pose.json : the Vive pose, written by nero-vive-udp-receive (PR #6)
 """
 from __future__ import annotations
 import argparse
 import json
 import math
-import socket
 import sys
 import time
 
@@ -31,8 +34,9 @@ import cv2
 import numpy as np
 
 PROJ_W, PROJ_H = 1920, 1080
-TAG_SIZE_M = 0.15          # physical ArUco side in metres (MEASURE it) -> sets the metric scale
-UDP_PORT = 9101
+TAG_SIZE_M = 0.15               # physical ArUco side in metres (MEASURE it) -> sets the metric scale
+VIVE_POSE_FILE = "/run/nero/vive_pose.json"
+VIVE_MAX_AGE = 0.15             # PR #6 freshness deadline (s)
 
 
 def transform_points(pts, H):
@@ -43,6 +47,24 @@ def transform_points(pts, H):
 def vive_to_floor(R, t, x, y):
     p = np.asarray(R, float) @ np.array([x, y], float) + np.asarray(t, float)
     return float(p[0]), float(p[1])
+
+
+def yaw_from_quat_xyzw(q):
+    x, y, z, w = q
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def parse_vive_pose(d, max_age=VIVE_MAX_AGE, now=None):
+    """Parse a /run/nero/vive_pose.json dict (PR #6) -> (x, y, yaw) if valid+fresh, else None.
+    Uses position[x,y] as the floor plane and yaw from quaternion_xyzw."""
+    if not d.get("tracking_valid", False):
+        return None
+    if now is not None:
+        ra = d.get("transport", {}).get("received_at")
+        if ra is not None and (now - float(ra)) > max_age:
+            return None
+    pos = d["position"]
+    return float(pos[0]), float(pos[1]), yaw_from_quat_xyzw(d["quaternion_xyzw"])
 
 
 def render_circle(H_floor2proj, cx, cy, radius_m, heading=None, thick=30, color=(255, 255, 255)):
@@ -88,17 +110,17 @@ def load_vive_floor():
 
 
 # --------------------------------------------------------------------- pose sources
-def vive_udp_source(port=UDP_PORT):
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.bind(("0.0.0.0", port))
-    s.settimeout(1.0)
+def vive_file_source(path=VIVE_POSE_FILE, max_age=VIVE_MAX_AGE, hz=30.0):
+    """Poll nero-vive-udp-receive's latest-state file (PR #6). Yields (x, y, yaw) only when fresh + valid."""
     while True:
         try:
-            data, _ = s.recvfrom(8192)
-            d = json.loads(data)
-            yield float(d["x"]), float(d["y"]), float(d.get("yaw", 0.0))
-        except socket.timeout:
-            continue
+            with open(path) as f:
+                p = parse_vive_pose(json.load(f), max_age, time.time())
+            if p is not None:
+                yield p
+        except (OSError, ValueError, KeyError):
+            pass
+        time.sleep(1.0 / hz)
 
 
 def mock_source():
@@ -115,7 +137,7 @@ def run(mock=False, tag_size_m=TAG_SIZE_M):
     from mrhack.safety.safety_circle import safety_radius                           # ANSI radius (metres)
     H = calibrate(tag_size_m)
     R, t = load_vive_floor()
-    src = mock_source() if mock else vive_udp_source()
+    src = mock_source() if mock else vive_file_source()
     last, last_t = None, time.time()
     for (vx, vy, vyaw) in src:
         fx, fy = vive_to_floor(R, t, vx, vy)
@@ -126,6 +148,10 @@ def run(mock=False, tag_size_m=TAG_SIZE_M):
 
 
 # --------------------------------------------------------------------- selftest (no hardware)
+def _wrap(a):
+    return (a + math.pi) % (2 * math.pi) - math.pi
+
+
 def _selftest():
     ok = True
 
@@ -143,13 +169,23 @@ def _selftest():
     img = render_circle(H, 1.0, 1.0, 0.4)
     ctr = transform_points([[1.0, 1.0]], H)[0]
     chk("circle centre maps to (500,600) px", abs(ctr[0] - 500) < 1e-6 and abs(ctr[1] - 600) < 1e-6)
-    chk("something drawn", img.max() > 0)
     ys, xs = np.where(img[:, :, 0] > 0)
-    span = max(int(xs.max() - xs.min()), int(ys.max() - ys.min()))     # ~2*80px + thickness
+    span = max(int(xs.max() - xs.min()), int(ys.max() - ys.min()))
     chk(f"circle span ~160px (+thick) got {span}", 140 <= span <= 215)
-
     fpose = render_circle(H, 1.0, 1.0, 0.4, heading=0.0)
     chk("heading arrow adds pixels", int((fpose[:, :, 0] > 0).sum()) > int((img[:, :, 0] > 0).sum()))
+
+    # PR #6 vive_pose.json parsing
+    now = 1_000_000.0
+    d = {"tracking_valid": True, "position": [1.5, 2.5, 0.1],
+         "quaternion_xyzw": [0.0, 0.0, math.sin(math.pi / 4), math.cos(math.pi / 4)],
+         "transport": {"received_at": now}}
+    p = parse_vive_pose(d, 0.15, now)
+    chk("parse vive_pose.json -> (1.5,2.5,yaw=90deg)",
+        p is not None and abs(p[0] - 1.5) < 1e-9 and abs(p[1] - 2.5) < 1e-9 and abs(_wrap(p[2] - math.pi / 2)) < 1e-6)
+    chk("stale pose (age>150ms) rejected", parse_vive_pose(d, 0.15, now + 1.0) is None)
+    chk("tracking_valid=False rejected", parse_vive_pose({**d, "tracking_valid": False}, 0.15, now) is None)
+
     print("SELFTEST:", "PASS" if ok else "FAIL")
     return ok
 

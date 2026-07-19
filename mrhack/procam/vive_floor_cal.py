@@ -1,43 +1,46 @@
 #!/usr/bin/env python3
 """Vive -> floor SE(2) calibration: touch the 4 tags with the Vive controller, solve the transform.
 
-Run on jscore with the Vive UDP stream live (vive_bridge.py running on the Pi):
+Run on jscore with the PR #6 Vive stream live (`nero-vive-udp-receive` writing /run/nero/vive_pose.json):
     PYTHONPATH=<nero>/src ~/Prismos-x/venv/bin/python vive_floor_cal.py
 
-For each tag it waits for you to rest the controller on that tag, then samples the Vive pose. With
+For each tag it waits for you to rest the controller on that tag, then samples a few fresh poses. With
 the 4 (vive x,y) <-> (floor x,y) correspondences it solves the rigid SE(2) via
 mrhack.localization.frame_align.umeyama_se2 (the same fit our SLAM<->Vive alignment uses) and writes
 /tmp/vive_floor.json {"R":2x2,"t":2}, which follow_circle.py loads.
 
-The 4 tag floor positions (metres) come from the same tag rectification procam_true uses, so the
-Vive frame and the projected circle share one floor frame.
+The 4 tag floor positions (metres) come from the same tag rectification procam_true uses, so the Vive
+frame and the projected circle share one floor frame.
 """
 from __future__ import annotations
 import argparse
 import json
-import socket
 import sys
+import time
 
 import numpy as np
 
 from mrhack.localization.frame_align import umeyama_se2
 
-UDP_PORT = 9101
+VIVE_POSE_FILE = "/run/nero/vive_pose.json"
 TAG_SIZE_M = 0.15
 
 
-def read_vive(port=UDP_PORT, samples=15, timeout=5.0):
-    """Average a few UDP pose samples -> a steady (x, y)."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.bind(("0.0.0.0", port))
-    s.settimeout(timeout)
-    xs, ys = [], []
-    while len(xs) < samples:
-        data, _ = s.recvfrom(8192)
-        d = json.loads(data)
-        xs.append(float(d["x"]))
-        ys.append(float(d["y"]))
-    s.close()
+def read_vive(path=VIVE_POSE_FILE, samples=15, timeout=6.0):
+    """Average a few FRESH /run/nero/vive_pose.json samples -> a steady (x, y)."""
+    xs, ys, last_seq, deadline = [], [], None, time.time() + timeout
+    while len(xs) < samples and time.time() < deadline:
+        try:
+            d = json.load(open(path))
+            if d.get("tracking_valid") and d.get("sequence") != last_seq:
+                last_seq = d.get("sequence")
+                xs.append(float(d["position"][0]))
+                ys.append(float(d["position"][1]))
+        except (OSError, ValueError, KeyError):
+            pass
+        time.sleep(0.02)
+    if len(xs) < 3:
+        raise SystemExit(f"not enough fresh Vive samples from {path} (is nero-vive-udp-receive running?)")
     return float(np.mean(xs)), float(np.mean(ys))
 
 
