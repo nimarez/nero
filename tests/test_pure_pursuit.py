@@ -98,6 +98,73 @@ def test_direct_policy_pursues_live_detection_without_slam():
     assert status.target_position_camera == [0.0, 0.0, 2.0]
 
 
+def test_direct_policy_safety_opt_out_preserves_diagnostics_but_allows_motion():
+    velocities = []
+    state = SimpleNamespace(
+        rgb=np.zeros((8, 8, 3), dtype=np.uint8),
+        depth=np.full((8, 8), 200, dtype=np.uint16),
+        camera_info=SimpleNamespace(k=np.eye(3)),
+        orientation_rpy=np.zeros(3),
+        position_2d=np.zeros(3),
+        battery_level=100.0,
+    )
+    robot = SimpleNamespace(
+        get_state=lambda include_images=True: state,
+        image_to_array=np.asarray,
+        image_timestamp=lambda _image: 1.0,
+        set_velocity=lambda *values: velocities.append(values),
+    )
+    detection = ObjectDetection(
+        label="chair",
+        confidence=0.9,
+        bbox=(1, 1, 4, 4),
+        position_3d=np.array([0.0, 0.0, 2.0]),
+        distance=2.0,
+    )
+    detector = SimpleNamespace(
+        result_revision=1,
+        detect=lambda *_args: [detection],
+        find_object=lambda detections, _name: detections[0],
+    )
+    obstacles = {
+        "has_obstacle": True,
+        "sensor_blind": True,
+        "min_distance": 0.0,
+        "left_clear": False,
+        "center_clear": False,
+        "right_clear": False,
+    }
+    unsafe = SimpleNamespace(is_safe=False, reason="Depth sensor blind")
+    policy = DirectPursuitPolicy(
+        robot,
+        object_detector=detector,
+        depth_processor=SimpleNamespace(
+            preprocess=lambda depth: depth,
+            detect_obstacles=lambda _depth: obstacles,
+        ),
+        safety=SimpleNamespace(check_safety=lambda **_kwargs: unsafe),
+        safety_enforced=False,
+    )
+    policy._running = True
+    policy.target = "chair"
+
+    status = policy.step()
+
+    assert status.state == PursuitState.NAVIGATING
+    assert status.safety_status is unsafe
+    assert status.safety_enforced is False
+    assert status.velocity_command.linear_x > 0.0
+    assert velocities[-1][0] > 0.0
+
+
+def test_direct_policy_enforces_safety_by_default():
+    robot = SimpleNamespace(set_velocity=lambda *_values: None)
+    policy = DirectPursuitPolicy(robot, object_detector=SimpleNamespace())
+
+    assert policy.safety_enforced is True
+    assert policy._status("ready").safety_enforced is True
+
+
 def test_direct_policy_expires_replayed_async_detection(monkeypatch):
     now = [0.0]
     monkeypatch.setattr(pursuit_agent.time, "monotonic", lambda: now[0])

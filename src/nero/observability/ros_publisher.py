@@ -177,6 +177,7 @@ def safety_payload(status: Any) -> dict[str, Any] | None:
     obstacle_distance = finite(getattr(safety, "obstacle_distance", obstacles.get("min_distance")))
     return {
         "is_safe": bool(getattr(safety, "is_safe", True)),
+        "enforced": bool(getattr(status, "safety_enforced", True)),
         "emergency_stop": bool(getattr(safety, "emergency_stop", False)),
         "reason": str(getattr(safety, "reason", "")),
         "warnings": [str(value) for value in getattr(safety, "warnings", [])],

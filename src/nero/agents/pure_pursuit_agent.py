@@ -61,6 +61,7 @@ class PursuitStatus:
     velocity_command: VelocityCommand = field(default_factory=VelocityCommand)
     detections: list[ObjectDetection] = field(default_factory=list)
     safety_status: SafetyStatus | None = None
+    safety_enforced: bool = True
     target: str | None = None
     stand_off_distance: float | None = None
     stand_off_tolerance: float = 0.0
@@ -83,6 +84,7 @@ class DirectPursuitPolicy:
         search_angular_velocity: float = 0.08,
         target_timeout: float = 3.0,
         acquisition_timeout: float = 20.0,
+        safety_enforced: bool = True,
     ) -> None:
         if search_angular_velocity < 0:
             raise ValueError("search_angular_velocity must be non-negative")
@@ -95,6 +97,7 @@ class DirectPursuitPolicy:
         self.controller = controller or PurePursuitController()
         self.depth = depth_processor or DepthProcessor()
         self.safety = safety or SafetyMonitor()
+        self.safety_enforced = bool(safety_enforced)
         self.search_angular_velocity = search_angular_velocity
         self.target_timeout = target_timeout
         self.acquisition_timeout = acquisition_timeout
@@ -109,6 +112,8 @@ class DirectPursuitPolicy:
         self._last_obstacle_info: dict | None = None
 
     def start(self) -> PursuitStatus:
+        if not self.safety_enforced:
+            logger.warning("SAFETY ENFORCEMENT IS DISABLED; hazard checks are diagnostic only")
         try:
             self.robot.initialize()
             if not self.detector.initialize():
@@ -166,7 +171,7 @@ class DirectPursuitPolicy:
             self._stop_robot()
             return self._status(f"Sensor failure: {exc}")
 
-        if not safety.is_safe:
+        if self.safety_enforced and not safety.is_safe:
             self._stop_robot()
             return self._status(f"Motion blocked: {safety.reason}", safety_status=safety)
         if self.target is None:
@@ -217,7 +222,7 @@ class DirectPursuitPolicy:
 
         # Never translate into a blocked center corridor. Turning remains
         # allowed so the live target can be reacquired around an obstacle.
-        if not obstacles.get("center_clear", False):
+        if self.safety_enforced and not obstacles.get("center_clear", False):
             command = VelocityCommand(angular_z=command.angular_z)
         try:
             send_velocity(self.robot, command)
@@ -240,7 +245,8 @@ class DirectPursuitPolicy:
         if now - reference > timeout:
             return self._target_lost(detections, safety)
         self.state = PursuitState.DETECTING
-        angular = self.search_angular_velocity if not obstacles.get("has_obstacle", True) else 0.0
+        obstacle_blocked = self.safety_enforced and obstacles.get("has_obstacle", True)
+        angular = self.search_angular_velocity if not obstacle_blocked else 0.0
         command = VelocityCommand(angular_z=angular)
         try:
             send_velocity(self.robot, command)
@@ -313,6 +319,7 @@ class DirectPursuitPolicy:
             velocity_command=command or VelocityCommand(),
             detections=detections or [],
             safety_status=safety_status,
+            safety_enforced=self.safety_enforced,
             target=self.target,
             stand_off_distance=self.stand_off if self.target is not None else None,
             stand_off_tolerance=self.controller.config.position_tolerance,
@@ -338,6 +345,11 @@ def parse_args() -> argparse.Namespace:
         "--no-ros-observability",
         action="store_true",
         help="Disable normalized /nero ROS 2 telemetry topics",
+    )
+    parser.add_argument(
+        "--disable-safety",
+        action="store_true",
+        help="Disable motion safety enforcement while retaining diagnostics (dangerous)",
     )
     parser.add_argument(
         "--object-backend",
@@ -373,6 +385,7 @@ def run_agent(robot, args, *, object_detector=None, command_source=None) -> None
         target_timeout=args.target_timeout,
         acquisition_timeout=args.acquisition_timeout,
         search_angular_velocity=getattr(args, "search_angular_velocity", 0.12),
+        safety_enforced=not getattr(args, "disable_safety", False),
     )
     shutdown = False
     policy_started = False

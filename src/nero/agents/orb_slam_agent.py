@@ -55,6 +55,11 @@ def parse_args() -> argparse.Namespace:
         help="Disable normalized /nero ROS 2 telemetry topics",
     )
     parser.add_argument(
+        "--disable-safety",
+        action="store_true",
+        help="Disable motion safety enforcement while retaining diagnostics (dangerous)",
+    )
+    parser.add_argument(
         "--command-source",
         choices=("socket", "terminal", "voice"),
         default="socket",
@@ -125,6 +130,7 @@ def run_agent(
         slam_options=slam_options,
         object_detector=object_detector,
         map_config=map_config,
+        safety_enforced=not getattr(args, "disable_safety", False),
     )
 
     try:

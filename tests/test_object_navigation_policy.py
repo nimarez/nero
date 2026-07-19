@@ -252,6 +252,34 @@ def test_close_obstacle_blocks_motion_without_discarding_command(monkeypatch):
     assert robot.commands[-1] == (0.0, 0.0, 0.0)
 
 
+def test_navigation_safety_opt_out_keeps_raw_status_and_bypasses_obstacles(monkeypatch):
+    robot = RecordingRobot()
+    policy = NavigationPolicy(robot=robot, safety_enforced=False)
+    policy._running = True
+    policy._state = PolicyState.NAVIGATING
+    policy._goal = NavigationGoal("green can")
+    localized = _localized_frame(safe=False, min_distance=0.2)
+    policy._get_sensor_data = lambda: localized.sensor
+    monkeypatch.setattr(
+        "nero.navigation.policy.localize_sensor_frame", lambda *args, **kwargs: localized
+    )
+    policy._step_navigating = lambda *_args: policy._update_status(
+        safety_status=localized.safety_status,
+        message="continued",
+    )
+
+    status = policy.step()
+    control_obstacles = policy._control_obstacle_info(localized.obstacle_info)
+
+    assert status.state == PolicyState.NAVIGATING
+    assert status.safety_status.is_safe is False
+    assert status.safety_enforced is False
+    assert control_obstacles["has_obstacle"] is False
+    assert control_obstacles["sensor_blind"] is False
+    assert np.isinf(control_obstacles["min_distance"])
+    assert robot.commands == []
+
+
 def test_direct_navigation_exposes_current_to_goal_plan():
     policy = NavigationPolicy(sim_env=SimpleNamespace())
     policy._state = PolicyState.NAVIGATING

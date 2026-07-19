@@ -82,6 +82,7 @@ class PolicyStatus:
     current_goal: Optional[NavigationGoal] = None
     current_pose: Optional["FusedPose"] = None
     safety_status: Optional["SafetyStatus"] = None
+    safety_enforced: bool = True
     velocity_command: Optional[VelocityCommand] = None
     message: str = ""
     detections: list[ObjectDetection] = field(default_factory=list)
@@ -134,11 +135,13 @@ class NavigationPolicy:
         object_search_angular_velocity: float = 0.08,
         map_config: MapNavConfig | None = None,
         enable_object_detection: bool = True,
+        safety_enforced: bool = True,
     ):
         # Environment: real robot or simulation
         self.robot = robot
         self.sim_env = sim_env
         self._is_sim = sim_env is not None
+        self.safety_enforced = bool(safety_enforced)
 
         # Components are required for every sensor-backed robot adapter. The
         # lightweight in-process SimEnvironment has its own synthetic path.
@@ -216,6 +219,8 @@ class NavigationPolicy:
         Initializes all components and transitions to SHOWING_CAMERA state.
         """
         logger.info(f"Starting navigation policy (sim={self._is_sim})")
+        if not self._is_sim and not self.safety_enforced:
+            logger.warning("SAFETY ENFORCEMENT IS DISABLED; hazard checks are diagnostic only")
         self._running = False
         self._start_time = time.time()
         self._slam_ever_tracked = False
@@ -377,7 +382,7 @@ class NavigationPolicy:
                 return self._update_status(
                     state=PolicyState.ERROR, message=f"Localization failed: {exc}"
                 )
-            if not localized.safety_status.is_safe:
+            if self.safety_enforced and not localized.safety_status.is_safe:
                 self._stop_robot()
                 min_distance = float(localized.obstacle_info.get("min_distance", float("inf")))
                 obstacle_limit = float(getattr(self.safety, "min_obstacle_distance", 0.25))
@@ -440,7 +445,9 @@ class NavigationPolicy:
                     )
                 if not aligned:
                     self._state = PolicyState.LOCALIZING
-                    obstacle_blocked = localized.obstacle_info.get("has_obstacle", False)
+                    obstacle_blocked = self.safety_enforced and localized.obstacle_info.get(
+                        "has_obstacle", False
+                    )
                     spin_speed = (
                         self.map_navigator.config.localization_spin_speed
                         if self._goal is not None and not obstacle_blocked
@@ -670,7 +677,9 @@ class NavigationPolicy:
         """Create bounded in-place excitation for first IMU-RGBD initialization."""
         obstacle_info = localized.obstacle_info
         min_distance = float(obstacle_info.get("min_distance", 0.0))
-        if obstacle_info.get("sensor_blind", False) or obstacle_info.get("has_obstacle", True):
+        if self.safety_enforced and (
+            obstacle_info.get("sensor_blind", False) or obstacle_info.get("has_obstacle", True)
+        ):
             return VelocityCommand(), (
                 "IMU-RGBD initialization needs motion, but the localization spin "
                 f"is blocked by depth at {min_distance:.2f}m"
@@ -696,7 +705,9 @@ class NavigationPolicy:
         """Scan slowly for the requested object without translating."""
         obstacle_info = localized.obstacle_info
         min_distance = float(obstacle_info.get("min_distance", 0.0))
-        if obstacle_info.get("sensor_blind", False) or obstacle_info.get("has_obstacle", True):
+        if self.safety_enforced and (
+            obstacle_info.get("sensor_blind", False) or obstacle_info.get("has_obstacle", True)
+        ):
             return (
                 VelocityCommand(),
                 f"search spin blocked by depth at {min_distance:.2f}m",
@@ -811,7 +822,7 @@ class NavigationPolicy:
         slam_pose = localized.slam_pose
         fused_pose = localized.fused_pose
         safety_status = localized.safety_status
-        if not safety_status.is_safe:
+        if self.safety_enforced and not safety_status.is_safe:
             self._state = PolicyState.ERROR
             self._stop_robot()
             return self._update_status(
@@ -819,7 +830,7 @@ class NavigationPolicy:
                 message=f"Safety violation: {safety_status.reason}",
             )
 
-        obstacle_info = localized.obstacle_info
+        obstacle_info = self._control_obstacle_info(localized.obstacle_info)
 
         # Check navigation timeout
         if self._start_time and (time.time() - self._start_time) > self._navigation_timeout:
@@ -923,7 +934,7 @@ class NavigationPolicy:
                 depth_processor=self.depth_processor,
                 safety=self.safety,
             )
-        if not localized.safety_status.is_safe:
+        if self.safety_enforced and not localized.safety_status.is_safe:
             self._stop_robot()
             return self._update_status(
                 state=PolicyState.ERROR,
@@ -939,7 +950,9 @@ class NavigationPolicy:
         )
         status_pose = self._pose_in_active_frame(localized.fused_pose, robot_pose)
         if self.map_navigator is not None:
-            route = self._map_route(robot_pose, localized.obstacle_info)
+            route = self._map_route(
+                robot_pose, self._control_obstacle_info(localized.obstacle_info)
+            )
             command = route.command
             message = route.message
             state = (
@@ -961,7 +974,7 @@ class NavigationPolicy:
                 else self.controller.compute_goal_velocity(
                     robot_pose,
                     self._goal.approach_pose,
-                    localized.obstacle_info,
+                    self._control_obstacle_info(localized.obstacle_info),
                     yaw_tolerance=self._goal_yaw_tolerance,
                 )
             )
@@ -1004,6 +1017,20 @@ class NavigationPolicy:
         except Exception as exc:
             logger.exception("Map routing failed")
             return MapRouteResult(failed=True, message=f"Map routing failed: {exc}")
+
+    def _control_obstacle_info(self, obstacle_info: dict) -> dict:
+        """Return live obstacle inputs only when safety enforcement is enabled."""
+        if self.safety_enforced:
+            return obstacle_info
+        return {
+            **obstacle_info,
+            "has_obstacle": False,
+            "sensor_blind": False,
+            "min_distance": float("inf"),
+            "left_clear": True,
+            "center_clear": True,
+            "right_clear": True,
+        }
 
     def stop(self) -> PolicyStatus:
         """Stop the navigation policy."""
@@ -1091,6 +1118,7 @@ class NavigationPolicy:
             current_goal=self._goal,
             current_pose=pose,
             safety_status=safety_status,
+            safety_enforced=self.safety_enforced,
             velocity_command=velocity_command,
             message=message,
             detections=detections or [],

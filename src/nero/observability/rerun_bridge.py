@@ -619,11 +619,14 @@ class RerunRosBridge:
         if not isinstance(payload, dict):
             return
         is_safe = bool(payload.get("is_safe", True))
+        enforced = bool(payload.get("enforced", True))
         emergency = bool(payload.get("emergency_stop", False))
         sensor_blind = bool(payload.get("depth_sensor_blind", False))
         warnings = [str(value) for value in payload.get("warnings", [])]
         reason = str(payload.get("reason", ""))
-        if emergency or not is_safe:
+        if not enforced:
+            color, condition = [210, 80, 255], "BYPASSED"
+        elif emergency or not is_safe:
             color, condition = [255, 60, 60], "E-STOP"
         elif sensor_blind or warnings:
             color, condition = [255, 170, 40], "WARNING"
@@ -674,6 +677,7 @@ class RerunRosBridge:
 
         scalar_values = {
             "safe": float(is_safe),
+            "enforced": float(enforced),
             "emergency_stop": float(emergency),
             "depth_sensor_blind": float(sensor_blind),
             "has_obstacle": float(bool(payload.get("has_obstacle", False))),

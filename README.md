@@ -144,6 +144,20 @@ connection and keepalive failures are bounded, and a command that the robot
 policy does not acknowledge returns after five seconds; tune that with
 `--ack-timeout` if needed.
 
+Safety enforcement is enabled by default. For controlled testing only, pass
+`--disable-safety`; Nero continues computing and publishing tilt, depth,
+obstacle, and battery diagnostics, but those conditions no longer veto motion:
+
+```bash
+uv run nero-command --policy pure-pursuit --disable-safety
+```
+
+The flag is applied when the robot policy starts. To prevent accidental reuse
+in the wrong mode, `nero-command` refuses to attach to an existing policy whose
+safety mode differs from the requested mode; stop that policy and run the
+command again. Sensor, localization, locomotion-command, and shutdown failures
+still stop the robot.
+
 Before starting a missing policy, `nero-command` now waits for actual 544×448
 RGB, depth, and CameraInfo messages and a synchronized RGB-D pair. DDS publisher
 discovery alone does not pass this gate. The camera and policy startup windows
@@ -315,9 +329,9 @@ uv run nero-perception-benchmark --live --with-slam --target "green can"
 This benchmark reports both completed detector round-trip latency and native
 SLAM frame latency, so the slower path can be identified on the actual robot.
 
-The robot announces an accepted command before movement. Nero stops when the
-target track expires, a safety check fails, SLAM loses the required state, or the
-process receives an interrupt.
+The robot announces an accepted command before movement. With the default
+safety enforcement, Nero stops when the target track expires, a safety check
+fails, SLAM loses the required state, or the process receives an interrupt.
 
 The policy does not drive to a scalar distance. Each current 3D observation is
 transformed into the SLAM world frame, filtered into an object track, and converted

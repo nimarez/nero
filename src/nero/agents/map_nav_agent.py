@@ -86,6 +86,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable normalized /nero ROS 2 telemetry topics",
     )
+    parser.add_argument(
+        "--disable-safety",
+        action="store_true",
+        help="Disable motion safety enforcement while retaining diagnostics (dangerous)",
+    )
     return parser.parse_args()
 
 
@@ -121,7 +126,10 @@ def main() -> None:
     try:
         robot = RobotInterface()
         policy = NavigationPolicy(
-            robot=robot, map_config=config, enable_object_detection=False
+            robot=robot,
+            map_config=config,
+            enable_object_detection=False,
+            safety_enforced=not args.disable_safety,
         )
         policy.start()
         telemetry = RosObservabilityPublisher.try_create(

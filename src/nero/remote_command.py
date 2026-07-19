@@ -161,6 +161,18 @@ def _policy_bootstrap_script(
         "another Nero navigation policy is already running; stop it before "
         f"selecting {policy_command}"
     )
+    safety_disabled = "--disable-safety" in policy_args
+    safety_mismatch = shlex.quote(
+        "the running navigation policy uses a different safety mode; stop it "
+        "before changing --disable-safety"
+    )
+    expected_safety_check = (
+        '    case " $policy_command_line " in *" --disable-safety "*) ;; '
+        f"*) echo {safety_mismatch} >&2; exit 1 ;; esac"
+        if safety_disabled
+        else '    case " $policy_command_line " in *" --disable-safety "*) '
+        f"echo {safety_mismatch} >&2; exit 1 ;; *) ;; esac"
+    )
     camera_gate = ()
     if camera_start_timeout is not None:
         camera_timeout = str(max(1, math.ceil(camera_start_timeout)))
@@ -178,6 +190,10 @@ def _policy_bootstrap_script(
             ". /opt/booster/BoosterAgent/install/setup.bash; fi",
             f'policy_pid=$(pgrep -u "$(id -u)" -f {process_pattern} | head -n 1 || true)',
             f'any_policy_pid=$(pgrep -u "$(id -u)" -f {any_policy_pattern} | head -n 1 || true)',
+            'if [ -n "$policy_pid" ]; then',
+            '  policy_command_line=$(ps -p "$policy_pid" -o args=)',
+            expected_safety_check,
+            "fi",
             'if [ -z "$policy_pid" ]; then',
             '  if [ -n "$any_policy_pid" ]; then',
             f"    echo {conflict} >&2",
@@ -257,6 +273,11 @@ def main() -> None:
         help="Robot navigation policy to reuse or start",
     )
     parser.add_argument(
+        "--disable-safety",
+        action="store_true",
+        help="Start or reuse the policy with motion safety enforcement disabled (dangerous)",
+    )
+    parser.add_argument(
         "--policy-start-timeout",
         type=float,
         default=DEFAULT_POLICY_START_TIMEOUT,
@@ -304,6 +325,8 @@ def main() -> None:
         policy_command = f"nero-{args.policy}"
         policy_log = args.policy_log or f"/tmp/{policy_command}.log"
         policy_args = []
+        if args.disable_safety:
+            policy_args.append("--disable-safety")
         for option, value in (
             ("--object-backend", args.object_backend),
             ("--aruco-map", args.aruco_map),

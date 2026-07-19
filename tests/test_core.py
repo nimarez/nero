@@ -416,6 +416,7 @@ def test_hardware_agent_clis_use_k1_sensors_implicitly(monkeypatch):
     assert not hasattr(orb_args, "robot_serial")
     assert not hasattr(orb_args, "object")
     assert not hasattr(orb_args, "target_distance")
+    assert orb_args.disable_safety is False
 
     monkeypatch.setattr(sys, "argv", ["nero-pure-pursuit"])
     pursuit_args = pure_pursuit_agent.parse_args()
@@ -423,6 +424,7 @@ def test_hardware_agent_clis_use_k1_sensors_implicitly(monkeypatch):
     assert not hasattr(pursuit_args, "depth_camera")
     assert not hasattr(pursuit_args, "object")
     assert not hasattr(pursuit_args, "target_distance")
+    assert pursuit_args.disable_safety is False
 
     monkeypatch.setattr(sys, "argv", ["nero-mapping"])
     mapping_args = mapping_agent.parse_args()
@@ -447,11 +449,29 @@ def test_hardware_agent_clis_use_k1_sensors_implicitly(monkeypatch):
     assert not hasattr(map_nav_args, "camera")
     assert not hasattr(map_nav_args, "depth_camera")
     assert not hasattr(map_nav_args, "robot_serial")
+    assert map_nav_args.disable_safety is False
 
     monkeypatch.setattr(sys, "argv", ["nero-booster-studio"])
     studio_args = booster_studio_agent.parse_args()
     assert not hasattr(studio_args, "object")
     assert not hasattr(studio_args, "target_distance")
+
+
+def test_hardware_navigation_clis_accept_explicit_safety_opt_out(monkeypatch):
+    from nero.agents import map_nav_agent, orb_slam_agent, pure_pursuit_agent
+
+    monkeypatch.setattr(sys, "argv", ["nero-orb-slam", "--disable-safety"])
+    assert orb_slam_agent.parse_args().disable_safety is True
+
+    monkeypatch.setattr(sys, "argv", ["nero-pure-pursuit", "--disable-safety"])
+    assert pure_pursuit_agent.parse_args().disable_safety is True
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["nero-map-nav", "--map", "map.npy", "--disable-safety"],
+    )
+    assert map_nav_agent.parse_args().disable_safety is True
 
 
 def test_go_to_command_parser_accepts_natural_object_names():

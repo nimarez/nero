@@ -120,6 +120,7 @@ def test_safety_radius_state_colors(distance, condition, color):
 
 def test_structured_safety_payload_includes_decision_inputs():
     status = SimpleNamespace(
+        safety_enforced=False,
         safety_status=SimpleNamespace(
             is_safe=False,
             emergency_stop=True,
@@ -144,6 +145,7 @@ def test_structured_safety_payload_includes_decision_inputs():
     payload = safety_payload(status)
 
     assert payload["is_safe"] is False
+    assert payload["enforced"] is False
     assert payload["emergency_stop"] is True
     assert payload["battery_percent"] == 42.0
     assert payload["obstacle_distance"] == 0.9

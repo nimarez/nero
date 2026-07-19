@@ -268,6 +268,50 @@ def test_command_can_start_direct_pure_pursuit(monkeypatch):
     assert "another Nero navigation policy is already running" in remote
 
 
+def test_disable_safety_is_forwarded_only_to_policy_start(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "nero-command",
+            "--no-rerun",
+            "--policy",
+            "pure-pursuit",
+            "--disable-safety",
+        ],
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, check: calls.append(command) or SimpleNamespace(returncode=0),
+    )
+
+    remote_command.main()
+
+    remote = shlex.split(calls[0][-1])[2]
+    assert "nohup uv run nero-pure-pursuit --no-display --disable-safety" in remote
+    assert 'policy_command_line=$(ps -p "$policy_pid" -o args=)' in remote
+    relay = remote.rsplit("uv run nero-command-relay", 1)[1]
+    assert "--disable-safety" not in relay
+
+
+def test_default_policy_launch_keeps_safety_enabled(monkeypatch):
+    calls = []
+    monkeypatch.setattr(sys, "argv", ["nero-command", "--no-rerun"])
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, check: calls.append(command) or SimpleNamespace(returncode=0),
+    )
+
+    remote_command.main()
+
+    remote = shlex.split(calls[0][-1])[2]
+    assert "nohup uv run nero-orb-slam --no-display --disable-safety" not in remote
+    assert "different safety mode" in remote
+
+
 def test_policy_bootstrap_really_waits_for_a_new_unix_socket(tmp_path):
     socket_path = f"/tmp/nero-bootstrap-{os.getpid()}-{time.time_ns()}.sock"
     log_path = tmp_path / "policy.log"
