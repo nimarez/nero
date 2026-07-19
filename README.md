@@ -377,7 +377,7 @@ All commands run through uv:
 |---|---|
 | `uv run nero-orb-slam` | Spoken/typed object navigation on a real K1 |
 | `uv run nero-pure-pursuit` | Same command/arrival loop using direct RGB-D pursuit, without SLAM or a map |
-| `uv run nero-vive-pursuit --goal X Y --acknowledge-blind-motion` | Blind pursuit of a fixed calibrated map-frame point using Vive only |
+| `uv run nero-vive-pursuit --goal X Y YAW --acknowledge-blind-motion` | Blind Vive-only pursuit of an object pose, approaching from its front |
 | `uv run nero-command` | Mac object-command prompt plus live K1 Rerun viewer |
 | `uv run nero-sim --demo` | Fast deterministic in-process policy test |
 | `uv run nero-booster-studio` | Full policy on a Booster Studio virtual K1 |
@@ -421,25 +421,31 @@ policy, so Rerun still shows the live RGB/depth images, labeled detection boxes,
 3D camera-frame centroids, and commanded velocities. A world-frame route is
 intentionally absent because this controller does not claim to know one.
 
-`nero-vive-pursuit` is a separate blind experiment for a fixed point whose
-coordinates are already known in the calibrated Vive `map` frame. It consumes
-only `/nero/reference/pose` and `/nero/localization/vive/tracking`; it does not
-read RGB, depth, detections, SLAM, or a map. For example, to stop 0.5 m from a
-box measured at `(1.2, -0.4)`:
+`nero-vive-pursuit` is a separate blind experiment for an object pose in the
+calibrated Vive `map` frame. `YAW` is the object's forward direction. The
+terminal robot position is `stand_off` metres along that direction, and its
+terminal yaw is `YAW + pi`, so it approaches the object's front and faces back
+toward it. A smooth cubic Bezier path constrains both the robot's initial
+heading and that terminal heading; its samples are published on
+`/nero/navigation/plan` and appear as the green plan in Rerun.
+
+For example, an object heading of `(0, -1)` has yaw `-pi/2`; Nero approaches
+from the object's negative-Y side and finishes heading `(0, 1)`:
 
 ```bash
 uv run nero-vive-pursuit \
-  --goal 1.2 -0.4 \
+  --goal 1.2 -0.4 -1.5708 \
   --stand-off 0.5 \
   --acknowledge-blind-motion
 ```
 
 The agent arms only the K1 locomotion interface, uses conservative velocity
 limits, and commands zero motion whenever the calibrated pose or tracking gate
-is stale. The acknowledgement is mandatory because this mode has no obstacle
-sensing. Keep the test area empty and the hardware stop reachable. A single
-robot-mounted Vive handle cannot discover the box coordinate; measure it in the
-same calibrated frame before starting this agent.
+is stale. This is geometric path generation and pure-pursuit-style tracking;
+it does not check the path for obstacles. The acknowledgement is therefore
+mandatory. Keep the test area empty and the hardware stop reachable. A single
+robot-mounted Vive handle cannot discover the box pose; measure it in the same
+calibrated frame before starting this agent.
 
 A direct terminal session automatically starts the robot-hosted Rerun bridge and
 prints the browser URL after port 8080 is listening. This command is accepted

@@ -1,4 +1,4 @@
-"""Map-frame point pursuit using only an externally tracked robot pose."""
+"""Smooth object-approach planning using only an externally tracked robot pose."""
 
 from __future__ import annotations
 
@@ -27,8 +27,102 @@ class VivePursuitConfig:
     angular_gain: float = 1.5
 
 
+@dataclass(frozen=True)
+class ViveApproachPath:
+    """A smooth route ending in front of, and facing, an object pose."""
+
+    object_pose: np.ndarray
+    goal_pose: np.ndarray
+    points: np.ndarray
+
+
+def object_approach_pose(object_pose: np.ndarray, stand_off: float) -> np.ndarray:
+    """Return the robot pose in front of an object and facing back toward it."""
+    target = np.asarray(object_pose, dtype=float)
+    if target.shape != (3,) or not np.all(np.isfinite(target)):
+        raise ValueError("object_pose must be a finite [x, y, yaw] vector")
+    if not math.isfinite(stand_off) or stand_off <= 0:
+        raise ValueError("stand_off must be positive and finite")
+    heading = np.array([math.cos(target[2]), math.sin(target[2])])
+    return np.array(
+        [
+            target[0] + stand_off * heading[0],
+            target[1] + stand_off * heading[1],
+            _normalize_angle(float(target[2]) + math.pi),
+        ]
+    )
+
+
+def plan_object_approach(
+    start_pose: np.ndarray,
+    object_pose: np.ndarray,
+    stand_off: float,
+    *,
+    spacing: float = 0.05,
+) -> ViveApproachPath:
+    """Plan a cubic Bezier route with start and terminal heading constraints."""
+    start = np.asarray(start_pose, dtype=float)
+    if start.shape != (3,) or not np.all(np.isfinite(start)):
+        raise ValueError("start_pose must be a finite [x, y, yaw] vector")
+    if not math.isfinite(spacing) or spacing <= 0:
+        raise ValueError("spacing must be positive and finite")
+    target = np.asarray(object_pose, dtype=float)
+    goal = object_approach_pose(target, stand_off)
+    chord = float(np.linalg.norm(goal[:2] - start[:2]))
+    tangent_length = min(1.0, max(0.20, 0.4 * chord))
+    start_heading = np.array([math.cos(start[2]), math.sin(start[2])])
+    goal_heading = np.array([math.cos(goal[2]), math.sin(goal[2])])
+    controls = np.array(
+        [
+            start[:2],
+            start[:2] + tangent_length * start_heading,
+            goal[:2] - tangent_length * goal_heading,
+            goal[:2],
+        ]
+    )
+    control_length = float(np.linalg.norm(np.diff(controls, axis=0), axis=1).sum())
+    count = max(2, min(2000, int(math.ceil(control_length / spacing)) + 1))
+    t = np.linspace(0.0, 1.0, count)[:, None]
+    one_minus_t = 1.0 - t
+    points = (
+        one_minus_t**3 * controls[0]
+        + 3.0 * one_minus_t**2 * t * controls[1]
+        + 3.0 * one_minus_t * t**2 * controls[2]
+        + t**3 * controls[3]
+    )
+    return ViveApproachPath(object_pose=target.copy(), goal_pose=goal, points=points)
+
+
+class VivePathTracker:
+    """Select forward-only lookahead points along one fixed sampled path."""
+
+    def __init__(self, points: np.ndarray) -> None:
+        values = np.asarray(points, dtype=float)
+        if values.ndim != 2 or values.shape[1] != 2 or len(values) < 2:
+            raise ValueError("path points must have shape (N, 2) with N >= 2")
+        if not np.all(np.isfinite(values)):
+            raise ValueError("path points must be finite")
+        self.points = values
+        self.index = 0
+
+    def lookahead(self, position: np.ndarray, distance: float) -> np.ndarray:
+        current = np.asarray(position, dtype=float)
+        if current.shape != (2,) or not np.all(np.isfinite(current)):
+            raise ValueError("position must be a finite [x, y] vector")
+        if not math.isfinite(distance) or distance <= 0:
+            raise ValueError("lookahead distance must be positive and finite")
+        remaining = self.points[self.index :]
+        self.index += int(np.argmin(np.linalg.norm(remaining - current, axis=1)))
+        traveled = 0.0
+        for index in range(self.index + 1, len(self.points)):
+            traveled += float(np.linalg.norm(self.points[index] - self.points[index - 1]))
+            if traveled >= distance:
+                return self.points[index].copy()
+        return self.points[-1].copy()
+
+
 class VivePursuitController:
-    """Pursue a fixed world-frame point from a tracked ``[x, y, yaw]`` pose."""
+    """Follow a world-frame lookahead point and settle at a terminal pose."""
 
     def __init__(self, config: VivePursuitConfig | None = None) -> None:
         self.config = config or VivePursuitConfig()
@@ -64,11 +158,42 @@ class VivePursuitController:
             and abs(bearing_error) <= self.config.bearing_tolerance
         )
 
+    def has_reached_pose(self, robot_pose: np.ndarray, goal_pose: np.ndarray) -> bool:
+        goal = np.asarray(goal_pose, dtype=float)
+        if goal.shape != (3,) or not np.all(np.isfinite(goal)):
+            raise ValueError("goal_pose must be a finite [x, y, yaw] vector")
+        distance, _ = self._errors(robot_pose, goal[:2])
+        yaw_error = _normalize_angle(float(goal[2] - robot_pose[2]))
+        return (
+            distance <= self.config.position_tolerance
+            and abs(yaw_error) <= self.config.bearing_tolerance
+        )
+
+    def compute_path_command(
+        self, robot_pose: np.ndarray, lookahead_xy: np.ndarray, goal_pose: np.ndarray
+    ) -> VelocityCommand:
+        goal = np.asarray(goal_pose, dtype=float)
+        distance, _ = self._errors(robot_pose, goal[:2])
+        if distance <= self.config.position_tolerance:
+            yaw_error = _normalize_angle(float(goal[2] - robot_pose[2]))
+            if abs(yaw_error) <= self.config.bearing_tolerance:
+                return VelocityCommand()
+            return VelocityCommand(
+                angular_z=float(
+                    np.clip(
+                        self.config.angular_gain * yaw_error,
+                        -self.config.max_angular_velocity,
+                        self.config.max_angular_velocity,
+                    )
+                )
+            )
+        return self.compute_command(robot_pose, lookahead_xy, 0.0)
+
     def compute_command(
         self, robot_pose: np.ndarray, target_xy: np.ndarray, stand_off: float
     ) -> VelocityCommand:
-        if not math.isfinite(stand_off) or stand_off <= 0:
-            raise ValueError("stand_off must be positive and finite")
+        if not math.isfinite(stand_off) or stand_off < 0:
+            raise ValueError("stand_off must be non-negative and finite")
         distance, bearing_error = self._errors(robot_pose, target_xy)
         if distance <= stand_off + self.config.position_tolerance:
             if abs(bearing_error) <= self.config.bearing_tolerance:

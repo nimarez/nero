@@ -1,4 +1,4 @@
-"""Blind point pursuit using a calibrated HTC Vive robot pose."""
+"""Blind object-approach path following using a calibrated HTC Vive robot pose."""
 
 from __future__ import annotations
 
@@ -12,7 +12,13 @@ from typing import Any, Callable
 
 import numpy as np
 
-from nero.navigation.vive_pursuit import VivePursuitConfig, VivePursuitController
+from nero.navigation.vive_pursuit import (
+    VivePathTracker,
+    VivePursuitConfig,
+    VivePursuitController,
+    plan_object_approach,
+)
+from nero.observability import RosObservabilityPublisher
 from nero.observability.topics import ObservabilityTopics
 from nero.robot import RobotInterface
 
@@ -113,6 +119,7 @@ def run_agent(
     pose_source: Any,
     args: argparse.Namespace,
     *,
+    telemetry: Any | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
@@ -122,13 +129,15 @@ def run_agent(
             max_angular_velocity=args.max_angular_velocity,
         )
     )
-    target = np.asarray(args.goal, dtype=float)
+    object_pose = np.asarray(args.goal, dtype=float)
     initializer = getattr(robot, "initialize_locomotion_only", robot.initialize)
     initializer()
     robot.stop()
     started = monotonic()
     unavailable_since: float | None = None
     pose_seen = False
+    path = None
+    tracker = None
     last_log = -float("inf")
     while True:
         now = monotonic()
@@ -145,17 +154,41 @@ def run_agent(
             continue
         unavailable_since = None
         pose_seen = True
-        if controller.has_arrived(pose, target, args.stand_off):
+        if path is None:
+            path = plan_object_approach(
+                pose,
+                object_pose,
+                args.stand_off,
+                spacing=args.path_spacing,
+            )
+            tracker = VivePathTracker(path.points)
+            if telemetry is not None:
+                telemetry.publish_plan(
+                    np.column_stack((path.points, np.zeros(len(path.points)))),
+                    time.time(),
+                )
+            logger.info(
+                "Planned %d-point path to approach=(%.3f, %.3f, %.3f) "
+                "for object=(%.3f, %.3f, %.3f)",
+                len(path.points),
+                *path.goal_pose,
+                *path.object_pose,
+            )
+        if controller.has_reached_pose(pose, path.goal_pose):
             robot.stop()
-            logger.info("Arrived %.2fm from Vive goal at x=%.3f y=%.3f", args.stand_off, *target)
+            logger.info(
+                "Arrived at approach pose=(%.3f, %.3f, %.3f)",
+                *path.goal_pose,
+            )
             return
-        command = controller.compute_command(pose, target, args.stand_off)
+        lookahead = tracker.lookahead(pose[:2], args.lookahead)
+        command = controller.compute_path_command(pose, lookahead, path.goal_pose)
         robot.set_velocity(command.linear_x, command.linear_y, command.angular_z)
         if now - last_log >= 1.0:
             logger.info(
-                "pose=(%.3f, %.3f, %.3f) goal=(%.3f, %.3f) command=(%.3f, %.3f)",
+                "pose=(%.3f, %.3f, %.3f) lookahead=(%.3f, %.3f) command=(%.3f, %.3f)",
                 *pose,
-                *target,
+                *lookahead,
                 command.linear_x,
                 command.angular_z,
             )
@@ -165,8 +198,17 @@ def run_agent(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--goal", nargs=2, type=float, required=True, metavar=("X", "Y"))
+    parser.add_argument(
+        "--goal",
+        nargs=3,
+        type=float,
+        required=True,
+        metavar=("X", "Y", "YAW"),
+        help="Object pose in the calibrated map frame; yaw is its forward direction",
+    )
     parser.add_argument("--stand-off", type=float, default=0.5)
+    parser.add_argument("--lookahead", type=float, default=0.30)
+    parser.add_argument("--path-spacing", type=float, default=0.05)
     parser.add_argument("--max-velocity", type=float, default=0.10)
     parser.add_argument("--max-angular-velocity", type=float, default=0.35)
     parser.add_argument("--rate", type=float, default=20.0)
@@ -183,6 +225,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     positive = (
         "stand_off",
+        "lookahead",
+        "path_spacing",
         "max_velocity",
         "max_angular_velocity",
         "rate",
@@ -205,10 +249,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     robot = None
     pose_source = None
+    telemetry = None
     try:
         robot = RobotInterface(network_interface=args.iface)
         pose_source = VivePoseSubscriber(stale_after_s=args.stale_after)
-        run_agent(robot, pose_source, args)
+        telemetry = RosObservabilityPublisher.try_create(enabled=True)
+        run_agent(robot, pose_source, args, telemetry=telemetry)
     except KeyboardInterrupt:
         logger.info("Interrupted; stopping blind Vive pursuit")
     except RuntimeError as error:
@@ -222,6 +268,8 @@ def main(argv: list[str] | None = None) -> int:
                 robot.close()
         if pose_source is not None:
             pose_source.close()
+        if telemetry is not None:
+            telemetry.close()
     return 0
 
 
