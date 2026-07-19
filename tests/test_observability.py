@@ -25,6 +25,7 @@ def test_observability_topics_are_stable_and_namespaced():
     assert topics.joint_states == "/nero/sensors/joint_states"
     assert topics.pose == "/nero/slam/pose"
     assert topics.command == "/nero/navigation/cmd_vel"
+    assert topics.plan == "/nero/navigation/plan"
     assert topics.goal_pose == "/nero/navigation/goal_pose"
     assert topics.object_position == "/nero/navigation/object_position"
     assert topics.reference_map == "/nero/reference/map_points"
@@ -231,6 +232,40 @@ def test_detection_telemetry_uses_firmware_safe_json():
     assert payload["detections"][0]["position_3d"] == [0.1, 0.2, 1.3]
 
 
+def test_policy_plan_is_published_in_map_frame_and_can_be_cleared():
+    def header():
+        return SimpleNamespace(stamp=SimpleNamespace(sec=0, nanosec=0), frame_id="")
+
+    def pose_stamped():
+        return SimpleNamespace(
+            header=header(),
+            pose=SimpleNamespace(
+                position=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+                orientation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=0.0),
+            ),
+        )
+
+    captured = []
+    publisher = RosObservabilityPublisher.__new__(RosObservabilityPublisher)
+    publisher._types = {
+        "Path": lambda: SimpleNamespace(header=header(), poses=[]),
+        "PoseStamped": pose_stamped,
+    }
+    publisher._map_frame = "map"
+    publisher._publishers = {"plan": SimpleNamespace(publish=captured.append)}
+
+    publisher.publish_plan(np.asarray([[1.0, 2.0, 0.0], [3.0, 4.0, 0.0]]), 12.5)
+    publisher.publish_plan(np.empty((0, 3)), 13.0)
+
+    assert captured[0].header.frame_id == "map"
+    assert [(p.pose.position.x, p.pose.position.y) for p in captured[0].poses] == [
+        (1.0, 2.0),
+        (3.0, 4.0),
+    ]
+    assert captured[1].header.frame_id == "map"
+    assert captured[1].poses == []
+
+
 def test_rerun_callbacks_create_a_real_recording():
     rr = pytest.importorskip("rerun")
     recording = rr.new_recording("nero_test", make_default=False)
@@ -299,6 +334,7 @@ def test_rerun_callbacks_create_a_real_recording():
     bridge._on_goal_pose(pose_stamped)
     bridge._on_object_position(SimpleNamespace(header=header, point=position))
     bridge._on_path(SimpleNamespace(header=header, poses=[pose_stamped, pose_stamped]))
+    bridge._on_plan(SimpleNamespace(header=header, poses=[pose_stamped, pose_stamped]))
     bridge._on_reference_path(SimpleNamespace(header=header, poses=[pose_stamped, pose_stamped]))
 
     cloud = SimpleNamespace(

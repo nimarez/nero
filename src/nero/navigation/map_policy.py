@@ -338,6 +338,14 @@ class MapNavigator:
     def current_pose(self) -> np.ndarray:
         return self._current_pose.copy()
 
+    @property
+    def current_path(self) -> np.ndarray:
+        """Return the active A* route as map-frame XYZ points."""
+        if self._current_path is None:
+            return np.empty((0, 3), dtype=float)
+        points = np.asarray(self._current_path.waypoints, dtype=float).reshape(-1, 2)
+        return np.column_stack((points, np.zeros(len(points), dtype=float)))
+
     def render_map(self) -> np.ndarray:
         if self._grid is None:
             return np.zeros((480, 640, 3), dtype=np.uint8)

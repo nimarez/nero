@@ -20,6 +20,7 @@ class ObservabilityTopics:
     detections: str = "/nero/navigation/detections"
     status: str = "/nero/navigation/status"
     command: str = "/nero/navigation/cmd_vel"
+    plan: str = "/nero/navigation/plan"
     goal_pose: str = "/nero/navigation/goal_pose"
     object_position: str = "/nero/navigation/object_position"
     reference_pose: str = "/nero/reference/pose"

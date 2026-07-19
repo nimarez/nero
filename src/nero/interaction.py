@@ -264,6 +264,9 @@ def _parse_bare_object_name(command: str) -> str | None:
     object_name = " ".join(command.lower().split()).strip(" ,.!?")
     if not object_name or re.fullmatch(r"(?:please\s+)?go(?:\s+to)?", object_name):
         return None
+    # Be forgiving in the deliberate terminal/socket UI: ``go the chair`` is a
+    # common typo for ``go to the chair`` and must not become the literal prompt.
+    object_name = re.sub(r"^(?:please\s+)?go(?:\s+to)?\s+", "", object_name)
     object_name = re.sub(r"^(?:the|a|an)\s+", "", object_name)
     return object_name or None
 
@@ -272,6 +275,7 @@ def request_navigation_target(
     speaker: Speaker,
     command_source: CommandSource,
     cancelled: Callable[[], bool] | None = None,
+    target_validator: Callable[[str], bool] | None = None,
 ) -> str:
     """Wait for a valid direction, acknowledge it aloud, and return its target."""
     transcript = ""
@@ -308,6 +312,13 @@ def request_navigation_target(
                 if callable(acknowledge):
                     acknowledge("rejected")
                 continue
+            if target_validator is not None and not target_validator(object_name):
+                logger.info("Rejecting unsupported object class: %s", object_name)
+                acknowledge = getattr(command_source, "acknowledge", None)
+                if callable(acknowledge):
+                    acknowledge("unsupported")
+                transcript = ""
+                continue
 
             # Stop ASR before TTS so the K1 never transcribes its own
             # acknowledgement as the next human command.
@@ -338,10 +349,12 @@ class NavigationTargetListener:
         command_source: CommandSource,
         *,
         cancelled: Callable[[], bool] | None = None,
+        target_validator: Callable[[str], bool] | None = None,
     ) -> None:
         self._speaker = speaker
         self._command_source = command_source
         self._cancelled = cancelled
+        self._target_validator = target_validator
         self._results: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
         self._thread: threading.Thread | None = None
 
@@ -361,6 +374,7 @@ class NavigationTargetListener:
                 self._speaker,
                 self._command_source,
                 cancelled=self._cancelled,
+                target_validator=self._target_validator,
             )
             self._results.put(("target", target))
         except BaseException as exc:

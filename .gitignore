@@ -17,3 +17,6 @@ config/booster_studio_k1_calibration.json
 config/booster_studio_k1_imu_rgbd.yaml
 config/*.onnx
 config/*.pt
+config/*.ts
+config/yolov8s-worldv2-open-vocab-256-qnn/
+.env.aihub

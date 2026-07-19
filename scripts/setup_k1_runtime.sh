@@ -18,5 +18,12 @@ if ! command -v ros2 >/dev/null 2>&1; then
 fi
 
 export UV_LINK_MODE="${UV_LINK_MODE:-copy}"
-uv venv --clear --system-site-packages
-uv sync --all-groups --locked
+if [[ "${NERO_RECREATE_VENV:-0}" == "1" ]] || \
+  [[ ! -x .venv/bin/python ]] || \
+  ! grep -Eqi '^include-system-site-packages = true$' .venv/pyvenv.cfg
+then
+  uv venv --clear --system-site-packages
+fi
+# Inexact sync preserves vendor and locally built QNN wheels that are
+# intentionally outside the cross-platform lock file.
+uv sync --all-groups --locked --inexact

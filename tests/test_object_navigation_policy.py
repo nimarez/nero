@@ -3,7 +3,8 @@ from types import SimpleNamespace
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from nero.navigation.policy import NavigationPolicy, PolicyState
+from nero.navigation.policy import NavigationGoal, NavigationPolicy, PolicyState
+from nero.navigation.runtime import LocalizedFrame, SensorFrame
 from nero.perception.object_detector import ObjectDetection
 from nero.slam.orb_slam3_node import SLAMPose
 from nero.slam.pose_estimator import FusedPose
@@ -147,3 +148,107 @@ def test_arrival_requires_full_pose_and_track_freshness(monkeypatch):
     assert policy._goal_is_fresh()
     monkeypatch.setattr("nero.navigation.policy.time.monotonic", lambda: 11.1)
     assert not policy._goal_is_fresh()
+
+
+def _localized_frame(*, tracking="OK", safe=True, min_distance=2.0):
+    sensor = SensorFrame(
+        rgb=np.zeros((4, 4, 3), dtype=np.uint8),
+        depth=np.full((4, 4), 2000, dtype=np.uint16),
+        timestamp=1.0,
+        camera_info=None,
+        imu_rpy=np.zeros(3),
+        imu_samples=[],
+        odometry=np.zeros(3),
+    )
+    return LocalizedFrame(
+        sensor=sensor,
+        slam_pose=SLAMPose(
+            position=np.zeros(3),
+            orientation=np.array([0.0, 0.0, 0.0, 1.0]),
+            tracking_status=tracking,
+        ),
+        fused_pose=FusedPose(position=np.zeros(3), yaw=0.0, timestamp=1.0),
+        safety_status=SimpleNamespace(
+            is_safe=safe, reason="obstacle" if not safe else ""
+        ),
+        obstacle_info={
+            "has_obstacle": min_distance < 0.5,
+            "sensor_blind": False,
+            "min_distance": min_distance,
+        },
+    )
+
+
+def test_initial_slam_loss_retains_target_and_executes_bounded_bootstrap(monkeypatch):
+    robot = RecordingRobot()
+    policy = NavigationPolicy(robot=robot)
+    policy._running = True
+    policy._state = PolicyState.DETECTING
+    policy._goal = NavigationGoal("green can")
+    localized = _localized_frame(tracking="LOST")
+    policy._get_sensor_data = lambda: localized.sensor
+    monkeypatch.setattr(
+        "nero.navigation.policy.localize_sensor_frame", lambda *args, **kwargs: localized
+    )
+
+    status = policy.step()
+
+    assert status.state == PolicyState.LOCALIZING
+    assert status.current_goal.object_name == "green can"
+    assert status.velocity_command.angular_z == policy._slam_bootstrap_angular_velocity
+    assert robot.commands[-1] == (0.0, 0.0, policy._slam_bootstrap_angular_velocity)
+
+
+def test_tracking_loss_after_initialization_holds_without_open_loop_motion(monkeypatch):
+    robot = RecordingRobot()
+    policy = NavigationPolicy(robot=robot)
+    policy._running = True
+    policy._state = PolicyState.NAVIGATING
+    policy._goal = NavigationGoal("green can")
+    policy._slam_ever_tracked = True
+    localized = _localized_frame(tracking="LOST")
+    policy._get_sensor_data = lambda: localized.sensor
+    monkeypatch.setattr(
+        "nero.navigation.policy.localize_sensor_frame", lambda *args, **kwargs: localized
+    )
+
+    status = policy.step()
+
+    assert status.state == PolicyState.LOCALIZING
+    assert status.current_goal.object_name == "green can"
+    assert status.velocity_command.angular_z == 0.0
+    assert robot.commands[-1] == (0.0, 0.0, 0.0)
+
+
+def test_close_obstacle_blocks_motion_without_discarding_command(monkeypatch):
+    robot = RecordingRobot()
+    policy = NavigationPolicy(robot=robot)
+    policy._running = True
+    policy._state = PolicyState.NAVIGATING
+    policy._goal = NavigationGoal("green can")
+    localized = _localized_frame(safe=False, min_distance=0.2)
+    policy._get_sensor_data = lambda: localized.sensor
+    monkeypatch.setattr(
+        "nero.navigation.policy.localize_sensor_frame", lambda *args, **kwargs: localized
+    )
+
+    status = policy.step()
+
+    assert status.state == PolicyState.NAVIGATING
+    assert status.current_goal.object_name == "green can"
+    assert "blocked by obstacle" in status.message
+    assert robot.commands[-1] == (0.0, 0.0, 0.0)
+
+
+def test_direct_navigation_exposes_current_to_goal_plan():
+    policy = NavigationPolicy(sim_env=SimpleNamespace())
+    policy._state = PolicyState.NAVIGATING
+    policy._goal = NavigationGoal(
+        "green can", approach_pose=np.array([3.0, 4.0, 0.5])
+    )
+
+    status = policy._update_status(robot_pose=np.array([1.0, 2.0, 0.0]))
+
+    np.testing.assert_allclose(
+        status.planned_path, [[1.0, 2.0, 0.0], [3.0, 4.0, 0.0]]
+    )

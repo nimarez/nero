@@ -21,7 +21,7 @@ The physical runtime uses interfaces verified on K1 Geek firmware
 | Planar odometry | `/odometer_state` |
 | Locomotion | Official `B1LocoClient` on loopback |
 | Speech | Booster LUI ASR/TTS with `flite`/ALSA playback fallback |
-| Detection | Target-conditioned YOLO-World v2 with arbitrary text prompts |
+| Detection | QNN HTP target-conditioned YOLO-World v2 with arbitrary text prompts |
 | SLAM | Native ORB-SLAM3 `Sensor.IMU_RGBD` |
 
 Only the interfaces in this table are part of the physical runtime. RGB and depth
@@ -29,9 +29,10 @@ must have the same timestamp. IMU samples are synchronized to each pair before
 native SLAM.
 
 Startup is fail-closed. Nero requires live RGB, depth, CameraInfo, IMU, odometry,
-the open-vocabulary model, ORB vocabulary, robot calibration, walking mode, and the native
-IMU-RGBD backend before it enables velocity output. It never changes the real
-robot's mode automatically. Keep the area clear and the hardware stop reachable.
+the configured detector, ORB vocabulary, robot calibration, walking mode, and
+the native IMU-RGBD backend before it enables velocity output. It never changes
+the real robot's mode automatically. Keep the area clear and the hardware stop
+reachable.
 
 ## Local development
 
@@ -54,6 +55,20 @@ Clone the repository on the robot, then run:
 source /opt/ros/humble/setup.bash
 source /opt/booster/BoosterAgent/install/setup.bash
 ./scripts/setup_k1_runtime.sh
+./scripts/setup_qnn_runtime.sh --build
+```
+
+From the Mac checkout, install the private generated artifact with the configured
+AI Hub client and transfer it:
+
+```bash
+uv run --extra ai-hub nero-install-qnn-model
+uv run nero-deploy-qnn-model
+```
+
+Back on the robot, finish the sensor/runtime setup:
+
+```bash
 ./scripts/setup_object_detector.sh
 uv run nero-setup-orbslam
 uv run nero-k1-calibration --iface lo --duration 60
@@ -61,10 +76,12 @@ uv run nero-k1-calibration --iface lo --duration 60
 
 The prefix commands expose ROS messages and native libraries to the current
 shell. `setup_k1_runtime.sh` creates a uv environment that can see those
-preinstalled packages. The detector and vocabulary installers
-download fixed artifacts and verify their checksums. Calibration reads the live
-production ROS intrinsics and RGB-D rate, measures stationary low-state IMU noise,
-and combines those measurements with the nominal K1 Geek camera mount. It writes:
+preinstalled packages. The QNN setup builds or installs a Linux ARM64 ONNX
+Runtime with `QNNExecutionProvider`; Microsoft only publishes the prebuilt QNN
+wheel for Windows. Detector setup verifies the pinned AI Hub graph and resolves
+the text encoder before the live loop. Calibration reads the live production
+ROS intrinsics and RGB-D rate, measures stationary low-state IMU noise, and
+combines those measurements with the nominal K1 Geek camera mount. It writes:
 
 - `config/k1_calibration.json`
 - `config/k1_orbslam3_imu_rgbd.yaml`
@@ -107,7 +124,7 @@ with one command:
 uv run nero-command
 ```
 
-Enter an open-vocabulary object name such as `chair` at the `object>` prompt. The
+Enter any target description, such as `green can`, at the `object>` prompt. The
 command uses your normal SSH authentication, starts a live-only telemetry bridge
 on the robot, and removes that bridge when the terminal exits. It does not create
 a Rerun recording. Use `quit` to close both the prompt and the viewer, or pass
@@ -115,11 +132,102 @@ a Rerun recording. Use `quit` to close both the prompt and the viewer, or pass
 are bounded, and a command that the robot policy does not acknowledge returns
 after five seconds; tune that with `--ack-timeout` if needed.
 
-YOLO-World runs asynchronously at a 384-pixel performance default while the
-camera and depth topics remain at their native 544x448 resolution. Override the
-detector without changing code using `NERO_YOLO_IMGSZ=448` (higher recall, lower
-rate), `NERO_YOLO_THREADS`, or `NERO_YOLO_MAX_DETECTIONS` when launching the
-robot policy.
+The real Linux ARM64 K1 defaults to `yolo-world-qnn`: a 256-pixel visual graph on
+the QCS8550 HTP/NPU and an exact CLIP text embedding computed only when the
+command changes. Session creation sets `session.disable_cpu_ep_fallback=1` and
+also disables ONNX Runtime fallback, so a missing provider or partially
+unsupported graph prevents detector initialization and therefore prevents
+motion. It never silently becomes a CPU workload.
+
+The older CPU YOLO-World backend remains an explicit diagnostic fallback:
+
+```bash
+export NERO_OBJECT_BACKEND=yolo-world
+./scripts/setup_object_detector.sh
+```
+
+That CPU backend runs in a separate process on K1 so ORB-SLAM3 cannot starve
+inference. It reserves the two fastest available cores for detection and leaves
+the remaining allowed cores to camera, SLAM, ROS, and control. Disable this only
+for diagnostics with `NERO_CPU_PARTITION=0`; disable process isolation with
+`NERO_DETECTOR_PROCESS=0`.
+
+YOLOE-26n is an optional open-vocabulary alternative. Install and run it with:
+
+```bash
+NERO_OBJECT_BACKEND=yoloe ./scripts/setup_object_detector.sh
+export NERO_OBJECT_BACKEND=yoloe
+uv run nero-orb-slam --no-display
+```
+
+The measured K1 result should decide the backend: YOLOE-26n was approximately
+0.5 seconds per standalone frame in the initial robot test, while YOLO-World at
+256 pixels was approximately 0.3 seconds. YOLOE therefore remains opt-in rather
+than becoming the default. A fixed-vocabulary OpenCV fallback exists for
+diagnostics, but it is not used by the object-command policy.
+
+### Qualcomm AI Hub NPU path
+
+Nero can export YOLO-World with two inputs: a 256-pixel RGB tensor and one
+512-dimensional text feature. The class count stays fixed at one because the
+policy pursues one requested target, while the text feature remains a runtime
+input. This preserves arbitrary spoken targets; unlike a normal YOLO export, it
+does not bake a fixed vocabulary into the graph.
+
+Configure the free Qualcomm AI Hub client outside the repository, then run:
+
+```bash
+uv sync --extra ai-hub
+uv run nero-export-yolo-world
+uv run nero-ai-hub-profile
+uv run nero-install-qnn-model
+```
+
+Credentials belong in `~/.qai_hub/client.ini`. A repo-local `.env.aihub` is
+ignored as a convenience, but must never be committed. Generated models and
+profiles are ignored under `config/` and `output/`.
+
+The first QCS8550 proxy profile of the runtime-prompt graph completed with every
+reported operation on the NPU: 1.495 ms model inference, 83,132,416 bytes peak
+inference memory, 1.171 seconds first load, and 357 ms warm load. AI Hub proxy
+timings are a model microbenchmark, not an end-to-end K1 guarantee; preprocessing,
+CLIP encoding when a command changes, postprocessing, camera transfer, SLAM, and
+robot scheduling remain outside that figure. The corresponding jobs were
+`jgjwyj175` (compile) and `jp1v1r3kp` (profile).
+
+The runtime artifact is pinned to AI Hub target model `mn09g883n`; both ONNX
+files are size- and SHA-256-verified before installation. Generated model data
+is intentionally ignored by Git. Transfer it to the robot over one non-TTY SSH
+stream after the robot has pulled the current source:
+
+```bash
+uv run nero-deploy-qnn-model
+```
+
+Then verify the real provider, full-graph HTP placement contract, prompt encoder,
+input/output shapes, and warm latency on the K1 without moving it:
+
+```bash
+./scripts/setup_qnn_runtime.sh
+uv run nero-qnn-smoke --target "green can" --runs 20
+```
+
+The first command is a check when the provider is already installed; add
+`--build` only for the one-time source build. `NERO_QNN_ORT_WHEEL` can instead
+point to a known-compatible Linux ARM64 QNN wheel. If the QNN backend library is
+not discoverable under the K1's `/opt/qcom` SDK, set
+`NERO_QNN_BACKEND_PATH=/absolute/path/libQnnHtp.so`.
+
+Override CPU open-vocabulary inference using `NERO_OBJECT_IMGSZ` (higher values
+trade rate for recall), `NERO_YOLO_THREADS`, or `NERO_YOLO_MAX_DETECTIONS`.
+The pinned QNN graph is fixed at 256 pixels and rejects any other size.
+`NERO_OBJECT_MODEL` can point at a non-default CPU checkpoint. The older
+`NERO_YOLO_IMGSZ` name remains supported. Measure the exact live workload
+without commanding robot motion using:
+
+```bash
+uv run nero-perception-benchmark --live --with-slam --target "green can"
+```
 
 The robot announces an accepted command before movement. Nero stops when the
 target track expires, a safety check fails, SLAM loses the required state, or the
@@ -141,6 +249,12 @@ All commands run through uv:
 | `uv run nero-sim --demo` | Fast deterministic in-process policy test |
 | `uv run nero-booster-studio` | Full policy on a Booster Studio virtual K1 |
 | `uv run nero-sim-benchmark` | Compare native SLAM with simulator truth |
+| `uv run nero-perception-benchmark` | Non-moving detector benchmark, optionally under live SLAM load |
+| `uv run nero-export-yolo-world` | Export one-target YOLO-World with a runtime text embedding |
+| `uv run nero-ai-hub-profile` | Compile/profile the runtime-prompt graph on the QCS8550 proxy |
+| `uv run nero-install-qnn-model` | Download and checksum-verify the pinned AI Hub QNN graph |
+| `uv run nero-deploy-qnn-model` | Transfer and re-verify the generated QNN graph on the K1 |
+| `uv run nero-qnn-smoke` | Fail-closed real-K1 QNN provider and latency smoke test |
 | `uv run nero-mapping` | Collect RGB-D/pose frames and invoke COLMAP + gsplat |
 | `uv run nero-orb-slam --map MAP` | Same object policy with map alignment and A* routing |
 | `uv run nero-map-nav --map MAP` | Explicit pose-goal CLI using the unified policy |
@@ -280,7 +394,7 @@ Hardware, Studio, mapping, and benchmark runtimes publish normalized telemetry:
 |---|---|
 | `/nero/sensors` | RGB, metric depth, CameraInfo, IMU, odometry, joint states |
 | `/nero/slam` | Pose, path, tracking state, map points |
-| `/nero/navigation` | Requested detections, object/goal poses, status, velocity |
+| `/nero/navigation` | Detections, object/goal poses, controller plan, status, velocity |
 | `/nero/reference` | Simulator-only truth for visualization and benchmarks |
 
 Control never consumes `/nero/reference`. Pass `--no-ros-observability` to a
@@ -295,8 +409,8 @@ uv run --extra viz nero-rerun
 
 The bridge plots RGB, metric depth, camera calibration, IMU orientation/rates,
 odometry, every available joint position/velocity/effort, SLAM pose/path/map,
-detection boxes/labels/confidence/depth centroids, goals, commands, and simulator
-reference data. Print the exact
+detection boxes/labels/confidence/depth centroids, goals, the green controller
+plan, commands, and simulator reference data. Print the exact
 subscription contract without requiring ROS or Rerun to be installed:
 
 ```bash
