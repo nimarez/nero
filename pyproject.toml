@@ -15,6 +15,10 @@ dependencies = [
 
 [project.optional-dependencies]
 viz = ["rerun-sdk==0.22.1"]
+projector = [
+    "aiohttp>=3.9,<4",
+    "pyrealsense2>=2.55; sys_platform == 'linux'",
+]
 ai-hub = [
     "clip @ git+https://github.com/ultralytics/CLIP.git@a57ec09a1668b6a5905ff323d734701f8d11d0e2",
     "onnx>=1.17,<2",
@@ -64,6 +68,7 @@ nero-ai-hub-profile = "nero.perception.ai_hub_profile:main"
 nero-install-qnn-model = "nero.perception.qnn_artifact:main"
 nero-deploy-qnn-model = "nero.perception.qnn_deploy:main"
 nero-qnn-smoke = "nero.perception.qnn_smoke:main"
+nero-projector-calibrate = "nero.projector.app:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
