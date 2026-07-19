@@ -410,12 +410,12 @@ front end; it does not own a second sensor, safety, localization, or control loo
 goals. It uses the target's live camera-frame RGB-D position as the pursuit point,
 keeps the tilt/depth/battery safety gate, and stops at the same class-aware
 stand-off distance. While acquiring or reacquiring a target, the base stops and the
-K1 head performs a 15-pose pan/tilt raster. After an unsuccessful raster, the robot
+camera remains fixed forward. After an unsuccessful fresh observation, the robot
 uses bounded depth-gated sidesteps, a turnaround, and forward relocation to reach a
-new observation point before stopping for another scan. A side-looking detection
-must be confirmed, the head is then centered, and a fresh centered detection is
-required before pursuit. Because it has no persistent world pose, it cannot route
-around occlusions or map obstacles.
+new observation point. Any fresh 2D target detection interrupts relocation and
+holds the base still while waiting for valid depth; a second fresh detection is
+required before pursuit. Pure pursuit never calls the K1 head-motion API. Because
+it has no persistent world pose, it cannot route around occlusions or map obstacles.
 It publishes the same sensor, detection, status, and command topics as the SLAM
 policy, so Rerun still shows the live RGB/depth images, labeled detection boxes,
 3D camera-frame centroids, and commanded velocities. A world-frame route is

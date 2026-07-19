@@ -121,7 +121,7 @@ def test_direct_policy_pursues_live_detection_without_slam(monkeypatch):
     assert status.stand_off_distance == 1.0
     assert status.stand_off_tolerance == 0.12
     assert status.target_position_camera == [0.0, 0.0, 2.0]
-    assert head_poses == [(0.0, 0.0, 0.01), (0.0, 0.0, 0.01)]
+    assert head_poses == []
     assert all(values == (0.0, 0.0, 0.0) for values in velocities[:-1])
 
 
@@ -281,9 +281,7 @@ def test_main_owns_terminal_web_bridge_for_policy_lifetime(monkeypatch, capsys):
     robot = object()
     commands = object()
     monkeypatch.setattr(pursuit_agent, "parse_args", lambda: args)
-    monkeypatch.setattr(
-        pursuit_agent, "configure_qualcomm_cpu_partition", lambda backend: None
-    )
+    monkeypatch.setattr(pursuit_agent, "configure_qualcomm_cpu_partition", lambda backend: None)
     monkeypatch.setattr(
         pursuit_agent,
         "create_object_detector",
@@ -367,7 +365,7 @@ def test_direct_policy_expires_replayed_async_detection(monkeypatch):
     now[0] = 1.7
     status = policy.step()
 
-    assert status.state == PursuitState.EXPLORING
+    assert status.state == PursuitState.RELOCATING
     assert velocities[-1] == (0.0, 0.0, 0.0)
 
 
@@ -416,7 +414,7 @@ def test_direct_policy_uses_separate_initial_acquisition_timeout(monkeypatch):
     assert policy.step().state == PursuitState.LOST
 
 
-def test_direct_policy_scans_every_default_head_pose_without_moving_base(monkeypatch):
+def test_direct_policy_observes_fixed_forward_camera_without_moving_head(monkeypatch):
     now = [0.0]
     monkeypatch.setattr(pursuit_agent.time, "monotonic", lambda: now[0])
     velocities = []
@@ -459,12 +457,12 @@ def test_direct_policy_scans_every_default_head_pose_without_moving_base(monkeyp
     assert status.state == PursuitState.EXPLORING
     assert status.exploration_step == len(DEFAULT_HEAD_SCAN_POSES)
     assert status.exploration_steps == len(DEFAULT_HEAD_SCAN_POSES)
-    assert head_poses == [(pitch, yaw, 0.35) for pitch, yaw in DEFAULT_HEAD_SCAN_POSES]
+    assert head_poses == []
     assert velocities
     assert all(values == (0.0, 0.0, 0.0) for values in velocities)
 
 
-def test_direct_policy_relocates_then_stops_and_starts_a_new_scan(monkeypatch):
+def test_direct_policy_target_detection_interrupts_relocation(monkeypatch):
     now = [0.0]
     monkeypatch.setattr(pursuit_agent.time, "monotonic", lambda: now[0])
     velocities = []
@@ -491,8 +489,7 @@ def test_direct_policy_relocates_then_stops_and_starts_a_new_scan(monkeypatch):
         label="chair",
         confidence=0.9,
         bbox=(1, 1, 4, 4),
-        position_3d=np.array([0.0, 0.0, 2.0]),
-        distance=2.0,
+        position_3d=None,
     )
     visible = [False]
     detector = SimpleNamespace(
@@ -507,9 +504,7 @@ def test_direct_policy_relocates_then_stops_and_starts_a_new_scan(monkeypatch):
     policy = DirectPursuitPolicy(
         robot,
         object_detector=detector,
-        head_scan=HeadScanConfig(
-            poses=((0.0, 0.0),), move_duration=0.01, settle_time=0.0
-        ),
+        head_scan=HeadScanConfig(poses=((0.0, 0.0),), move_duration=0.01, settle_time=0.0),
         relocation=RelocationConfig(distance=0.5, linear_velocity=0.1),
     )
     policy.start()
@@ -520,35 +515,28 @@ def test_direct_policy_relocates_then_stops_and_starts_a_new_scan(monkeypatch):
     starting_relocation = policy.step()
     assert starting_relocation.state == PursuitState.RELOCATING
     assert starting_relocation.velocity_command.linear_x == 0.0
-    assert head_poses[-1] == (0.0, 0.0, 0.01)
+    assert head_poses == []
 
-    # Even a target detection during relocation cannot transition into pursuit.
+    # A fresh target detection must stop exploratory motion immediately.
     visible[0] = True
     now[0] = 0.04
-    relocating = policy.step()
-    assert relocating.state == PursuitState.RELOCATING
-    assert relocating.velocity_command.linear_x == 0.0
-    assert relocating.velocity_command.linear_y == 0.1
-    assert relocating.velocity_command.angular_z == 0.0
-    assert relocating.relocation_maneuver == "sidestep_left"
-
-    odometry[1] = 0.5
-    now[0] = 0.05
-    rescanning = policy.step()
-    assert rescanning.state == PursuitState.EXPLORING
-    assert rescanning.velocity_command.linear_x == 0.0
-    assert rescanning.relocation_count == 1
-    assert rescanning.exploration_step == 1
+    detecting = policy.step()
+    assert detecting.state == PursuitState.DETECTING
+    assert detecting.velocity_command.linear_x == 0.0
+    assert detecting.velocity_command.linear_y == 0.0
+    assert detecting.velocity_command.angular_z == 0.0
     assert velocities[-1] == (0.0, 0.0, 0.0)
 
-    visible[0] = False
+    now[0] = 0.05
+    waiting_for_depth = policy.step()
+    assert waiting_for_depth.state == PursuitState.DETECTING
+    assert "waiting for valid depth" in waiting_for_depth.message
+    assert velocities[-1] == (0.0, 0.0, 0.0)
+
+    detection.position_3d = np.array([0.0, 0.0, 2.0])
+    detection.distance = 2.0
     now[0] = 0.06
-    assert policy.step().state == PursuitState.EXPLORING
-    assert head_poses == [
-        (0.0, 0.0, 0.01),
-        (0.0, 0.0, 0.01),
-        (0.0, 0.0, 0.01),
-    ]
+    assert policy.step().state == PursuitState.ALIGNING
 
 
 def test_direct_policy_turns_around_before_relocating_forward(monkeypatch):
@@ -597,9 +585,7 @@ def test_direct_policy_turns_around_before_relocating_forward(monkeypatch):
             preprocess=lambda depth: depth,
             detect_obstacles=lambda _depth: obstacles,
         ),
-        head_scan=HeadScanConfig(
-            poses=((0.0, 0.0),), move_duration=0.01, settle_time=0.0
-        ),
+        head_scan=HeadScanConfig(poses=((0.0, 0.0),), move_duration=0.01, settle_time=0.0),
         relocation=RelocationConfig(turnaround_angle=0.5, angular_velocity=0.2),
     )
     policy.start()
@@ -688,9 +674,7 @@ def test_direct_policy_does_not_relocate_without_safe_depth(monkeypatch):
     policy = DirectPursuitPolicy(
         robot,
         object_detector=detector,
-        head_scan=HeadScanConfig(
-            poses=((0.0, 0.0),), move_duration=0.01, settle_time=0.0
-        ),
+        head_scan=HeadScanConfig(poses=((0.0, 0.0),), move_duration=0.01, settle_time=0.0),
         acquisition_timeout=1.0,
     )
     policy.start()
@@ -741,9 +725,7 @@ def test_direct_policy_respects_maximum_relocation_count(monkeypatch):
     policy = DirectPursuitPolicy(
         robot,
         object_detector=detector,
-        head_scan=HeadScanConfig(
-            poses=((0.0, 0.0),), move_duration=0.01, settle_time=0.0
-        ),
+        head_scan=HeadScanConfig(poses=((0.0, 0.0),), move_duration=0.01, settle_time=0.0),
         relocation=RelocationConfig(max_relocations=0),
     )
     policy.start()
@@ -757,7 +739,7 @@ def test_direct_policy_respects_maximum_relocation_count(monkeypatch):
     assert status.relocation_count == 0
 
 
-def test_direct_policy_only_rotates_after_side_detection_then_reconfirms(monkeypatch):
+def test_direct_policy_rotates_body_for_off_center_forward_detection(monkeypatch):
     now = [0.0]
     monkeypatch.setattr(pursuit_agent.time, "monotonic", lambda: now[0])
     velocities = []
@@ -783,8 +765,8 @@ def test_direct_policy_only_rotates_after_side_detection_then_reconfirms(monkeyp
         label="chair",
         confidence=0.9,
         bbox=(1, 1, 4, 4),
-        position_3d=np.array([0.0, 0.0, 2.0]),
-        distance=2.0,
+        position_3d=np.array([-1.0, 0.0, 2.0]),
+        distance=np.sqrt(5.0),
     )
     detector = SimpleNamespace(
         initialize=lambda: True,
@@ -798,7 +780,7 @@ def test_direct_policy_only_rotates_after_side_detection_then_reconfirms(monkeyp
     policy = DirectPursuitPolicy(
         robot,
         object_detector=detector,
-        head_scan=HeadScanConfig(poses=((0.0, 0.75),), move_duration=0.01, settle_time=0.0),
+        head_scan=HeadScanConfig(poses=((0.0, 0.0),), move_duration=0.01, settle_time=0.0),
     )
     policy.start()
     policy.set_target("chair")
@@ -816,7 +798,7 @@ def test_direct_policy_only_rotates_after_side_detection_then_reconfirms(monkeyp
     assert aligning.velocity_command.linear_x == 0.0
     assert aligning.velocity_command.angular_z > 0.0
 
-    odometry[2] = 0.75
+    odometry[2] = np.arctan2(1.0, 2.0)
     now[0] = 0.06
     assert policy.step().state == PursuitState.DETECTING
     now[0] = 0.07
@@ -825,7 +807,7 @@ def test_direct_policy_only_rotates_after_side_detection_then_reconfirms(monkeyp
     assert navigating.velocity_command.linear_x > 0.0
 
 
-def test_direct_policy_stops_when_head_scan_command_is_rejected():
+def test_direct_policy_never_calls_rejected_head_service():
     velocities = []
     state = SimpleNamespace(
         rgb=np.zeros((8, 8, 3), dtype=np.uint8),
@@ -861,8 +843,7 @@ def test_direct_policy_stops_when_head_scan_command_is_rejected():
 
     status = policy.step()
 
-    assert status.state == PursuitState.ERROR
-    assert "Head command failed" in status.message
+    assert status.state == PursuitState.EXPLORING
     assert velocities[-1] == (0.0, 0.0, 0.0)
 
 
