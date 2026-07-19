@@ -983,6 +983,11 @@ class ObjectDetector:
         if self._executor is not None:
             self._executor.shutdown(wait=True, cancel_futures=True)
             self._executor = None
+        if self._qnn_runtime is not None:
+            close = getattr(self._qnn_runtime, "close", None)
+            if close is not None:
+                close()
+            self._qnn_runtime = None
         self._modal_client = None
 
     def _detect_yolo(
