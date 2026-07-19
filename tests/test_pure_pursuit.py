@@ -991,7 +991,7 @@ def test_run_agent_streams_telemetry_and_announces_missing_target_once(monkeypat
         command_source=SimpleNamespace(),
     )
 
-    assert spoken == ["I could not detect the green cup."]
+    assert spoken == ["Couldn't find the green cup."]
     assert published.count("sensors") == 2
     assert published.count("policy") == 2
     assert published[-1] == "closed"

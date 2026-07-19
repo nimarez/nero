@@ -1236,7 +1236,7 @@ def run_agent(robot, args, *, object_detector=None, command_source=None) -> None
             elif status.state == PursuitState.LOST:
                 if not announced_failure and target_name is not None:
                     try:
-                        robot.speak(f"I could not detect the {target_name}.")
+                        robot.speak(f"Couldn't find the {target_name}.")
                     except RuntimeError as exc:
                         logger.warning("Could not announce missing object: %s", exc)
                     announced_failure = True
