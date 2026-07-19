@@ -46,6 +46,10 @@ def _sway(command: str) -> None:
 def _configure_sway_rules() -> None:
     _sway('for_window [title="^Nero Projector$"] move container to workspace 1, fullscreen enable')
     _sway('for_window [title="^Nero Camera$"] move container to workspace 2, fullscreen enable')
+    _sway(
+        'for_window [title="^Nero Operator - Google Chrome$"] '
+        "move container to workspace 2, fullscreen enable"
+    )
 
 
 def _open_windows() -> None:
@@ -59,6 +63,10 @@ def _open_windows() -> None:
     time.sleep(0.4)
     _sway('[title="^Nero Projector$"] move container to workspace 1, fullscreen enable')
     _sway('[title="^Nero Camera$"] move container to workspace 2, fullscreen enable')
+    _sway(
+        '[title="^Nero Operator - Google Chrome$"] '
+        "move container to workspace 2, fullscreen enable, focus"
+    )
 
 
 def _load_or_default(path: Path) -> ProjectorCalibration:
