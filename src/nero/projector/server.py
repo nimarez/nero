@@ -14,6 +14,7 @@ from aiohttp import WSMsgType, web
 
 from .calibration import CalibrationState
 from .camera import RealSenseArucoCamera
+from .motion import MotionTracker
 
 logger = logging.getLogger(__name__)
 
@@ -35,16 +36,16 @@ label{color:var(--muted)}input[type=range]{vertical-align:middle}.help{padding:0
 .markers{display:flex;gap:6px}.marker{width:28px;height:28px;display:grid;place-items:center;border:1px solid #513b1d;color:#ffad46;border-radius:7px}.marker.seen{color:var(--green);border-color:#347646;background:#102619}
 @media(max-width:1000px){main{grid-template-columns:1fr}header{height:auto;min-height:58px;flex-wrap:wrap;padding:10px 14px}}
 </style></head>
-<body><header><h1>Nero · Camera → Projector calibration</h1><span id=ws class=badge>connecting</span><span id=lat class=badge>— ms</span><span class=badge>DICT_4X4_50 · 130 mm</span><div class=markers id=markers></div></header>
+<body><header><h1>Nero · Camera → Projector calibration</h1><span id=ws class=badge>connecting</span><span id=lat class=badge>— ms</span><span id=motion class=badge>controller waiting</span><span class=badge>DICT_4X4_50 · 130 mm</span><div class=markers id=markers></div></header>
 <main>
 <section class=panel><div class=bar><strong>RealSense D435i</strong><span>POS screen + browser · annotated 30 fps</span></div><div class=stage><img id=cam src="/stream.mjpg"></div><div class=help>Physical markers expected: IDs 1, 2, 3, 4. Green outlines are detections; orange dots are measured centers.</div></section>
 <section class=panel><div class=bar><strong>Physical projector surface</strong><span>drag ID handles · updates live</span></div><div class=stage><canvas id=preview width=960 height=540></canvas></div>
-<div class=controls><button id=reset>Reset</button><button id=save class=primary>Save calibration</button><label>grid <input id=density type=range min=6 max=24 value=12></label><label>weight <input id=weight type=range min=1 max=6 value=2></label><span id=saved></span></div>
+<div class=controls><button id=reset>Reset</button><button id=recenter>Center controller</button><button id=save class=primary>Save calibration</button><label>grid <input id=density type=range min=6 max=24 value=12></label><label>weight <input id=weight type=range min=1 max=6 value=2></label><span id=saved></span></div>
 <div class=help>Assumed floor order: ID 1 top-left → ID 2 top-right → ID 3 bottom-right → ID 4 bottom-left. Drag until the projected white/green targets sit on the matching ArUco centers.</div></section>
 </main>
 <script>
 const cv=document.querySelector('#preview'),x=cv.getContext('2d'),WS=960,HS=540,S=2;
-const markers=document.querySelector('#markers'),density=document.querySelector('#density'),weight=document.querySelector('#weight'),ws=document.querySelector('#ws'),lat=document.querySelector('#lat'),saved=document.querySelector('#saved'),reset=document.querySelector('#reset'),save=document.querySelector('#save');
+const markers=document.querySelector('#markers'),density=document.querySelector('#density'),weight=document.querySelector('#weight'),ws=document.querySelector('#ws'),lat=document.querySelector('#lat'),motion=document.querySelector('#motion'),saved=document.querySelector('#saved'),reset=document.querySelector('#reset'),recenter=document.querySelector('#recenter'),save=document.querySelector('#save');
 let handles=[[360,220],[1560,220],[1560,860],[360,860]],drag=-1,queued=false,seq=0,sock;
 for(let i=1;i<=4;i++){let e=document.createElement('span');e.className='marker';e.id='m'+i;e.textContent=i;markers.appendChild(e)}
 function homography(p){let [p0,p1,p2,p3]=p,dx1=p1[0]-p2[0],dy1=p1[1]-p2[1],dx2=p3[0]-p2[0],dy2=p3[1]-p2[1],sx=p0[0]-p1[0]+p2[0]-p3[0],sy=p0[1]-p1[1]+p2[1]-p3[1],den=dx1*dy2-dx2*dy1,g=(sx*dy2-dx2*sy)/den,h=(dx1*sy-sx*dy1)/den;return[p1[0]-p0[0]+g*p1[0],p3[0]-p0[0]+h*p3[0],p0[0],p1[1]-p0[1]+g*p1[1],p3[1]-p0[1]+h*p3[1],p0[1],g,h,1]}
@@ -59,8 +60,9 @@ cv.onpointerdown=e=>{let p=point(e),best=1e9;handles.forEach((h,i)=>{let d=Math.
 cv.onpointermove=e=>{if(drag<0)return;let p=point(e);handles[drag]=[Math.max(-100,Math.min(2020,p[0]*S)),Math.max(-100,Math.min(1180,p[1]*S))];draw();queueSend()}
 cv.onpointerup=()=>{drag=-1;send()};density.oninput=weight.oninput=()=>{draw();queueSend()}
 reset.onclick=()=>{handles=[[360,220],[1560,220],[1560,860],[360,860]];density.value=12;weight.value=2;draw();send('handles')};save.onclick=()=>send('save')
+recenter.onclick=()=>send('recenter')
 function connect(){sock=new WebSocket(`ws://${location.host}/ws`);sock.onopen=()=>{ws.textContent='live';ws.className='badge ok'};sock.onclose=()=>{ws.textContent='reconnecting';ws.className='badge';setTimeout(connect,600)};sock.onmessage=e=>{let d=JSON.parse(e.data);if(d.type==='state'){handles=d.calibration.handles;density.value=d.calibration.style.grid_divisions;weight.value=d.calibration.style.line_thickness;draw()}if(d.type==='applied'){let t=pending[d.client_seq];if(t){lat.textContent=Math.round(performance.now()-t)+' ms';delete pending[d.client_seq]}}if(d.type==='saved'){saved.textContent='saved · '+new Date().toLocaleTimeString()}}}
-async function poll(){try{let d=await(await fetch('/api/state')).json(),seen=new Set(d.detections.map(v=>v.id));for(let i=1;i<=4;i++)document.querySelector('#m'+i).classList.toggle('seen',seen.has(i))}catch(e){}setTimeout(poll,400)}
+async function poll(){try{let d=await(await fetch('/api/state')).json(),seen=new Set(d.detections.map(v=>v.id));for(let i=1;i<=4;i++)document.querySelector('#m'+i).classList.toggle('seen',seen.has(i));motion.textContent=d.motion.valid?`${d.motion.controller_id} live · ${Math.round(d.motion.age_ms)} ms`:'controller waiting';motion.className=d.motion.valid?'badge ok':'badge'}catch(e){}setTimeout(poll,200)}
 draw();connect();poll();
 </script></body></html>"""
 
@@ -71,12 +73,14 @@ class CalibrationWebServer:
         *,
         state: CalibrationState,
         camera: RealSenseArucoCamera,
+        motion: MotionTracker,
         calibration_path: str | Path,
         host: str = "0.0.0.0",
         port: int = 8765,
     ) -> None:
         self.state = state
         self.camera = camera
+        self.motion = motion
         self.calibration_path = Path(calibration_path).expanduser()
         self.host = host
         self.port = port
@@ -119,6 +123,7 @@ class CalibrationWebServer:
                 "camera_error": self.camera.error,
                 "detections": [item.to_dict() for item in frame.detections] if frame else [],
                 "camera_age_ms": (time.time() - frame.captured_at) * 1000 if frame else None,
+                "motion": self.motion.snapshot(),
             }
         )
 
@@ -171,15 +176,22 @@ class CalibrationWebServer:
             try:
                 payload: dict[str, Any] = json.loads(message.data)
                 message_type = payload.get("type")
-                calibration = self.state.update_handles(payload["handles"])
-                if "grid_divisions" in payload and "line_thickness" in payload:
-                    calibration = self.state.update_style(
-                        grid_divisions=payload["grid_divisions"],
-                        line_thickness=payload["line_thickness"],
-                    )
-                if message_type == "save":
-                    calibration.save(self.calibration_path)
-                    await socket.send_json({"type": "saved"})
+                if message_type == "recenter":
+                    if not self.motion.recenter():
+                        raise ValueError("controller is not currently tracked")
+                    await socket.send_json({"type": "centered"})
+                elif message_type in ("handles", "save"):
+                    calibration = self.state.update_handles(payload["handles"])
+                    if "grid_divisions" in payload and "line_thickness" in payload:
+                        calibration = self.state.update_style(
+                            grid_divisions=payload["grid_divisions"],
+                            line_thickness=payload["line_thickness"],
+                        )
+                    if message_type == "save":
+                        calibration.save(self.calibration_path)
+                        await socket.send_json({"type": "saved"})
+                else:
+                    raise ValueError(f"unsupported message type: {message_type}")
                 await socket.send_json(
                     {
                         "type": "applied",

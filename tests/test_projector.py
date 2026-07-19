@@ -6,7 +6,8 @@ import pytest
 
 from nero.projector.calibration import CalibrationState, ProjectorCalibration
 from nero.projector.camera import annotate_aruco
-from nero.projector.render import render_projector_grid
+from nero.projector.motion import map_floor_position
+from nero.projector.render import render_motion_circle, render_projector_grid
 
 
 def test_calibration_round_trip_and_atomic_save(tmp_path):
@@ -48,6 +49,19 @@ def test_render_grid_has_green_grid_white_corners_and_orange_center():
     assert int(frame[:, :, 1].max()) == 255
     assert np.count_nonzero(np.all(frame == (255, 255, 255), axis=2)) > 100
     assert np.count_nonzero(np.all(frame == (0, 142, 255), axis=2)) > 20
+
+
+def test_centered_vive_pose_maps_to_projector_center_and_draws_circle():
+    origin = (-0.096, -0.058, 0.327)
+    uv = map_floor_position(origin, origin)
+    calibration = ProjectorCalibration()
+    grid = render_projector_grid(calibration)
+    frame = render_motion_circle(grid, calibration, uv)
+    center = tuple(np.rint(calibration.transform(((0.5, 0.5),))[0]).astype(int))
+
+    assert uv == (0.5, 0.5)
+    assert not np.array_equal(frame, grid)
+    assert np.any(frame[center[1], center[0]] != grid[center[1], center[0]])
 
 
 def test_aruco_overlay_detects_only_expected_ids():
