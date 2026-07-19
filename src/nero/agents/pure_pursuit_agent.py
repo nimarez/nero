@@ -1149,6 +1149,8 @@ def run_agent(robot, args, *, object_detector=None, command_source=None) -> None
         target_name = None
         announced_arrival = False
         announced_failure = False
+        announced_exploration = False
+        explored_target = False
 
         while not shutdown:
             started = time.monotonic()
@@ -1158,6 +1160,8 @@ def run_agent(robot, args, *, object_detector=None, command_source=None) -> None
                     policy.set_target(target_name)
                     announced_arrival = False
                     announced_failure = False
+                    announced_exploration = False
+                    explored_target = False
 
             status = policy.step()
             sensor = policy.last_sensor
@@ -1186,7 +1190,34 @@ def run_agent(robot, args, *, object_detector=None, command_source=None) -> None
                     policy.reset()
                     target_name = None
                     announced_arrival = False
+                    announced_failure = False
+                    announced_exploration = False
+                    explored_target = False
                     listener.start()
+
+            if (
+                status.state == PursuitState.EXPLORING
+                and target_name is not None
+                and not announced_exploration
+            ):
+                try:
+                    robot.speak(f"Exploring for the {target_name}.")
+                except RuntimeError as exc:
+                    logger.warning("Could not announce exploration: %s", exc)
+                announced_exploration = True
+                explored_target = True
+
+            if (
+                status.state in {PursuitState.NAVIGATING, PursuitState.ARRIVED}
+                and target_name is not None
+                and explored_target
+            ):
+                try:
+                    robot.speak(f"Found the {target_name}.")
+                except RuntimeError as exc:
+                    logger.warning("Could not announce target discovery: %s", exc)
+                explored_target = False
+                announced_exploration = False
 
             if status.state == PursuitState.ARRIVED and not announced_arrival:
                 try:
@@ -1198,6 +1229,9 @@ def run_agent(robot, args, *, object_detector=None, command_source=None) -> None
                     policy.reset()
                     target_name = None
                     announced_arrival = False
+                    announced_failure = False
+                    announced_exploration = False
+                    explored_target = False
                     listener.start()
             elif status.state == PursuitState.LOST:
                 if not announced_failure and target_name is not None:
@@ -1209,6 +1243,8 @@ def run_agent(robot, args, *, object_detector=None, command_source=None) -> None
                 policy.reset()
                 target_name = None
                 announced_arrival = False
+                announced_exploration = False
+                explored_target = False
                 listener.start()
 
             elapsed = time.monotonic() - started

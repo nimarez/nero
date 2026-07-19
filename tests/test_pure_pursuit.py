@@ -997,6 +997,89 @@ def test_run_agent_streams_telemetry_and_announces_missing_target_once(monkeypat
     assert published[-1] == "closed"
 
 
+def test_run_agent_announces_exploration_and_confirmed_discovery_once(monkeypatch):
+    spoken = []
+
+    class ExplorationPolicy:
+        last_sensor = None
+
+        def __init__(self, *args, **kwargs):
+            self.states = iter(
+                (
+                    PursuitState.EXPLORING,
+                    PursuitState.EXPLORING,
+                    PursuitState.RELOCATING,
+                    PursuitState.EXPLORING,
+                    PursuitState.DETECTING,
+                    PursuitState.ALIGNING,
+                    PursuitState.DETECTING,
+                    PursuitState.NAVIGATING,
+                    PursuitState.NAVIGATING,
+                    PursuitState.ERROR,
+                )
+            )
+
+        def start(self):
+            pass
+
+        def supports_target(self, _name):
+            return True
+
+        def set_target(self, name):
+            self.target = name
+
+        def step(self):
+            return SimpleNamespace(
+                state=next(self.states),
+                message="searching",
+                velocity_command=SimpleNamespace(linear_x=0.0, angular_z=0.0),
+            )
+
+        def stop(self):
+            pass
+
+    class Listener:
+        def __init__(self, *args, **kwargs):
+            self.commands = ["box"]
+
+        def start(self):
+            pass
+
+        def poll(self):
+            return self.commands.pop(0) if self.commands else None
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(pursuit_agent, "DirectPursuitPolicy", ExplorationPolicy)
+    monkeypatch.setattr(pursuit_agent, "NavigationTargetListener", Listener)
+    monkeypatch.setattr(pursuit_agent.signal, "signal", lambda *_args: None)
+    monkeypatch.setattr(pursuit_agent.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        pursuit_agent.RosObservabilityPublisher,
+        "try_create",
+        lambda **kwargs: None,
+    )
+    robot = SimpleNamespace(stop=lambda: None, speak=spoken.append)
+    args = SimpleNamespace(
+        max_velocity=0.25,
+        max_angular_velocity=0.7,
+        target_timeout=3.0,
+        acquisition_timeout=20.0,
+        no_ros_observability=True,
+        no_display=True,
+    )
+
+    pursuit_agent.run_agent(
+        robot,
+        args,
+        object_detector=SimpleNamespace(),
+        command_source=SimpleNamespace(),
+    )
+
+    assert spoken == ["Exploring for the box.", "Found the box."]
+
+
 def test_run_agent_cleans_up_when_listener_start_fails(monkeypatch):
     events = []
 
