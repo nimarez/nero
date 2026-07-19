@@ -30,7 +30,6 @@ dev = [
     "black>=23.0",
     "ruff>=0.1.0",
 ]
-
 [build-system]
 requires = ["uv_build>=0.9.22,<0.12"]
 build-backend = "uv_build"
@@ -54,6 +53,10 @@ nero-setup-booster-room = "nero.simulation.booster_studio_room:main"
 nero-rerun = "nero.observability.rerun_bridge:main"
 nero-command = "nero.remote_command:main"
 nero-command-relay = "nero.remote_command:relay_main"
+nero-vive-rerun = "nero.vive.rerun_stream:main"
+nero-vive-udp-send = "nero.vive.udp_transport:publisher_main"
+nero-vive-udp-receive = "nero.vive.udp_transport:receiver_main"
+nero-vive-ros = "nero.vive.ros_bridge:main"
 nero-export-yolo-world = "nero.perception.yolo_world_export:main"
 nero-ai-hub-profile = "nero.perception.ai_hub_profile:main"
 nero-install-qnn-model = "nero.perception.qnn_artifact:main"
