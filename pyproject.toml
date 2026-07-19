@@ -42,6 +42,7 @@ target-version = "py310"
 [project.scripts]
 nero-orb-slam = "nero.agents.orb_slam_agent:main"
 nero-pure-pursuit = "nero.agents.pure_pursuit_agent:main"
+nero-vive-pursuit = "nero.agents.vive_pursuit_agent:main"
 nero-sim = "nero.agents.sim_agent:main"
 nero-booster-studio = "nero.agents.booster_studio_agent:main"
 nero-sim-benchmark = "nero.agents.sim_benchmark_agent:main"

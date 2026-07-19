@@ -367,6 +367,16 @@ class RobotInterface:
                     )
                 self._ready.wait(timeout=min(0.25, remaining))
             self._validate_max_camera_resolution()
+        self.initialize_locomotion_only()
+        logger.info(
+            "K1 preflight passed at maximum RGB-D resolution %dx%d; velocity output armed at zero",
+            *K1_MAX_RGBD_RESOLUTION,
+        )
+
+    def initialize_locomotion_only(self) -> None:
+        """Arm locomotion without camera preflight for explicit external-pose agents."""
+        if self._initialized:
+            return
         self._mode = self.get_mode()
         if self._mode != 2:
             raise RuntimeError(
@@ -375,11 +385,7 @@ class RobotInterface:
             )
         self._loco.Move(0.0, 0.0, 0.0)
         self._initialized = True
-        logger.info(
-            "K1 preflight passed at maximum RGB-D resolution %dx%d; "
-            "velocity output armed at zero",
-            *K1_MAX_RGBD_RESOLUTION,
-        )
+        logger.info("K1 walking mode verified; locomotion output armed at zero")
 
     def _validate_max_camera_resolution(self) -> None:
         """Fail closed unless every registered camera stream uses the K1 maximum."""

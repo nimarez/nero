@@ -3,6 +3,7 @@
 Available agents:
 - orb_slam_agent: Navigate to a detected object using ORB-SLAM based navigation
 - pure_pursuit_agent: Navigate directly to a live RGB-D target without SLAM
+- vive_pursuit_agent: Blind point pursuit using calibrated Vive tracking
 - sim_agent: Test navigation in simulation mode
 - booster_studio_agent: Run the same policy on a Booster Studio virtual K1
 - mapping_agent: Map a space and create Gaussian splat
@@ -12,6 +13,7 @@ Available agents:
 __all__ = [
     "orb_slam_agent_main",
     "pure_pursuit_agent_main",
+    "vive_pursuit_agent_main",
     "sim_agent_main",
     "booster_studio_agent_main",
     "mapping_agent_main",
@@ -29,6 +31,10 @@ def __getattr__(name: str):
         from nero.agents.pure_pursuit_agent import main as pure_pursuit_agent_main
 
         return pure_pursuit_agent_main
+    elif name == "vive_pursuit_agent_main":
+        from nero.agents.vive_pursuit_agent import main as vive_pursuit_agent_main
+
+        return vive_pursuit_agent_main
     elif name == "sim_agent_main":
         from nero.agents.sim_agent import main as sim_agent_main
 
