@@ -112,24 +112,76 @@ def render_motion_circle(
     calibration: ProjectorCalibration,
     floor_uv: tuple[float, float] | list[float],
     *,
+    ring_uv: list[list[float]] | list[tuple[float, float]] | None = None,
     label: str = "CONTROLLER",
-    radius: int = 118,
 ) -> np.ndarray:
-    """Overlay a large, legible controller target on a cached grid frame."""
+    """Warp a real floor-space circle through the surface homography."""
 
     canvas = base_frame.copy()
-    point = calibration.transform(((float(floor_uv[0]), float(floor_uv[1])),))[0]
-    center = tuple(np.rint(point).astype(int))
+    center_uv = (float(floor_uv[0]), float(floor_uv[1]))
+    if ring_uv is None:
+        angles = np.linspace(0.0, np.pi * 2.0, 96, endpoint=False)
+        ring_uv = [
+            (center_uv[0] + 0.093 * np.cos(angle), center_uv[1] + 0.127 * np.sin(angle))
+            for angle in angles
+        ]
+    ring_floor = np.asarray(ring_uv, dtype=np.float32)
+    ring = np.rint(calibration.transform(ring_floor)).astype(np.int32).reshape(-1, 1, 2)
+    inner_floor = np.asarray(
+        [
+            (
+                center_uv[0] + (point[0] - center_uv[0]) * 0.77,
+                center_uv[1] + (point[1] - center_uv[1]) * 0.77,
+            )
+            for point in ring_floor
+        ],
+        dtype=np.float32,
+    )
+    inner = np.rint(calibration.transform(inner_floor)).astype(np.int32).reshape(-1, 1, 2)
+    center = tuple(np.rint(calibration.transform((center_uv,))[0]).astype(int))
     overlay = canvas.copy()
-    cv2.circle(overlay, center, radius, (0, 92, 170), -1, cv2.LINE_AA)
+    cv2.fillPoly(overlay, [ring], (0, 92, 170), cv2.LINE_AA)
     cv2.addWeighted(overlay, 0.48, canvas, 0.52, 0.0, canvas)
-    cv2.circle(canvas, center, radius, (0, 164, 255), 16, cv2.LINE_AA)
-    cv2.circle(canvas, center, radius - 24, (255, 255, 255), 5, cv2.LINE_AA)
+    cv2.polylines(canvas, [ring], True, (0, 164, 255), 16, cv2.LINE_AA)
+    cv2.polylines(canvas, [inner], True, (255, 255, 255), 5, cv2.LINE_AA)
     cv2.drawMarker(canvas, center, (118, 255, 148), cv2.MARKER_CROSS, 72, 8, cv2.LINE_AA)
+    top = int(ring[:, 0, 1].min())
+    left = int(ring[:, 0, 0].min())
     cv2.putText(
         canvas,
         label,
-        (center[0] - radius, center[1] - radius - 22),
+        (left, top - 22),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.9,
+        (255, 255, 255),
+        3,
+        cv2.LINE_AA,
+    )
+    return canvas
+
+
+def render_floor_calibration_target(
+    base_frame: np.ndarray,
+    calibration: ProjectorCalibration,
+    floor_uv: tuple[float, float] | list[float],
+    *,
+    index: int,
+    total: int,
+) -> np.ndarray:
+    """Draw the fixed target where the operator should place the controller."""
+
+    canvas = base_frame.copy()
+    u, v = float(floor_uv[0]), float(floor_uv[1])
+    angles = np.linspace(0.0, np.pi * 2.0, 80, endpoint=False)
+    floor_ring = np.column_stack((u + 0.07 * np.cos(angles), v + 0.095 * np.sin(angles)))
+    ring = np.rint(calibration.transform(floor_ring)).astype(np.int32).reshape(-1, 1, 2)
+    center = tuple(np.rint(calibration.transform(((u, v),))[0]).astype(int))
+    cv2.polylines(canvas, [ring], True, (255, 255, 0), 13, cv2.LINE_AA)
+    cv2.drawMarker(canvas, center, (255, 255, 255), cv2.MARKER_TILTED_CROSS, 100, 12, cv2.LINE_AA)
+    cv2.putText(
+        canvas,
+        f"PLACE CONTROLLER HERE  {index}/{total}",
+        (center[0] - 230, center[1] - 125),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.9,
         (255, 255, 255),
