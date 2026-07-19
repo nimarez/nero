@@ -1,7 +1,10 @@
 import hashlib
 import io
 import json
+import socket
+import struct
 import sys
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -12,6 +15,7 @@ import pytest
 
 import nero.perception.qnn_artifact as qnn_artifact
 import nero.perception.qnn_deploy as qnn_deploy
+import nero.perception.qnn_worker as qnn_worker
 import nero.perception.qnn_yolo_world as qnn_runtime
 from nero.perception.object_detector import ObjectDetector
 
@@ -26,18 +30,12 @@ def test_qnn_preprocess_matches_yolo_letterbox_and_channel_order():
     assert tensor.dtype == np.float32
     assert geometry.scale == pytest.approx(256 / 544)
     assert (geometry.left, geometry.top) == (0, 22)
-    np.testing.assert_allclose(
-        tensor[0, :, 100, 100], np.array([30, 20, 10]) / 255, atol=1e-6
-    )
-    np.testing.assert_allclose(
-        tensor[0, :, 0, 0], np.array([114, 114, 114]) / 255, atol=1e-6
-    )
+    np.testing.assert_allclose(tensor[0, :, 100, 100], np.array([30, 20, 10]) / 255, atol=1e-6)
+    np.testing.assert_allclose(tensor[0, :, 0, 0], np.array([114, 114, 114]) / 255, atol=1e-6)
 
 
 def test_qnn_decode_unletterboxes_filters_and_suppresses_overlaps():
-    _, geometry = qnn_runtime.preprocess_yolo_world(
-        np.zeros((448, 544, 3), dtype=np.uint8), 256
-    )
+    _, geometry = qnn_runtime.preprocess_yolo_world(np.zeros((448, 544, 3), dtype=np.uint8), 256)
     output = np.zeros((1, 5, 3), dtype=np.float32)
     output[0, :, 0] = [128, 128, 100, 50, 0.9]
     output[0, :, 1] = [129, 128, 100, 50, 0.8]
@@ -122,6 +120,50 @@ def test_qnn_session_refuses_cpu_only_onnxruntime(monkeypatch, tmp_path):
     )
     with pytest.raises(RuntimeError, match="does not expose QNNExecutionProvider"):
         qnn_runtime.QNNYoloWorldRuntime(tmp_path / "model.onnx")
+
+
+def test_qnn_plugin_worker_protocol_round_trip(monkeypatch, tmp_path):
+    class FakeSession:
+        def run(self, _outputs, inputs, run_options):
+            assert run_options == "burst"
+            assert inputs["images"].shape == (1, 3, 256, 256)
+            assert inputs["text_features"].shape == (1, 1, 512)
+            return [np.full((1, 5, 1344), 7, dtype=np.float32)]
+
+    monkeypatch.setattr(
+        qnn_worker,
+        "_create_session",
+        lambda _model: (FakeSession(), "burst", "1.26.0", "2.4.0", 1.25),
+    )
+    parent, child = socket.socketpair()
+    child_fd = child.detach()
+    errors = []
+
+    def run_worker():
+        try:
+            qnn_worker.serve(tmp_path / "model.onnx", child_fd)
+        except Exception as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    thread = threading.Thread(target=run_worker)
+    thread.start()
+    kind, payload = qnn_runtime._recv_message(parent)
+    assert kind == b"R"
+    assert json.loads(payload)["provider"] == qnn_runtime.QNN_PROVIDER
+
+    images = np.zeros((1, 3, 256, 256), dtype=np.float32)
+    features = np.zeros((1, 1, 512), dtype=np.float32)
+    parent.sendall(b"I" + images.tobytes() + features.tobytes())
+    assert qnn_runtime._recv_exact(parent, 1) == b"O"
+    elapsed = struct.unpack("<d", qnn_runtime._recv_exact(parent, 8))[0]
+    output = np.frombuffer(qnn_runtime._recv_exact(parent, 1 * 5 * 1344 * 4), dtype=np.float32)
+    assert elapsed >= 0
+    assert np.all(output == 7)
+    parent.sendall(b"Q")
+    parent.close()
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert errors == []
 
 
 def test_qnn_artifact_install_and_verification(monkeypatch, tmp_path):
@@ -210,9 +252,7 @@ def test_ai_hub_download_uses_the_actual_suffixed_filename(monkeypatch, tmp_path
         SimpleNamespace(get_model=lambda model_id: fake_model),
     )
 
-    result = qnn_artifact._download_target_model(
-        qnn_artifact.DEFAULT_TARGET_MODEL, requested
-    )
+    result = qnn_artifact._download_target_model(qnn_artifact.DEFAULT_TARGET_MODEL, requested)
 
     assert result == actual
 
@@ -229,8 +269,7 @@ def test_qnn_deploy_streams_binary_without_a_remote_tty(monkeypatch, tmp_path):
     monkeypatch.setattr(
         qnn_deploy.subprocess,
         "run",
-        lambda command, **kwargs: calls.append((command, kwargs))
-        or SimpleNamespace(returncode=0),
+        lambda command, **kwargs: calls.append((command, kwargs)) or SimpleNamespace(returncode=0),
     )
     monkeypatch.setattr(
         sys,

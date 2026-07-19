@@ -55,7 +55,7 @@ Clone the repository on the robot, then run:
 source /opt/ros/humble/setup.bash
 source /opt/booster/BoosterAgent/install/setup.bash
 ./scripts/setup_k1_runtime.sh
-./scripts/setup_qnn_runtime.sh --build
+./scripts/setup_qnn_runtime.sh
 ```
 
 From the Mac checkout, install the private generated artifact with the configured
@@ -76,10 +76,12 @@ uv run nero-k1-calibration --iface lo --duration 60
 
 The prefix commands expose ROS messages and native libraries to the current
 shell. `setup_k1_runtime.sh` creates a uv environment that can see those
-preinstalled packages. The QNN setup builds or installs a Linux ARM64 ONNX
-Runtime with `QNNExecutionProvider`; Microsoft only publishes the prebuilt QNN
-wheel for Windows. Detector setup verifies the pinned AI Hub graph and resolves
-the text encoder before the live loop. Calibration reads the live production
+preinstalled packages. The QNN setup creates an isolated Python 3.11
+`.venv-qnn` with the official Linux ARM64 `onnxruntime-qnn` plugin. Nero's main
+Python 3.10 process keeps the Booster and ORB-SLAM wheels and talks to one
+persistent QNN worker, so the graph is compiled only once. Detector setup
+verifies the pinned AI Hub graph and resolves the text encoder before the live
+loop. Calibration reads the live production
 ROS intrinsics and RGB-D rate, measures stationary low-state IMU noise, and
 combines those measurements with the nominal K1 Geek camera mount. It writes:
 
@@ -212,11 +214,11 @@ input/output shapes, and warm latency on the K1 without moving it:
 uv run nero-qnn-smoke --target "green can" --runs 20
 ```
 
-The first command is a check when the provider is already installed; add
-`--build` only for the one-time source build. `NERO_QNN_ORT_WHEEL` can instead
-point to a known-compatible Linux ARM64 QNN wheel. If the QNN backend library is
-not discoverable under the K1's `/opt/qcom` SDK, set
-`NERO_QNN_BACKEND_PATH=/absolute/path/libQnnHtp.so`.
+The setup command is idempotent and pins ONNX Runtime 1.26.0 with the official
+QNN plugin 2.4.0. The worker disables CPU fallback for the session and binds the
+registered Qualcomm device explicitly to the packaged HTP backend. The K1's
+older `/dev/adsprpc-smd` device name is handled automatically. Override the
+worker interpreter only for diagnostics with `NERO_QNN_WORKER_PYTHON`.
 
 Override CPU open-vocabulary inference using `NERO_OBJECT_IMGSZ` (higher values
 trade rate for recall), `NERO_YOLO_THREADS`, or `NERO_YOLO_MAX_DETECTIONS`.

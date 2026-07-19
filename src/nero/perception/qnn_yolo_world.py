@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
+import socket
+import struct
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -169,10 +173,11 @@ class QNNYoloWorldRuntime:
 
         available = tuple(ort.get_available_providers())
         if QNN_PROVIDER not in available:
-            raise RuntimeError(
-                "ONNX Runtime does not expose QNNExecutionProvider "
-                f"(available: {', '.join(available) or 'none'})"
-            )
+            self._session = None
+            self._worker = _PluginQNNWorker(model_path, inference_size)
+            return
+
+        self._worker = None
 
         options = ort.SessionOptions()
         options.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
@@ -220,12 +225,128 @@ class QNNYoloWorldRuntime:
 
     @property
     def providers(self) -> tuple[str, ...]:
+        if self._worker is not None:
+            return (QNN_PROVIDER,)
         return tuple(self._session.get_providers())
 
     def infer(self, images: np.ndarray, text_features: np.ndarray) -> tuple[np.ndarray, float]:
+        if self._worker is not None:
+            return self._worker.infer(images, text_features)
         started = time.perf_counter()
         output = self._session.run(
             None,
             {"images": images, "text_features": text_features},
         )[0]
         return np.asarray(output), time.perf_counter() - started
+
+    def close(self) -> None:
+        if self._worker is not None:
+            self._worker.close()
+
+
+def _recv_exact(connection: socket.socket, size: int) -> bytes:
+    chunks = bytearray()
+    while len(chunks) < size:
+        chunk = connection.recv(size - len(chunks))
+        if not chunk:
+            raise RuntimeError("QNN plugin worker exited unexpectedly")
+        chunks.extend(chunk)
+    return bytes(chunks)
+
+
+def _recv_message(connection: socket.socket) -> tuple[bytes, bytes]:
+    kind = _recv_exact(connection, 1)
+    size = struct.unpack("<I", _recv_exact(connection, 4))[0]
+    return kind, _recv_exact(connection, size)
+
+
+class _PluginQNNWorker:
+    """Persistent Python 3.11 QNN plugin process for Nero's Python 3.10 runtime."""
+
+    def __init__(self, model_path: str | Path, inference_size: int) -> None:
+        if inference_size != 256:
+            raise ValueError("the pinned QNN graph requires inference size 256")
+        configured = os.getenv("NERO_QNN_WORKER_PYTHON")
+        repo_root = Path(__file__).resolve().parents[3]
+        worker_python = Path(configured) if configured else repo_root / ".venv-qnn/bin/python"
+        if not worker_python.is_file():
+            raise RuntimeError(
+                "ONNX Runtime does not expose QNNExecutionProvider and the isolated "
+                f"QNN worker is missing at {worker_python}; run scripts/setup_qnn_runtime.sh"
+            )
+        worker_script = Path(__file__).with_name("qnn_worker.py")
+        parent_socket, child_socket = socket.socketpair()
+        parent_socket.settimeout(float(os.getenv("NERO_QNN_STARTUP_TIMEOUT", "180")))
+        try:
+            self._process = subprocess.Popen(
+                [
+                    str(worker_python),
+                    str(worker_script),
+                    str(Path(model_path).resolve()),
+                    "--ipc-fd",
+                    str(child_socket.fileno()),
+                ],
+                pass_fds=(child_socket.fileno(),),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+            )
+        except Exception:
+            parent_socket.close()
+            child_socket.close()
+            raise
+        child_socket.close()
+        self._connection = parent_socket
+        try:
+            kind, payload = _recv_message(self._connection)
+            if kind != b"R":
+                raise RuntimeError(
+                    "QNN plugin worker failed during startup: " + payload.decode(errors="replace")
+                )
+            metadata = json.loads(payload)
+            self.load_seconds = float(metadata["load_seconds"])
+        except Exception:
+            self.close()
+            raise
+        self._connection.settimeout(float(os.getenv("NERO_QNN_INFERENCE_TIMEOUT", "30")))
+
+    def infer(self, images: np.ndarray, text_features: np.ndarray) -> tuple[np.ndarray, float]:
+        images = np.ascontiguousarray(images, dtype=np.float32)
+        text_features = np.ascontiguousarray(text_features, dtype=np.float32)
+        if images.shape != (1, 3, 256, 256):
+            raise ValueError(f"unexpected QNN image shape {images.shape}")
+        if text_features.shape != (1, 1, 512):
+            raise ValueError(f"unexpected QNN text feature shape {text_features.shape}")
+        self._connection.sendall(b"I" + images.tobytes() + text_features.tobytes())
+        kind = _recv_exact(self._connection, 1)
+        if kind == b"E":
+            size = struct.unpack("<I", _recv_exact(self._connection, 4))[0]
+            message = _recv_exact(self._connection, size).decode(errors="replace")
+            raise RuntimeError(f"QNN plugin worker inference failed: {message}")
+        if kind != b"O":
+            raise RuntimeError(f"unexpected QNN plugin worker response {kind!r}")
+        elapsed = struct.unpack("<d", _recv_exact(self._connection, 8))[0]
+        output_size = 1 * 5 * 1344 * np.dtype(np.float32).itemsize
+        output = (
+            np.frombuffer(_recv_exact(self._connection, output_size), dtype=np.float32)
+            .reshape(1, 5, 1344)
+            .copy()
+        )
+        return output, elapsed
+
+    def close(self) -> None:
+        connection = getattr(self, "_connection", None)
+        if connection is not None:
+            try:
+                connection.sendall(b"Q")
+            except OSError:
+                pass
+            connection.close()
+            self._connection = None
+        process = getattr(self, "_process", None)
+        if process is not None:
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                process.wait(timeout=5)
+            self._process = None
