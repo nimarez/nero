@@ -213,7 +213,7 @@ def stream(
         rr.spawn()
     else:
         logger.info("Connecting to Rerun viewer at %s", url)
-        rr.connect_grpc(url=url)
+        rr.connect_grpc(url)
     rr.log(WORLD_ENTITY, rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
     _log_world_reference(rr)
 
