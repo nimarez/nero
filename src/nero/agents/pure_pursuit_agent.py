@@ -51,6 +51,7 @@ class PursuitState(enum.Enum):
     WAITING_FOR_OBJECT = "waiting_for_object"
     DETECTING = "detecting"
     EXPLORING = "exploring"
+    RELOCATING = "relocating"
     ALIGNING = "aligning"
     NAVIGATING = "navigating"
     ARRIVED = "arrived"
@@ -102,6 +103,29 @@ class HeadScanConfig:
                 raise ValueError("head scan yaw must stay within K1 limits")
 
 
+@dataclass(frozen=True)
+class RelocationConfig:
+    """Bounded base motion between stationary head scans."""
+
+    distance: float = 0.5
+    linear_velocity: float = 0.12
+    angular_velocity: float = 0.35
+    turn_angle: float = math.pi / 3.0
+    max_relocations: int = 3
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.distance) or self.distance <= 0:
+            raise ValueError("relocation distance must be positive and finite")
+        if not math.isfinite(self.linear_velocity) or self.linear_velocity <= 0:
+            raise ValueError("relocation linear_velocity must be positive and finite")
+        if not math.isfinite(self.angular_velocity) or self.angular_velocity <= 0:
+            raise ValueError("relocation angular_velocity must be positive and finite")
+        if not math.isfinite(self.turn_angle) or not 0 < self.turn_angle <= math.pi:
+            raise ValueError("relocation turn_angle must be in (0, pi]")
+        if self.max_relocations < 0:
+            raise ValueError("max_relocations must be non-negative")
+
+
 @dataclass
 class PursuitStatus:
     state: PursuitState
@@ -120,6 +144,11 @@ class PursuitStatus:
     head_yaw: float = 0.0
     exploration_step: int | None = None
     exploration_steps: int = 0
+    relocation_count: int = 0
+    relocation_limit: int = 0
+    relocation_phase: str | None = None
+    relocation_progress: float = 0.0
+    relocation_distance: float = 0.0
 
 
 class DirectPursuitPolicy:
@@ -134,8 +163,9 @@ class DirectPursuitPolicy:
         depth_processor=None,
         safety=None,
         head_scan: HeadScanConfig | None = None,
+        relocation: RelocationConfig | None = None,
         target_timeout: float = 3.0,
-        acquisition_timeout: float = 20.0,
+        acquisition_timeout: float = 60.0,
         safety_enforced: bool = True,
     ) -> None:
         if target_timeout <= 0:
@@ -149,6 +179,7 @@ class DirectPursuitPolicy:
         self.safety = safety or SafetyMonitor()
         self.safety_enforced = bool(safety_enforced)
         self.head_scan = head_scan or HeadScanConfig()
+        self.relocation = relocation or RelocationConfig()
         self.target_timeout = target_timeout
         self.acquisition_timeout = acquisition_timeout
         self.state = PursuitState.IDLE
@@ -166,6 +197,11 @@ class DirectPursuitPolicy:
         self._scan_settle_revision = _REVISION_UNSET
         self._head_pose = (0.0, 0.0)
         self._alignment_yaw = 0.0
+        self._relocation_count = 0
+        self._relocation_phase: str | None = None
+        self._relocation_origin: np.ndarray | None = None
+        self._relocation_target_yaw = 0.0
+        self._relocation_progress = 0.0
         self._running = False
         self._last_obstacle_info: dict | None = None
 
@@ -205,7 +241,7 @@ class DirectPursuitPolicy:
         self.target = resolved
         self.stand_off = safe_stand_off_distance(resolved)
         self._last_seen = None
-        self._begin_exploration(time.monotonic(), reset_scan=True)
+        self._begin_exploration(time.monotonic(), reset_scan=True, restart_search=True)
         self._last_detection_revision = None
         self._confirmation_started = None
         self._confirmation_revision = None
@@ -251,6 +287,9 @@ class DirectPursuitPolicy:
         target = self.detector.find_object(detections, self.target)
         now = time.monotonic()
 
+        if self.state == PursuitState.RELOCATING:
+            return self._relocate(sensor, detections, safety, obstacles, now)
+
         if self.state == PursuitState.EXPLORING:
             observation_ready = self._scan_observation_ready(now, revision)
             if (
@@ -283,13 +322,13 @@ class DirectPursuitPolicy:
             )
 
         if target is None or target.position_3d is None:
-            self._begin_exploration(now, reset_scan=True)
+            self._begin_exploration(now, reset_scan=True, restart_search=True)
             return self._explore(detections, safety, revision, now)
 
         if new_detection_result:
             self._last_seen = now
         elif self._last_seen is None or now - self._last_seen > self.target_timeout:
-            self._begin_exploration(now, reset_scan=True)
+            self._begin_exploration(now, reset_scan=True, restart_search=True)
             return self._explore(detections, safety, revision, now)
         return self._pursue(target, detections, safety, obstacles)
 
@@ -347,13 +386,22 @@ class DirectPursuitPolicy:
             target_position=target.position_3d,
         )
 
-    def _begin_exploration(self, now: float, *, reset_scan: bool) -> None:
+    def _begin_exploration(
+        self,
+        now: float,
+        *,
+        reset_scan: bool,
+        restart_search: bool,
+    ) -> None:
         self.state = PursuitState.EXPLORING
         self._confirmation_started = None
         self._confirmation_revision = None
         self._confirmation_requires_alignment = False
-        if reset_scan or self._exploration_started is None:
+        if restart_search or self._exploration_started is None:
             self._exploration_started = now
+        if restart_search:
+            self._relocation_count = 0
+            self._clear_relocation()
         if reset_scan:
             self._scan_index = 0
             self._scan_pose_ready_at = None
@@ -387,7 +435,9 @@ class DirectPursuitPolicy:
         if now - started > self.acquisition_timeout:
             return self._target_lost(detections, safety)
         if observation_ready:
-            self._scan_index = (self._scan_index + 1) % len(self.head_scan.poses)
+            if self._scan_index + 1 >= len(self.head_scan.poses):
+                return self._begin_relocation(detections, safety, now)
+            self._scan_index += 1
             self._scan_pose_ready_at = None
             self._scan_settle_revision = _REVISION_UNSET
         if self._scan_pose_ready_at is None:
@@ -409,6 +459,187 @@ class DirectPursuitPolicy:
             detections=detections,
             safety_status=safety,
         )
+
+    def _begin_relocation(self, detections, safety, now: float) -> PursuitStatus:
+        if self._relocation_count >= self.relocation.max_relocations:
+            return self._target_lost(detections, safety)
+        stop_failure = self._stop_required(detections, safety)
+        if stop_failure is not None:
+            return stop_failure
+        try:
+            self.robot.set_head_pose(0.0, 0.0, self.head_scan.move_duration)
+        except (RuntimeError, ValueError) as exc:
+            return self._head_control_error(exc, detections, safety)
+        self.state = PursuitState.RELOCATING
+        self._head_pose = (0.0, 0.0)
+        self._scan_pose_ready_at = (
+            now + self.head_scan.move_duration + self.head_scan.settle_time
+        )
+        self._relocation_phase = "centering_head"
+        self._relocation_origin = np.asarray(
+            self.last_sensor.odometry[:2], dtype=float
+        ).copy()
+        self._relocation_progress = 0.0
+        return self._status(
+            "Scan complete; centering the head before relocating",
+            detections=detections,
+            safety_status=safety,
+        )
+
+    def _relocate(self, sensor, detections, safety, obstacles, now: float) -> PursuitStatus:
+        """Move to a new observation point without entering pursuit."""
+        self.state = PursuitState.RELOCATING
+        started = now if self._exploration_started is None else self._exploration_started
+        self._exploration_started = started
+        if now - started > self.acquisition_timeout:
+            return self._target_lost(detections, safety)
+
+        if self._relocation_origin is None:
+            self._relocation_origin = np.asarray(sensor.odometry[:2], dtype=float).copy()
+        displacement = np.asarray(sensor.odometry[:2], dtype=float) - self._relocation_origin
+        self._relocation_progress = float(np.linalg.norm(displacement))
+        if self._relocation_progress >= self.relocation.distance:
+            return self._complete_relocation(detections, safety, now)
+
+        if self._relocation_phase == "centering_head":
+            stop_failure = self._stop_required(detections, safety)
+            if stop_failure is not None:
+                return stop_failure
+            if self._scan_pose_ready_at is not None and now < self._scan_pose_ready_at:
+                return self._status(
+                    "Centering the head before relocating",
+                    detections=detections,
+                    safety_status=safety,
+                )
+            self._scan_pose_ready_at = None
+            self._relocation_phase = "selecting_path"
+
+        if self.safety_enforced and not safety.is_safe:
+            stop_failure = self._stop_required(detections, safety)
+            if stop_failure is not None:
+                return stop_failure
+            return self._status(
+                f"Relocation blocked: {safety.reason}",
+                detections=detections,
+                safety_status=safety,
+            )
+
+        if self._relocation_phase == "turning":
+            current_yaw = float(sensor.odometry[2])
+            yaw_error = self._normalize_angle(self._relocation_target_yaw - current_yaw)
+            if abs(yaw_error) <= self.controller.config.bearing_tolerance:
+                stop_failure = self._stop_required(detections, safety)
+                if stop_failure is not None:
+                    return stop_failure
+                self._relocation_phase = "selecting_path"
+                return self._status(
+                    "Relocation turn complete; checking the forward path",
+                    detections=detections,
+                    safety_status=safety,
+                )
+            command = VelocityCommand(
+                angular_z=math.copysign(self.relocation.angular_velocity, yaw_error)
+            )
+            return self._send_relocation_command(
+                command,
+                "Turning toward a clear relocation path",
+                detections,
+                safety,
+            )
+
+        center_clear = bool(obstacles.get("center_clear", False))
+        sensor_blind = bool(obstacles.get("sensor_blind", False))
+        path_clear = center_clear and not sensor_blind
+        if self._relocation_phase == "advancing" and not path_clear and self.safety_enforced:
+            stop_failure = self._stop_required(detections, safety)
+            if stop_failure is not None:
+                return stop_failure
+            self._relocation_phase = "selecting_path"
+
+        if self._relocation_phase == "selecting_path":
+            if path_clear or not self.safety_enforced:
+                self._relocation_phase = "advancing"
+            else:
+                turn_sign = self._clear_side_turn(obstacles)
+                if turn_sign == 0.0:
+                    stop_failure = self._stop_required(detections, safety)
+                    if stop_failure is not None:
+                        return stop_failure
+                    reason = "depth is unavailable" if sensor_blind else "no clear sector"
+                    return self._status(
+                        f"Relocation blocked: {reason}",
+                        detections=detections,
+                        safety_status=safety,
+                    )
+                self._relocation_target_yaw = self._normalize_angle(
+                    float(sensor.odometry[2]) + turn_sign * self.relocation.turn_angle
+                )
+                self._relocation_phase = "turning"
+                command = VelocityCommand(
+                    angular_z=turn_sign * self.relocation.angular_velocity
+                )
+                return self._send_relocation_command(
+                    command,
+                    "Turning toward a clear relocation path",
+                    detections,
+                    safety,
+                )
+
+        command = VelocityCommand(linear_x=self.relocation.linear_velocity)
+        return self._send_relocation_command(
+            command,
+            f"Relocating to observation point {self._relocation_count + 2}",
+            detections,
+            safety,
+        )
+
+    def _clear_side_turn(self, obstacles: dict) -> float:
+        left_clear = bool(obstacles.get("left_clear", False))
+        right_clear = bool(obstacles.get("right_clear", False))
+        if left_clear and right_clear:
+            return 1.0 if self._relocation_count % 2 == 0 else -1.0
+        if left_clear:
+            return 1.0
+        if right_clear:
+            return -1.0
+        return 0.0
+
+    def _send_relocation_command(
+        self,
+        command: VelocityCommand,
+        message: str,
+        detections,
+        safety,
+    ) -> PursuitStatus:
+        try:
+            send_velocity(self.robot, command)
+        except RuntimeError as exc:
+            return self._locomotion_error(exc, detections, safety)
+        return self._status(
+            message,
+            command=command,
+            detections=detections,
+            safety_status=safety,
+        )
+
+    def _complete_relocation(self, detections, safety, now: float) -> PursuitStatus:
+        stop_failure = self._stop_required(detections, safety)
+        if stop_failure is not None:
+            return stop_failure
+        self._relocation_count += 1
+        self._clear_relocation()
+        self._begin_exploration(now, reset_scan=True, restart_search=False)
+        return self._status(
+            f"Reached observation point {self._relocation_count + 1}; starting a new scan",
+            detections=detections,
+            safety_status=safety,
+        )
+
+    def _clear_relocation(self) -> None:
+        self._relocation_phase = None
+        self._relocation_origin = None
+        self._relocation_target_yaw = 0.0
+        self._relocation_progress = 0.0
 
     def _begin_confirmation(
         self,
@@ -444,7 +675,8 @@ class DirectPursuitPolicy:
         if stop_failure is not None:
             return stop_failure
         if now - self._confirmation_started > self.target_timeout:
-            self._resume_exploration(now, advance_scan=True)
+            if self._resume_exploration(now, advance_scan=True):
+                return self._begin_relocation(detections, safety, now)
             return self._explore(detections, safety, revision, now)
         fresh = revision is None or (
             new_detection_result and revision != self._confirmation_revision
@@ -456,7 +688,8 @@ class DirectPursuitPolicy:
                 safety_status=safety,
             )
         if target is None or target.position_3d is None:
-            self._resume_exploration(now, advance_scan=True)
+            if self._resume_exploration(now, advance_scan=True):
+                return self._begin_relocation(detections, safety, now)
             return self._explore(detections, safety, revision, now)
         self._last_seen = now
         self._confirmation_started = None
@@ -558,17 +791,20 @@ class DirectPursuitPolicy:
             safety_status=safety,
         )
 
-    def _resume_exploration(self, now: float, *, advance_scan: bool) -> None:
+    def _resume_exploration(self, now: float, *, advance_scan: bool) -> bool:
         self.state = PursuitState.EXPLORING
         self._confirmation_started = None
         self._confirmation_revision = None
         self._confirmation_requires_alignment = False
         if advance_scan:
-            self._scan_index = (self._scan_index + 1) % len(self.head_scan.poses)
+            if self._scan_index + 1 >= len(self.head_scan.poses):
+                return True
+            self._scan_index += 1
         self._scan_pose_ready_at = None
         self._scan_settle_revision = _REVISION_UNSET
         if self._exploration_started is None:
             self._exploration_started = now
+        return False
 
     def _target_at_base_heading(self, target_camera) -> np.ndarray:
         target = np.asarray(target_camera, dtype=float)
@@ -607,6 +843,8 @@ class DirectPursuitPolicy:
         self._confirmation_started = None
         self._confirmation_revision = None
         self._confirmation_requires_alignment = False
+        self._relocation_count = 0
+        self._clear_relocation()
         self._scan_index = 0
         self._scan_pose_ready_at = None
         self._scan_settle_revision = _REVISION_UNSET
@@ -695,6 +933,11 @@ class DirectPursuitPolicy:
                 self._scan_index + 1 if self.state == PursuitState.EXPLORING else None
             ),
             exploration_steps=len(self.head_scan.poses),
+            relocation_count=self._relocation_count,
+            relocation_limit=self.relocation.max_relocations,
+            relocation_phase=self._relocation_phase,
+            relocation_progress=self._relocation_progress,
+            relocation_distance=self.relocation.distance,
         )
 
 
@@ -733,7 +976,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-velocity", type=float, default=0.25)
     parser.add_argument("--max-angular-velocity", type=float, default=0.7)
     parser.add_argument("--target-timeout", type=float, default=3.0)
-    parser.add_argument("--acquisition-timeout", type=float, default=20.0)
+    parser.add_argument("--acquisition-timeout", type=float, default=60.0)
     parser.add_argument(
         "--head-scan-move-time",
         type=float,
@@ -745,6 +988,30 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.15,
         help="Seconds to wait after each head movement before accepting detections",
+    )
+    parser.add_argument(
+        "--relocation-distance",
+        type=float,
+        default=0.5,
+        help="Meters to walk between complete head scans",
+    )
+    parser.add_argument(
+        "--relocation-velocity",
+        type=float,
+        default=0.12,
+        help="Forward velocity in m/s while relocating between scans",
+    )
+    parser.add_argument(
+        "--relocation-angular-velocity",
+        type=float,
+        default=0.35,
+        help="Angular velocity in rad/s while selecting a relocation path",
+    )
+    parser.add_argument(
+        "--max-relocations",
+        type=int,
+        default=3,
+        help="Maximum number of new observation points before reporting target lost",
     )
     return parser.parse_args()
 
@@ -765,6 +1032,12 @@ def run_agent(robot, args, *, object_detector=None, command_source=None) -> None
         head_scan=HeadScanConfig(
             move_duration=getattr(args, "head_scan_move_time", 0.35),
             settle_time=getattr(args, "head_scan_settle_time", 0.15),
+        ),
+        relocation=RelocationConfig(
+            distance=getattr(args, "relocation_distance", 0.5),
+            linear_velocity=getattr(args, "relocation_velocity", 0.12),
+            angular_velocity=getattr(args, "relocation_angular_velocity", 0.35),
+            max_relocations=getattr(args, "max_relocations", 3),
         ),
         safety_enforced=not getattr(args, "disable_safety", False),
     )

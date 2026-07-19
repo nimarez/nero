@@ -631,7 +631,16 @@ class RerunRosBridge:
     def _log_head(self, payload: Any) -> None:
         if not isinstance(payload, dict):
             return
-        for name in ("pitch", "yaw", "exploration_step", "exploration_steps"):
+        for name in (
+            "pitch",
+            "yaw",
+            "exploration_step",
+            "exploration_steps",
+            "relocation_count",
+            "relocation_limit",
+            "relocation_progress",
+            "relocation_distance",
+        ):
             value = payload.get(name)
             if value is not None and np.isfinite(float(value)):
                 self._recording.log(f"metrics/head/{name}", self._rr.Scalar(float(value)))
