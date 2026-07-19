@@ -62,9 +62,11 @@ class PursuitState(enum.Enum):
 
 DEFAULT_HEAD_SCAN_POSES = ((0.0, 0.0),)
 RELOCATION_MANEUVER_PATTERN = (
+    "advance",
     "sidestep_left",
     "turn_around_then_advance",
     "sidestep_right",
+    "advance",
 )
 _REVISION_UNSET = object()
 
@@ -596,6 +598,7 @@ class DirectPursuitPolicy:
             return self._relocation_plan
 
         preferences = {
+            "advance": ("advance", "sidestep_left", "sidestep_right"),
             "sidestep_left": ("sidestep_left", "sidestep_right", "advance"),
             "sidestep_right": ("sidestep_right", "sidestep_left", "advance"),
             "turn_around_then_advance": (

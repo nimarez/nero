@@ -591,7 +591,9 @@ def test_direct_policy_turns_around_before_relocating_forward(monkeypatch):
     policy.start()
     policy.set_target("chair")
     policy.step()
-    policy._relocation_count = 1
+    policy._relocation_count = RELOCATION_MANEUVER_PATTERN.index(
+        "turn_around_then_advance"
+    )
     now[0] = 0.02
     assert policy.step().state == PursuitState.RELOCATING
 
@@ -626,9 +628,11 @@ def test_relocation_pattern_uses_both_sidestep_directions():
     )
 
     assert RELOCATION_MANEUVER_PATTERN == (
+        "advance",
         "sidestep_left",
         "turn_around_then_advance",
         "sidestep_right",
+        "advance",
     )
     policy._relocation_maneuver = "sidestep_left"
     left = policy._relocation_velocity_command()
