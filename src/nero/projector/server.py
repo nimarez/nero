@@ -15,6 +15,7 @@ from aiohttp import WSMsgType, web
 from .calibration import CalibrationState
 from .camera import RealSenseArucoCamera
 from .motion import MotionTracker
+from .operator_display import OPERATOR_HTML
 
 logger = logging.getLogger(__name__)
 
@@ -106,8 +107,10 @@ class CalibrationWebServer:
     def _make_app(self) -> web.Application:
         app = web.Application()
         app.router.add_get("/", self._index)
+        app.router.add_get("/operator", self._operator)
         app.router.add_get("/stream.mjpg", self._stream)
         app.router.add_get("/api/state", self._api_state)
+        app.router.add_get("/api/rerun-health", self._rerun_health)
         app.router.add_post("/api/motion/calibration/start", self._motion_calibration_start)
         app.router.add_post("/api/motion/calibration/capture", self._motion_calibration_capture)
         app.router.add_get("/ws", self._websocket)
@@ -115,6 +118,25 @@ class CalibrationWebServer:
 
     async def _index(self, _request: web.Request) -> web.Response:
         return web.Response(text=INDEX_HTML, content_type="text/html")
+
+    async def _operator(self, _request: web.Request) -> web.Response:
+        return web.Response(text=OPERATOR_HTML, content_type="text/html")
+
+    async def _rerun_health(self, _request: web.Request) -> web.Response:
+        reachable = False
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection("10.2.1.130", 8080), timeout=1.0
+            )
+            del reader
+            reachable = True
+            writer.close()
+            await writer.wait_closed()
+        except (OSError, TimeoutError):
+            pass
+        return web.json_response(
+            {"reachable": reachable, "url": "http://10.2.1.130:8080/rerun/"}
+        )
 
     async def _api_state(self, _request: web.Request) -> web.Response:
         calibration, version, render_ms = self.state.snapshot()

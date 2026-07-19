@@ -7,6 +7,7 @@ import pytest
 from nero.projector.calibration import CalibrationState, ProjectorCalibration
 from nero.projector.camera import annotate_aruco
 from nero.projector.motion import MotionTracker, map_floor_position
+from nero.projector.operator_display import OPERATOR_HTML, RERUN_URL
 from nero.projector.render import render_motion_circle, render_projector_grid
 
 
@@ -86,6 +87,15 @@ def test_floor_calibration_recaptures_center_instead_of_reusing_saved_origin(tmp
 
     assert status["captured"] == 0
     assert status["target_uv"] == [0.5, 0.5]
+
+
+def test_operator_display_combines_camera_rerun_and_floor_telemetry():
+    assert 'src="/stream.mjpg"' in OPERATOR_HTML
+    assert f'src="{RERUN_URL}"' in OPERATOR_HTML
+    assert "Perspective" in OPERATOR_HTML
+    assert "Data frame" in OPERATOR_HTML
+    assert "Marker boxes" in OPERATOR_HTML
+    assert "vertical dropped" in OPERATOR_HTML
 
 
 def test_aruco_overlay_detects_only_expected_ids():
