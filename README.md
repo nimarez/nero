@@ -166,6 +166,30 @@ perception sequence can take more than a minute and the isolated QNN worker has
 its own 180-second startup ceiling. Override them with
 `--camera-start-timeout` and `--policy-start-timeout`.
 
+To keep the complete runtime on the physical robot and view it from any browser
+on the robot network, SSH into the K1 and run:
+
+```bash
+cd /home/booster/Workspace/nero
+./scripts/run_robot_web.sh \
+  --policy pure-pursuit \
+  --disable-safety \
+  --object-backend aruco \
+  --aruco-map config/aruco_markers.json \
+  --aruco-dictionary DICT_4X4_50
+```
+
+The command performs the live RGB-D preflight, starts the policy and local
+ROS-to-Rerun bridge, and leaves the object prompt in the SSH terminal. Open
+`http://10.2.1.130:8080/rerun` in a browser to see the live dashboard. Rendering
+happens in the browser; the robot serves the viewer and buffers up to 256 MB of
+recent telemetry. Ports 8080 and 9877 must be reachable from the browser; 8081
+is used only between the robot-local gateway and Rerun. No Mac-side Nero or
+Rerun process is required.
+The checked-in marker map assigns `DICT_4X4_50` ID 45 to the command
+`marker 45`. Its physical 90 mm size needs no runtime flag because Nero obtains
+the marker's metric position from registered K1 depth.
+
 To diagnose the camera without launching navigation or issuing locomotion
 commands, run this on the robot after sourcing ROS:
 
@@ -362,6 +386,7 @@ All commands run through uv:
 | `uv run nero-pc2map CLOUD -o MAP` | Convert a point cloud to an occupancy map |
 | `uv run nero-k1-calibration` | Capture real K1 IMU-RGBD calibration |
 | `uv run --extra viz nero-rerun` | Bridge normalized Nero ROS topics into Rerun |
+| `./scripts/run_robot_web.sh` | Run a physical policy plus browser-hosted Rerun on the robot |
 | `uv run nero-vive-ros` | Publish jscore's fail-closed Vive pose into ROS 2 |
 
 `nero-mapping` is a separate reconstruction pipeline. COLMAP and the configured

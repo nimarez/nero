@@ -1,3 +1,4 @@
+import http.client
 from types import SimpleNamespace
 import sys
 
@@ -12,6 +13,7 @@ from nero.observability.rerun_bridge import (
     occupancy_grid_points,
     pointcloud2_to_xyz,
     predicted_swept_clearance,
+    start_web_gateway,
 )
 from nero.observability.ros_publisher import (
     RosObservabilityPublisher,
@@ -150,6 +152,28 @@ def test_structured_safety_payload_includes_decision_inputs():
     assert payload["battery_percent"] == 42.0
     assert payload["obstacle_distance"] == 0.9
     assert payload["center_clear"] is False
+
+
+def test_robot_web_gateway_redirects_rerun_to_live_viewer():
+    gateway = start_web_gateway(
+        0,
+        viewer_port=8081,
+        websocket_port=9877,
+        path="/rerun",
+    )
+    try:
+        port = gateway.server_address[1]
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        connection.request("GET", "/rerun", headers={"Host": "10.2.1.130:8080"})
+        response = connection.getresponse()
+
+        assert response.status == 307
+        assert response.getheader("Location") == ("/rerun/?url=ws%3A%2F%2F10.2.1.130%3A9877")
+        response.read()
+        connection.close()
+    finally:
+        gateway.shutdown()
+        gateway.server_close()
 
 
 def test_odometry_and_joint_callbacks_log_sensor_metrics():

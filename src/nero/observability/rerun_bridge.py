@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import http.client
+import http.server
 import json
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlsplit
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -18,6 +22,80 @@ from nero.slam.k1_calibration import K1Calibration
 from .topics import ObservabilityTopics
 
 logger = logging.getLogger(__name__)
+
+
+def _host_for_url(host_header: str) -> str:
+    """Return the request hostname in URL-safe form without trusting its port."""
+    hostname = urlsplit(f"//{host_header}").hostname or "127.0.0.1"
+    return f"[{hostname}]" if ":" in hostname else hostname
+
+
+def start_web_gateway(
+    port: int,
+    *,
+    viewer_port: int,
+    websocket_port: int,
+    path: str = "/rerun",
+) -> http.server.ThreadingHTTPServer:
+    """Expose Rerun's root-only HTTP server below a stable robot URL path."""
+    normalized_path = "/" + path.strip("/")
+
+    class GatewayHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
+            raw_path = self.path.partition("?")[0]
+            request_path = raw_path.rstrip("/") or "/"
+            if request_path == "/healthz":
+                payload = b'{"status":"ok"}\n'
+                self.send_response(http.HTTPStatus.OK)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            if request_path == "/":
+                self.send_response(http.HTTPStatus.TEMPORARY_REDIRECT)
+                self.send_header("Location", normalized_path)
+                self.end_headers()
+                return
+            if request_path != normalized_path and not raw_path.startswith(f"{normalized_path}/"):
+                self.send_error(http.HTTPStatus.NOT_FOUND)
+                return
+
+            host = _host_for_url(self.headers.get("Host", "127.0.0.1"))
+            if raw_path == normalized_path:
+                websocket_url = quote(f"ws://{host}:{websocket_port}", safe="")
+                viewer_url = f"{normalized_path}/?url={websocket_url}"
+                self.send_response(http.HTTPStatus.TEMPORARY_REDIRECT)
+                self.send_header("Location", viewer_url)
+                self.end_headers()
+                return
+
+            upstream_path = self.path[len(normalized_path) :] or "/"
+            connection = http.client.HTTPConnection("127.0.0.1", viewer_port, timeout=5)
+            try:
+                connection.request("GET", upstream_path)
+                response = connection.getresponse()
+                payload = response.read()
+            except OSError as exc:
+                logger.error("Rerun web viewer proxy failed: %s", exc)
+                self.send_error(http.HTTPStatus.BAD_GATEWAY)
+                return
+            finally:
+                connection.close()
+            self.send_response(response.status)
+            for name, value in response.getheaders():
+                if name.lower() not in {"connection", "transfer-encoding"}:
+                    self.send_header(name, value)
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, format: str, *args: Any) -> None:
+            logger.debug("Rerun web gateway: " + format, *args)
+
+    server = http.server.ThreadingHTTPServer(("0.0.0.0", port), GatewayHandler)
+    thread = threading.Thread(target=server.serve_forever, name="nero-rerun-web", daemon=True)
+    thread.start()
+    return server
 
 
 def create_default_blueprint(rrb: Any) -> Any:
@@ -798,6 +876,16 @@ def parse_args() -> argparse.Namespace:
     )
     sink.add_argument("--save", type=Path, help="Write a .rrd recording instead of streaming")
     sink.add_argument("--spawn", action="store_true", help="Spawn a local native viewer")
+    sink.add_argument(
+        "--serve-web",
+        action="store_true",
+        help="Serve a robot-hosted browser viewer",
+    )
+    parser.add_argument("--web-port", type=int, default=8080)
+    parser.add_argument("--web-path", default="/rerun")
+    parser.add_argument("--viewer-port", type=int, default=8081)
+    parser.add_argument("--websocket-port", type=int, default=9877)
+    parser.add_argument("--server-memory-limit", default="256MB")
     parser.add_argument(
         "--sensor-calibration",
         type=Path,
@@ -810,7 +898,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print the complete ROS subscription contract and exit",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    for name in ("web_port", "viewer_port", "websocket_port"):
+        if not 1 <= getattr(args, name) <= 65535:
+            parser.error(f"--{name.replace('_', '-')} must be between 1 and 65535")
+    if len({args.web_port, args.viewer_port, args.websocket_port}) != 3:
+        parser.error("web, viewer, and WebSocket ports must be different")
+    if not args.web_path.startswith("/") or "?" in args.web_path or "#" in args.web_path:
+        parser.error("--web-path must be an absolute URL path without a query or fragment")
+    if args.web_path.rstrip("/") in {"", "/"}:
+        parser.error("--web-path must name a path such as /rerun")
+    return args
 
 
 def main() -> None:
@@ -830,9 +928,29 @@ def main() -> None:
 
     rclpy.init(args=None)
     recording = rr.new_recording("nero_k1", make_default=False)
+    gateway = None
     if args.save:
         args.save.parent.mkdir(parents=True, exist_ok=True)
         recording.save(str(args.save))
+    elif args.serve_web:
+        rr.serve_web(
+            open_browser=False,
+            web_port=args.viewer_port,
+            ws_port=args.websocket_port,
+            recording=recording,
+            server_memory_limit=args.server_memory_limit,
+        )
+        gateway = start_web_gateway(
+            args.web_port,
+            viewer_port=args.viewer_port,
+            websocket_port=args.websocket_port,
+            path=args.web_path,
+        )
+        logger.info(
+            "Robot-hosted Rerun available at http://<robot-ip>:%d%s",
+            args.web_port,
+            args.web_path,
+        )
     elif args.spawn or not args.connect:
         recording.spawn()
     else:
@@ -857,6 +975,9 @@ def main() -> None:
         pass
     finally:
         bridge.node.destroy_node()
+        if gateway is not None:
+            gateway.shutdown()
+            gateway.server_close()
         recording.flush()
         recording.disconnect()
         if rclpy.ok():
