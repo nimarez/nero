@@ -81,6 +81,61 @@ def _stop_process(process: subprocess.Popen | None) -> None:
         process.wait(timeout=5)
 
 
+def start_rerun_web_bridge(
+    *,
+    web_port: int = 8080,
+    web_path: str = "/rerun",
+    viewer_port: int = 8081,
+    websocket_port: int = 9877,
+    server_memory_limit: str = "256MB",
+    debug: bool = False,
+    ensure_viz_extra: bool = False,
+    startup_timeout: float | None = None,
+) -> subprocess.Popen:
+    """Start the robot-local ROS-to-Rerun bridge and wait for its web gateway."""
+    timeout = (
+        120.0 if ensure_viz_extra else 15.0
+    ) if startup_timeout is None else float(startup_timeout)
+    if timeout <= 0:
+        raise ValueError("Rerun startup timeout must be positive")
+    if ensure_viz_extra:
+        bridge_command = [
+            "uv",
+            "run",
+            "--locked",
+            "--extra",
+            "viz",
+            "nero-rerun",
+        ]
+    else:
+        bridge_command = _module_command("nero.observability.rerun_bridge")
+    bridge_command.extend(
+        [
+            "--serve-web",
+            "--web-port",
+            str(web_port),
+            "--web-path",
+            web_path,
+            "--viewer-port",
+            str(viewer_port),
+            "--websocket-port",
+            str(websocket_port),
+            "--server-memory-limit",
+            server_memory_limit,
+        ]
+    )
+    if debug:
+        bridge_command.append("--debug")
+
+    bridge = subprocess.Popen(bridge_command)
+    try:
+        _wait_for_port(bridge, web_port, timeout=timeout)
+    except Exception:
+        _stop_process(bridge)
+        raise
+    return bridge
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     args, policy_args = parse_args(argv)
     logging.basicConfig(
@@ -100,27 +155,16 @@ def main(argv: Sequence[str] | None = None) -> None:
         if preflight.returncode:
             raise SystemExit(preflight.returncode)
 
-    bridge_command = _module_command(
-        "nero.observability.rerun_bridge",
-        "--serve-web",
-        "--web-port",
-        str(args.web_port),
-        "--web-path",
-        args.web_path,
-        "--viewer-port",
-        str(args.viewer_port),
-        "--websocket-port",
-        str(args.websocket_port),
-        "--server-memory-limit",
-        args.server_memory_limit,
-    )
-    if args.debug:
-        bridge_command.append("--debug")
-
     bridge = None
     try:
-        bridge = subprocess.Popen(bridge_command)
-        _wait_for_port(bridge, args.web_port)
+        bridge = start_rerun_web_bridge(
+            web_port=args.web_port,
+            web_path=args.web_path,
+            viewer_port=args.viewer_port,
+            websocket_port=args.websocket_port,
+            server_memory_limit=args.server_memory_limit,
+            debug=args.debug,
+        )
         print(
             f"Rerun: http://{args.advertise_host}:{args.web_port}{args.web_path}",
             flush=True,
@@ -130,6 +174,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             "--no-display",
             "--command-source",
             "terminal",
+            "--no-web-rerun",
             *(["--debug"] if args.debug else []),
             *policy_args,
         )

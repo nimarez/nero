@@ -408,15 +408,43 @@ front end; it does not own a second sensor, safety, localization, or control loo
 `nero-pure-pursuit` is the intentionally smaller alternative for visible-object
 goals. It uses the target's live camera-frame RGB-D position as the pursuit point,
 keeps the tilt/depth/battery safety gate, and stops at the same class-aware
-stand-off distance. While acquiring or reacquiring a target, the walking base stays
-stopped and the K1 head performs a 15-pose pan/tilt raster. A side-looking detection
-must be confirmed, the head is then centered, and the body only rotates in place
-until a fresh centered detection permits pursuit. Because it has no persistent world
-pose, it cannot route around occlusions or map obstacles.
+stand-off distance. While acquiring or reacquiring a target, the base stops and the
+K1 head performs a 15-pose pan/tilt raster. After an unsuccessful raster, the robot
+uses bounded depth-gated sidesteps, a turnaround, and forward relocation to reach a
+new observation point before stopping for another scan. A side-looking detection
+must be confirmed, the head is then centered, and a fresh centered detection is
+required before pursuit. Because it has no persistent world pose, it cannot route
+around occlusions or map obstacles.
 It publishes the same sensor, detection, status, and command topics as the SLAM
 policy, so Rerun still shows the live RGB/depth images, labeled detection boxes,
 3D camera-frame centroids, and commanded velocities. A world-frame route is
 intentionally absent because this controller does not claim to know one.
+
+A direct terminal session automatically starts the robot-hosted Rerun bridge and
+prints the browser URL after port 8080 is listening. This command is accepted
+verbatim:
+
+```bash
+source /opt/ros/humble/setup.bash && \
+  source /opt/booster/BoosterAgent/install/setup.bash && \
+  uv run nero-pure-pursuit \
+    --no-display \
+    --command-source terminal \
+    --disable-safety \
+    --object-backend aruco \
+    --aruco-map config/aruco_markers.json \
+    --aruco-dictionary DICT_4X4_50 \
+    --stand-off-distance 0.4 \
+    --acquisition-timeout 65 \
+    --target-timeout 15 \
+    --search-angular-velocity 0.2
+```
+
+Open `http://10.2.1.130:8080/rerun`. The bridge is stopped when the terminal
+policy exits. Pass `--no-web-rerun` to opt out, or `--advertise-host HOST` when
+the robot is reached through a different hostname or address. `nero-robot-web`
+passes the opt-out internally so the wrapper and policy never compete for the
+same Rerun ports.
 
 To have the Mac command interface start or reuse this policy on the robot:
 

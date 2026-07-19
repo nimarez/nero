@@ -26,7 +26,7 @@ then
 fi
 # Inexact sync preserves vendor and locally built QNN wheels that are
 # intentionally outside the cross-platform lock file.
-uv sync --all-groups --locked --inexact
+uv sync --all-groups --extra viz --locked --inexact
 
 if [[ -f /opt/booster/perception_info.yaml ]]; then
     ./scripts/configure_k1_perception.sh

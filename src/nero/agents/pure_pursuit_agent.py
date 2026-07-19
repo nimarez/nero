@@ -14,6 +14,7 @@ import argparse
 import enum
 import logging
 import math
+import os
 import signal
 import time
 from dataclasses import dataclass, field
@@ -175,12 +176,17 @@ class DirectPursuitPolicy:
         relocation: RelocationConfig | None = None,
         target_timeout: float = 3.0,
         acquisition_timeout: float = 60.0,
+        stand_off_distance: float | None = None,
         safety_enforced: bool = True,
     ) -> None:
         if target_timeout <= 0:
             raise ValueError("target_timeout must be positive")
         if acquisition_timeout <= 0:
             raise ValueError("acquisition_timeout must be positive")
+        if stand_off_distance is not None and (
+            not math.isfinite(stand_off_distance) or stand_off_distance <= 0
+        ):
+            raise ValueError("stand_off_distance must be positive and finite")
         self.robot = robot
         self.detector = object_detector or ObjectDetector()
         self.controller = controller or PurePursuitController()
@@ -191,6 +197,7 @@ class DirectPursuitPolicy:
         self.relocation = relocation or RelocationConfig()
         self.target_timeout = target_timeout
         self.acquisition_timeout = acquisition_timeout
+        self._stand_off_override = stand_off_distance
         self.state = PursuitState.IDLE
         self.target: str | None = None
         self.stand_off = 0.8
@@ -251,7 +258,11 @@ class DirectPursuitPolicy:
             return self._status(f"Object class '{name}' is not supported")
         self.detector.set_target(resolved)
         self.target = resolved
-        self.stand_off = safe_stand_off_distance(resolved)
+        self.stand_off = (
+            self._stand_off_override
+            if self._stand_off_override is not None
+            else safe_stand_off_distance(resolved)
+        )
         self._last_seen = None
         self._begin_exploration(time.monotonic(), reset_scan=True, restart_search=True)
         self._last_detection_revision = None
@@ -1040,6 +1051,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-timeout", type=float, default=3.0)
     parser.add_argument("--acquisition-timeout", type=float, default=60.0)
     parser.add_argument(
+        "--stand-off-distance",
+        type=float,
+        help="Override the class-aware target stand-off distance in meters",
+    )
+    parser.add_argument(
         "--head-scan-move-time",
         type=float,
         default=0.35,
@@ -1071,9 +1087,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--relocation-angular-velocity",
+        "--search-angular-velocity",
+        dest="relocation_angular_velocity",
         type=float,
         default=0.35,
-        help="Angular velocity in rad/s while selecting a relocation path",
+        help="Angular velocity in rad/s during exploratory body turns",
     )
     parser.add_argument(
         "--exploration-turn-angle",
@@ -1087,7 +1105,52 @@ def parse_args() -> argparse.Namespace:
         default=3,
         help="Maximum number of new observation points before reporting target lost",
     )
-    return parser.parse_args()
+    web = parser.add_mutually_exclusive_group()
+    web.add_argument(
+        "--web-rerun",
+        dest="web_rerun",
+        action="store_true",
+        help="Serve Rerun in a browser (automatic with terminal commands)",
+    )
+    web.add_argument(
+        "--no-web-rerun",
+        dest="web_rerun",
+        action="store_false",
+        help="Do not start the robot-hosted Rerun viewer",
+    )
+    parser.set_defaults(web_rerun=None)
+    parser.add_argument("--web-port", type=int, default=8080)
+    parser.add_argument("--web-path", default="/rerun")
+    parser.add_argument("--viewer-port", type=int, default=8081)
+    parser.add_argument("--websocket-port", type=int, default=9877)
+    parser.add_argument("--server-memory-limit", default="256MB")
+    parser.add_argument(
+        "--advertise-host",
+        default=os.getenv("NERO_ROBOT_HOST", "10.2.1.130"),
+        help="Robot hostname or IP printed for the browser URL",
+    )
+    args = parser.parse_args()
+    if args.stand_off_distance is not None and (
+        not math.isfinite(args.stand_off_distance) or args.stand_off_distance <= 0
+    ):
+        parser.error("--stand-off-distance must be positive and finite")
+    for name in ("web_port", "viewer_port", "websocket_port"):
+        if not 1 <= getattr(args, name) <= 65535:
+            parser.error(f"--{name.replace('_', '-')} must be between 1 and 65535")
+    if len({args.web_port, args.viewer_port, args.websocket_port}) != 3:
+        parser.error("web, viewer, and WebSocket ports must be different")
+    if not args.web_path.startswith("/") or "?" in args.web_path or "#" in args.web_path:
+        parser.error("--web-path must be an absolute URL path without query or fragment")
+    if args.web_path.rstrip("/") in {"", "/"}:
+        parser.error("--web-path must name a path such as /rerun")
+    if _should_start_web_rerun(args) and args.no_ros_observability:
+        parser.error("browser Rerun requires ROS observability; use --no-web-rerun")
+    return args
+
+
+def _should_start_web_rerun(args: argparse.Namespace) -> bool:
+    requested = getattr(args, "web_rerun", None)
+    return args.command_source == "terminal" if requested is None else bool(requested)
 
 
 def run_agent(robot, args, *, object_detector=None, command_source=None) -> None:
@@ -1103,6 +1166,7 @@ def run_agent(robot, args, *, object_detector=None, command_source=None) -> None
         controller=controller,
         target_timeout=args.target_timeout,
         acquisition_timeout=args.acquisition_timeout,
+        stand_off_distance=getattr(args, "stand_off_distance", None),
         head_scan=HeadScanConfig(
             move_duration=getattr(args, "head_scan_move_time", 0.35),
             settle_time=getattr(args, "head_scan_settle_time", 0.15),
@@ -1252,21 +1316,49 @@ def main() -> None:
     except ValueError as exc:
         logger.error("Invalid object detector configuration: %s", exc)
         raise SystemExit(2) from exc
-    robot = RobotInterface()
-    if args.command_source == "socket":
-        command_source = UnixSocketCommandSource(args.command_socket)
-    elif args.command_source == "terminal":
-        command_source = TerminalCommandSource()
-    else:
-        command_source = K1VoiceCommandSource()
-        command_source.start_listening()
-        command_source.stop_listening()
-    run_agent(
-        robot,
-        args,
-        object_detector=object_detector,
-        command_source=command_source,
-    )
+    web_bridge = None
+    try:
+        if _should_start_web_rerun(args):
+            from nero.robot_web import start_rerun_web_bridge
+
+            try:
+                web_bridge = start_rerun_web_bridge(
+                    web_port=args.web_port,
+                    web_path=args.web_path,
+                    viewer_port=args.viewer_port,
+                    websocket_port=args.websocket_port,
+                    server_memory_limit=args.server_memory_limit,
+                    debug=args.debug,
+                    ensure_viz_extra=True,
+                )
+            except (OSError, RuntimeError) as exc:
+                logger.error("Could not start robot-hosted Rerun: %s", exc)
+                raise SystemExit(1) from exc
+            print(
+                f"Rerun: http://{args.advertise_host}:{args.web_port}{args.web_path}",
+                flush=True,
+            )
+
+        robot = RobotInterface()
+        if args.command_source == "socket":
+            command_source = UnixSocketCommandSource(args.command_socket)
+        elif args.command_source == "terminal":
+            command_source = TerminalCommandSource()
+        else:
+            command_source = K1VoiceCommandSource()
+            command_source.start_listening()
+            command_source.stop_listening()
+        run_agent(
+            robot,
+            args,
+            object_detector=object_detector,
+            command_source=command_source,
+        )
+    finally:
+        if web_bridge is not None:
+            from nero.robot_web import _stop_process
+
+            _stop_process(web_bridge)
 
 
 if __name__ == "__main__":

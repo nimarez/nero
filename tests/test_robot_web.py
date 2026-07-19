@@ -65,7 +65,7 @@ def test_robot_web_starts_bridge_then_terminal_policy_and_cleans_up(monkeypatch)
     monkeypatch.setattr(
         robot_web,
         "_wait_for_port",
-        lambda process, port: calls.append(("web", port)),
+        lambda process, port, timeout: calls.append(("web", port, timeout)),
     )
     monkeypatch.setattr(
         robot_web.subprocess,
@@ -97,5 +97,36 @@ def test_robot_web_starts_bridge_then_terminal_policy_and_cleans_up(monkeypatch)
         "--command-source",
         "terminal",
     ]
+    assert "--no-web-rerun" in policy_command
     assert policy_command[-2:] == ["--object-backend", "aruco"]
     assert calls[-2:] == ["terminate", ("wait", 5)]
+
+
+def test_direct_policy_bridge_uses_locked_viz_extra(monkeypatch):
+    commands = []
+    timeouts = []
+    bridge = SimpleNamespace(poll=lambda: None)
+    monkeypatch.setattr(
+        robot_web.subprocess,
+        "Popen",
+        lambda command: commands.append(command) or bridge,
+    )
+    monkeypatch.setattr(
+        robot_web,
+        "_wait_for_port",
+        lambda process, port, timeout: timeouts.append(timeout),
+    )
+
+    result = robot_web.start_rerun_web_bridge(ensure_viz_extra=True)
+
+    assert result is bridge
+    assert commands[0][:6] == [
+        "uv",
+        "run",
+        "--locked",
+        "--extra",
+        "viz",
+        "nero-rerun",
+    ]
+    assert "--serve-web" in commands[0]
+    assert timeouts == [120.0]

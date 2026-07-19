@@ -1,8 +1,10 @@
+import sys
 from types import SimpleNamespace
 
 import numpy as np
 
 import nero.agents.pure_pursuit_agent as pursuit_agent
+import nero.robot_web as robot_web
 from nero.agents.pure_pursuit_agent import (
     DEFAULT_HEAD_SCAN_POSES,
     RELOCATION_MANEUVER_PATTERN,
@@ -189,6 +191,129 @@ def test_direct_policy_enforces_safety_by_default():
 
     assert policy.safety_enforced is True
     assert policy._status("ready").safety_enforced is True
+
+
+def test_direct_policy_accepts_fixed_stand_off_override():
+    velocities = []
+    robot = SimpleNamespace(set_velocity=lambda *values: velocities.append(values))
+    detector = SimpleNamespace(
+        resolve_target=lambda name: name,
+        set_target=lambda _name: None,
+    )
+    policy = DirectPursuitPolicy(
+        robot,
+        object_detector=detector,
+        stand_off_distance=0.4,
+    )
+
+    status = policy.set_target("marker 45")
+
+    assert policy.stand_off == 0.4
+    assert status.stand_off_distance == 0.4
+    assert velocities[-1] == (0.0, 0.0, 0.0)
+
+
+def test_pasted_terminal_command_enables_browser_rerun_and_aliases(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "nero-pure-pursuit",
+            "--no-display",
+            "--command-source",
+            "terminal",
+            "--disable-safety",
+            "--object-backend",
+            "aruco",
+            "--aruco-map",
+            "config/aruco_markers.json",
+            "--aruco-dictionary",
+            "DICT_4X4_50",
+            "--stand-off-distance",
+            "0.4",
+            "--acquisition-timeout",
+            "65",
+            "--target-timeout",
+            "15",
+            "--search-angular-velocity",
+            "0.2",
+        ],
+    )
+
+    args = pursuit_agent.parse_args()
+
+    assert pursuit_agent._should_start_web_rerun(args)
+    assert args.web_rerun is None
+    assert args.web_port == 8080
+    assert args.web_path == "/rerun"
+    assert args.advertise_host == "10.2.1.130"
+    assert args.stand_off_distance == 0.4
+    assert args.relocation_angular_velocity == 0.2
+    assert args.acquisition_timeout == 65
+    assert args.target_timeout == 15
+
+
+def test_no_web_rerun_prevents_duplicate_bridge_for_terminal_policy():
+    args = SimpleNamespace(command_source="terminal", web_rerun=False)
+
+    assert not pursuit_agent._should_start_web_rerun(args)
+
+
+def test_main_owns_terminal_web_bridge_for_policy_lifetime(monkeypatch, capsys):
+    events = []
+    args = SimpleNamespace(
+        debug=False,
+        object_backend="aruco",
+        aruco_map="config/aruco_markers.json",
+        aruco_dictionary="DICT_4X4_50",
+        command_source="terminal",
+        command_socket="/tmp/unused.sock",
+        web_rerun=None,
+        web_port=8080,
+        web_path="/rerun",
+        viewer_port=8081,
+        websocket_port=9877,
+        server_memory_limit="256MB",
+        advertise_host="10.2.1.130",
+    )
+    bridge = object()
+    detector = object()
+    robot = object()
+    commands = object()
+    monkeypatch.setattr(pursuit_agent, "parse_args", lambda: args)
+    monkeypatch.setattr(
+        pursuit_agent, "configure_qualcomm_cpu_partition", lambda backend: None
+    )
+    monkeypatch.setattr(
+        pursuit_agent,
+        "create_object_detector",
+        lambda **kwargs: detector,
+    )
+    monkeypatch.setattr(pursuit_agent, "RobotInterface", lambda: robot)
+    monkeypatch.setattr(pursuit_agent, "TerminalCommandSource", lambda: commands)
+    monkeypatch.setattr(
+        pursuit_agent,
+        "run_agent",
+        lambda *values, **kwargs: events.append(("policy", values, kwargs)),
+    )
+    monkeypatch.setattr(
+        robot_web,
+        "start_rerun_web_bridge",
+        lambda **kwargs: events.append(("bridge", kwargs)) or bridge,
+    )
+    monkeypatch.setattr(
+        robot_web,
+        "_stop_process",
+        lambda process: events.append(("stop", process)),
+    )
+
+    pursuit_agent.main()
+
+    assert events[0][0] == "bridge"
+    assert events[0][1]["ensure_viz_extra"] is True
+    assert events[1][0] == "policy"
+    assert events[2] == ("stop", bridge)
+    assert "Rerun: http://10.2.1.130:8080/rerun" in capsys.readouterr().out
 
 
 def test_direct_policy_expires_replayed_async_detection(monkeypatch):
