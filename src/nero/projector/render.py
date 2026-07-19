@@ -105,3 +105,35 @@ def render_projector_grid(
         cv2.LINE_AA,
     )
     return canvas
+
+
+def render_motion_circle(
+    base_frame: np.ndarray,
+    calibration: ProjectorCalibration,
+    floor_uv: tuple[float, float] | list[float],
+    *,
+    label: str = "CONTROLLER",
+    radius: int = 118,
+) -> np.ndarray:
+    """Overlay a large, legible controller target on a cached grid frame."""
+
+    canvas = base_frame.copy()
+    point = calibration.transform(((float(floor_uv[0]), float(floor_uv[1])),))[0]
+    center = tuple(np.rint(point).astype(int))
+    overlay = canvas.copy()
+    cv2.circle(overlay, center, radius, (0, 92, 170), -1, cv2.LINE_AA)
+    cv2.addWeighted(overlay, 0.48, canvas, 0.52, 0.0, canvas)
+    cv2.circle(canvas, center, radius, (0, 164, 255), 16, cv2.LINE_AA)
+    cv2.circle(canvas, center, radius - 24, (255, 255, 255), 5, cv2.LINE_AA)
+    cv2.drawMarker(canvas, center, (118, 255, 148), cv2.MARKER_CROSS, 72, 8, cv2.LINE_AA)
+    cv2.putText(
+        canvas,
+        label,
+        (center[0] - radius, center[1] - radius - 22),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.9,
+        (255, 255, 255),
+        3,
+        cv2.LINE_AA,
+    )
+    return canvas

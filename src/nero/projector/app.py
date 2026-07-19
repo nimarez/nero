@@ -14,7 +14,8 @@ import numpy as np
 
 from .calibration import CalibrationState, ProjectorCalibration
 from .camera import RealSenseArucoCamera
-from .render import render_projector_grid
+from .motion import MotionTracker
+from .render import render_motion_circle, render_projector_grid
 from .server import CalibrationWebServer
 
 logger = logging.getLogger(__name__)
@@ -68,9 +69,11 @@ def run(args: argparse.Namespace) -> None:
     calibration_path = Path(args.calibration).expanduser()
     state = CalibrationState(_load_or_default(calibration_path))
     camera = RealSenseArucoCamera(marker_ids=(1, 2, 3, 4), marker_size_m=0.130).start()
+    motion = MotionTracker().start()
     server = CalibrationWebServer(
         state=state,
         camera=camera,
+        motion=motion,
         calibration_path=calibration_path,
         host=args.host,
         port=args.port,
@@ -84,6 +87,7 @@ def run(args: argparse.Namespace) -> None:
                 time.sleep(1)
         except KeyboardInterrupt:
             camera.stop()
+            motion.stop()
         return
 
     os.environ.setdefault("DISPLAY", ":0")
@@ -91,6 +95,10 @@ def run(args: argparse.Namespace) -> None:
     _open_windows()
     last_calibration_version = -1
     last_camera_sequence = -1
+    last_motion_sequence = -1
+    last_motion_valid = False
+    last_motion_draw = 0.0
+    base_projector_frame: np.ndarray | None = None
     logger.info("calibration UI ready on port %d", args.port)
 
     try:
@@ -98,9 +106,32 @@ def run(args: argparse.Namespace) -> None:
             calibration, version, _ = state.snapshot()
             if version != last_calibration_version:
                 started = time.perf_counter()
-                cv2.imshow("Nero Projector", render_projector_grid(calibration))
+                base_projector_frame = render_projector_grid(calibration)
+                cv2.imshow("Nero Projector", base_projector_frame)
                 last_calibration_version = version
                 logger.debug("projector update %.2f ms", (time.perf_counter() - started) * 1000)
+            motion_state = motion.snapshot()
+            motion_sequence = motion_state["sequence"] or -1
+            now = time.monotonic()
+            should_draw_motion = (
+                base_projector_frame is not None
+                and (motion_sequence != last_motion_sequence or motion_state["valid"] != last_motion_valid)
+                and now - last_motion_draw >= 1.0 / 60.0
+            )
+            if should_draw_motion:
+                if motion_state["valid"] and motion_state["uv"]:
+                    projector_frame = render_motion_circle(
+                        base_projector_frame,
+                        calibration,
+                        motion_state["uv"],
+                        label=str(motion_state["controller_id"] or "CONTROLLER"),
+                    )
+                else:
+                    projector_frame = base_projector_frame
+                cv2.imshow("Nero Projector", projector_frame)
+                last_motion_sequence = motion_sequence
+                last_motion_valid = bool(motion_state["valid"])
+                last_motion_draw = now
             frame = camera.latest()
             if frame is not None and frame.sequence != last_camera_sequence:
                 cv2.imshow("Nero Camera", frame.image)
@@ -111,6 +142,7 @@ def run(args: argparse.Namespace) -> None:
             time.sleep(0.001)
     finally:
         camera.stop()
+        motion.stop()
         cv2.destroyAllWindows()
 
 
