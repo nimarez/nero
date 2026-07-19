@@ -16,6 +16,7 @@ from nero.navigation.vive_pursuit import (
     VivePathTracker,
     VivePursuitConfig,
     VivePursuitController,
+    object_approach_pose,
     plan_object_approach,
 )
 from nero.observability import RosObservabilityPublisher
@@ -130,6 +131,7 @@ def run_agent(
         )
     )
     object_pose = np.asarray(args.goal, dtype=float)
+    goal_pose = object_approach_pose(object_pose, args.stand_off)
     initializer = getattr(robot, "initialize_locomotion_only", robot.initialize)
     initializer()
     robot.stop()
@@ -154,13 +156,28 @@ def run_agent(
             continue
         unavailable_since = None
         pose_seen = True
-        if path is None:
-            path = plan_object_approach(
-                pose,
-                object_pose,
-                args.stand_off,
-                spacing=args.path_spacing,
+        if controller.has_reached_pose(pose, goal_pose):
+            robot.stop()
+            logger.info(
+                "Arrived at approach pose=(%.3f, %.3f, %.3f)",
+                *goal_pose,
             )
+            return
+        if np.linalg.norm(pose[:2] - goal_pose[:2]) <= controller.config.position_tolerance:
+            command = controller.compute_path_command(pose, goal_pose[:2], goal_pose, 0.0)
+            robot.set_velocity(command.linear_x, command.linear_y, command.angular_z)
+            sleep(1.0 / args.rate)
+            continue
+        if path is None:
+            try:
+                path = plan_object_approach(
+                    pose,
+                    object_pose,
+                    args.stand_off,
+                    spacing=args.path_spacing,
+                )
+            except ValueError as error:
+                raise RuntimeError(f"Vive approach path planning failed: {error}") from error
             tracker = VivePathTracker(path.points)
             if telemetry is not None:
                 telemetry.publish_plan(
@@ -174,15 +191,13 @@ def run_agent(
                 *path.goal_pose,
                 *path.object_pose,
             )
-        if controller.has_reached_pose(pose, path.goal_pose):
-            robot.stop()
-            logger.info(
-                "Arrived at approach pose=(%.3f, %.3f, %.3f)",
-                *path.goal_pose,
-            )
-            return
         lookahead = tracker.lookahead(pose[:2], args.lookahead)
-        command = controller.compute_path_command(pose, lookahead, path.goal_pose)
+        command = controller.compute_path_command(
+            pose,
+            lookahead,
+            path.goal_pose,
+            tracker.remaining_distance(pose[:2]),
+        )
         robot.set_velocity(command.linear_x, command.linear_y, command.angular_z)
         if now - last_log >= 1.0:
             logger.info(

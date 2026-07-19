@@ -34,6 +34,22 @@ def test_object_approach_path_has_requested_terminal_tangent() -> None:
     assert final_tangent == pytest.approx([0.0, 1.0], abs=0.02)
 
 
+def test_object_approach_path_detours_without_cusps_for_opposing_headings() -> None:
+    path = plan_object_approach(
+        np.array([0.0, 0.0, np.pi]),
+        np.array([1.5, 0.0, 0.0]),
+        0.5,
+        spacing=0.02,
+    )
+
+    segments = np.diff(path.points, axis=0)
+    directions = segments / np.linalg.norm(segments, axis=1)[:, None]
+    assert np.max(np.abs(path.points[:, 1])) >= 0.5
+    assert np.all(np.sum(directions[1:] * directions[:-1], axis=1) > 0.0)
+    assert directions[0] == pytest.approx([-1.0, 0.0], abs=0.03)
+    assert directions[-1] == pytest.approx([-1.0, 0.0], abs=0.03)
+
+
 def test_path_tracker_never_moves_its_nearest_index_backward() -> None:
     tracker = VivePathTracker(np.column_stack((np.arange(6, dtype=float), np.zeros(6))))
 
@@ -41,6 +57,17 @@ def test_path_tracker_never_moves_its_nearest_index_backward() -> None:
     assert tracker.index == 3
     tracker.lookahead(np.array([0.0, 0.0]), 1.0)
     assert tracker.index == 3
+
+
+def test_path_speed_uses_remaining_route_instead_of_short_lookahead() -> None:
+    command = VivePursuitController().compute_path_command(
+        np.array([0.0, 0.0, 0.0]),
+        np.array([0.3, 0.0]),
+        np.array([5.5, 0.0, 0.0]),
+        remaining_distance=5.5,
+    )
+
+    assert command.linear_x == pytest.approx(0.1)
 
 
 def test_vive_pursuit_drives_toward_world_goal() -> None:
@@ -137,5 +164,4 @@ def test_run_agent_reaches_goal_and_stops() -> None:
     run_agent(robot, source, args, telemetry=telemetry, sleep=lambda _duration: None)
 
     assert commands[-1] == (0.0, 0.0, 0.0)
-    assert len(telemetry.plans) == 1
-    assert telemetry.plans[0][-1] == pytest.approx([0.0, 0.0, 0.0], abs=1e-12)
+    assert telemetry.plans == []
