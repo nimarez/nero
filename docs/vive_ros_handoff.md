@@ -73,11 +73,15 @@ The container uses host networking for ROS discovery and mounts the proven POS
 state endpoint read-only. Set its `ROS_DOMAIN_ID` to the K1 domain if the robot
 does not use the default domain `0`.
 
-If that runtime is a container, mount the endpoint without write access:
+If that runtime is a container, mount the endpoint's directory without write
+access:
 
 ```bash
--v /run/nero/vive_pose.json:/run/nero/vive_pose.json:ro
+-v /run/nero:/run/nero:ro
 ```
+
+Mount the directory, not the file. The receiver atomically replaces the JSON
+path on every update; a file bind mount would remain attached to the stale inode.
 
 | Topic | Type | Frame | Meaning |
 |---|---|---|---|
