@@ -8,9 +8,9 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
+from nero.robot import K1_MAX_RGBD_RESOLUTION
 
-EXPECTED_WIDTH = 544
-EXPECTED_HEIGHT = 448
+EXPECTED_WIDTH, EXPECTED_HEIGHT = K1_MAX_RGBD_RESOLUTION
 
 
 def _stamp_seconds(message: Any) -> float:
@@ -35,7 +35,10 @@ class CameraReadiness:
         if stream in {"rgb", "depth", "camera_info"}:
             size = (int(message.width), int(message.height))
             if size != (EXPECTED_WIDTH, EXPECTED_HEIGHT):
-                issue = f"{stream} is {size[0]}x{size[1]}, expected 544x448"
+                issue = (
+                    f"{stream} is {size[0]}x{size[1]}, expected maximum "
+                    f"{EXPECTED_WIDTH}x{EXPECTED_HEIGHT}"
+                )
                 if issue not in self.incompatible:
                     self.incompatible.append(issue)
         if stream == "rgb":
@@ -176,7 +179,7 @@ def main() -> None:
             )
         rgb_stamp, depth_stamp = readiness.synchronized_pairs[-1]
         print(
-            "K1 RGB-D ready: 544x448 messages, "
+            f"K1 RGB-D ready at maximum {EXPECTED_WIDTH}x{EXPECTED_HEIGHT} resolution, "
             f"RGB-D offset={abs(rgb_stamp - depth_stamp) * 1000.0:.1f}ms",
             flush=True,
         )

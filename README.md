@@ -166,6 +166,13 @@ perception sequence can take more than a minute and the isolated QNN worker has
 its own 180-second startup ceiling. Override them with
 `--camera-start-timeout` and `--policy-start-timeout`.
 
+The vendor bridge's maximum registered RGB-D mode is 544×448. Nero consumes
+those frames at their native published resolution and performs no additional
+downsampling before ArUco, depth processing, SLAM, or Rerun. The physical robot
+adapter independently verifies RGB, depth, and CameraInfo dimensions during every
+policy startup, so launching a policy directly cannot bypass the maximum-resolution
+preflight. A lower or mismatched mode fails before walking is armed.
+
 To keep the complete runtime on the physical robot and view it from any browser
 on the robot network, SSH into the K1 and run:
 

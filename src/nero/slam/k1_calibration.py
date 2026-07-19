@@ -12,12 +12,14 @@ from typing import Any
 
 import numpy as np
 
+from nero.robot import K1_MAX_RGBD_RESOLUTION
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_CAMERA_INFO_TOPIC = "/boostercamera/head/rgb/camera_info"
 DEFAULT_RGB_TOPIC = "/boostercamera/head/rgb"
 DEFAULT_DEPTH_TOPIC = "/boostercamera/head/depth"
-K1_GEEK_RESOLUTION = (544, 448)
+K1_GEEK_RESOLUTION = K1_MAX_RGBD_RESOLUTION
 K1_GEEK_FPS = 20.0
 K1_GEEK_FOV_DEGREES = (105.0, 94.0)
 K1_GEEK_DEPTH_RANGE_M = (0.5, 6.0)

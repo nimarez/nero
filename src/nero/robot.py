@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 K1_HEAD_YAW_LIMITS = (-1.0, 1.0)
 K1_HEAD_PITCH_LIMITS = (-0.349, 0.855)
+K1_MAX_RGBD_RESOLUTION = (544, 448)
 
 
 @dataclass(frozen=True)
@@ -365,6 +366,7 @@ class RobotInterface:
                         f"{self._sensor_startup_timeout:g}s: {self.sensor_diagnostics()}"
                     )
                 self._ready.wait(timeout=min(0.25, remaining))
+            self._validate_max_camera_resolution()
         self._mode = self.get_mode()
         if self._mode != 2:
             raise RuntimeError(
@@ -373,7 +375,36 @@ class RobotInterface:
             )
         self._loco.Move(0.0, 0.0, 0.0)
         self._initialized = True
-        logger.info("K1 preflight passed; velocity output armed at zero")
+        logger.info(
+            "K1 preflight passed at maximum RGB-D resolution %dx%d; "
+            "velocity output armed at zero",
+            *K1_MAX_RGBD_RESOLUTION,
+        )
+
+    def _validate_max_camera_resolution(self) -> None:
+        """Fail closed unless every registered camera stream uses the K1 maximum."""
+        expected = K1_MAX_RGBD_RESOLUTION
+        streams = {
+            "rgb": self._rgb,
+            "depth": self._depth,
+            "camera_info": self._camera_info,
+        }
+        incompatible = []
+        for name, message in streams.items():
+            try:
+                size = (int(message.width), int(message.height))
+            except (AttributeError, TypeError, ValueError):
+                incompatible.append(f"{name}=unknown")
+                continue
+            if size != expected:
+                incompatible.append(f"{name}={size[0]}x{size[1]}")
+        if incompatible:
+            actual = ", ".join(incompatible)
+            raise RuntimeError(
+                "K1 camera is not publishing its maximum registered RGB-D resolution "
+                f"{expected[0]}x{expected[1]} ({actual}). Restart Booster perception "
+                "and rerun nero-k1-preflight."
+            )
 
     def sensor_diagnostics(self) -> str:
         """Describe which live inputs arrived and whether RGB-D paired."""

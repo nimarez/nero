@@ -40,5 +40,5 @@ def test_camera_readiness_rejects_wrong_k1_resolution_and_explains_silent_topics
 
     assert not readiness.ready
     summary = readiness.summary({"rgb": 1, "depth": 1, "camera_info": 1, "raw_rgb": 1})
-    assert "rgb is 640x480, expected 544x448" in summary
+    assert "rgb is 640x480, expected maximum 544x448" in summary
     assert "depth: no messages (1 publisher(s) discovered)" in summary

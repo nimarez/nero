@@ -130,6 +130,22 @@ def test_robot_image_helpers_decode_production_k1_encodings():
     assert np.max(decoded) - np.min(decoded) == 0
 
 
+def test_robot_requires_maximum_registered_k1_camera_resolution():
+    robot = RobotInterface.__new__(RobotInterface)
+    robot._rgb = SimpleNamespace(width=544, height=448)
+    robot._depth = SimpleNamespace(width=544, height=448)
+    robot._camera_info = SimpleNamespace(width=544, height=448)
+
+    robot._validate_max_camera_resolution()
+
+    robot._depth = SimpleNamespace(width=320, height=240)
+    with np.testing.assert_raises_regex(
+        RuntimeError,
+        r"maximum registered RGB-D resolution 544x448.*depth=320x240",
+    ):
+        robot._validate_max_camera_resolution()
+
+
 def test_robot_consumes_official_battery_soc_and_waits_for_a_new_rgbd_frame():
     robot = RobotInterface.__new__(RobotInterface)
     robot._lock = threading.Lock()
