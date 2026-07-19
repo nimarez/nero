@@ -17,6 +17,7 @@ from .camera import RealSenseArucoCamera
 from .motion import MotionTracker
 from .navigation import ProjectorNavigationState
 from .operator_display import OPERATOR_HTML
+from .visual_editor import VISUAL_EDITOR_HTML
 
 logger = logging.getLogger(__name__)
 
@@ -113,10 +114,13 @@ class CalibrationWebServer:
         app = web.Application()
         app.router.add_get("/", self._index)
         app.router.add_get("/operator", self._operator)
+        app.router.add_get("/visualizer", self._visualizer)
         app.router.add_get("/stream.mjpg", self._stream)
         app.router.add_get("/api/state", self._api_state)
         app.router.add_get("/api/rerun-health", self._rerun_health)
         app.router.add_get("/api/navigation/state", self._navigation_state)
+        app.router.add_get("/api/visualization", self._visualization_state)
+        app.router.add_post("/api/visualization", self._visualization_update)
         app.router.add_post("/api/navigation/goal", self._navigation_goal)
         app.router.add_post("/api/navigation/trajectory", self._navigation_trajectory)
         app.router.add_post("/api/navigation/calibrate-forward", self._navigation_forward)
@@ -131,6 +135,21 @@ class CalibrationWebServer:
 
     async def _operator(self, _request: web.Request) -> web.Response:
         return web.Response(text=OPERATOR_HTML, content_type="text/html")
+
+    async def _visualizer(self, _request: web.Request) -> web.Response:
+        return web.Response(text=VISUAL_EDITOR_HTML, content_type="text/html")
+
+    async def _visualization_state(self, _request: web.Request) -> web.Response:
+        calibration, _, _ = self.state.snapshot()
+        return web.json_response(calibration.visualization_dict())
+
+    async def _visualization_update(self, request: web.Request) -> web.Response:
+        try:
+            calibration = self.state.update_visualization(await request.json())
+            calibration.save(self.calibration_path)
+            return web.json_response(calibration.visualization_dict())
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            return web.json_response({"error": str(error)}, status=400)
 
     async def _rerun_health(self, _request: web.Request) -> web.Response:
         reachable = False

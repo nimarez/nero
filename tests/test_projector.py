@@ -7,13 +7,14 @@ import pytest
 from nero.projector.calibration import CalibrationState, ProjectorCalibration
 from nero.projector.camera import annotate_aruco
 from nero.projector.motion import MotionPose, MotionTracker, map_floor_position
-from nero.projector.navigation import ProjectorNavigationState
+from nero.projector.navigation import ProjectorNavigationState, centered_bezier_waypoints
 from nero.projector.operator_display import OPERATOR_HTML, RERUN_URL
 from nero.projector.render import (
     render_motion_circle,
     render_navigation_overlay,
     render_projector_grid,
 )
+from nero.projector.visual_editor import VISUAL_EDITOR_HTML
 
 
 def test_calibration_round_trip_and_atomic_save(tmp_path):
@@ -131,6 +132,14 @@ def test_navigation_contract_falls_back_to_direct_preview_and_accepts_nima_path(
     assert len(planned["trajectory"]["waypoints"]) == 3
 
 
+def test_direct_preview_bezier_passes_through_room_center():
+    route = centered_bezier_waypoints([-1.4, 0.8], [1.6, 0.4])
+
+    assert route[0] == [-1.4, 0.8]
+    assert route[-1] == [1.6, 0.4]
+    assert [0.0, 0.0] in route
+
+
 def test_navigation_overlay_draws_robot_axes_path_and_goal():
     calibration = ProjectorCalibration()
     base = np.zeros((calibration.height, calibration.width, 3), dtype=np.uint8)
@@ -152,6 +161,95 @@ def test_navigation_overlay_draws_robot_axes_path_and_goal():
     )
 
     assert np.count_nonzero(frame) > 1000
+
+
+@pytest.mark.parametrize("preset", ["intent_field", "beacon_trail", "safety_corridor"])
+def test_mission_visualizations_are_distinct_from_preserved_engineering_mode(preset):
+    base_calibration = ProjectorCalibration()
+    mission_calibration = base_calibration.with_visualization(
+        {"mode": "mission", "preset": preset}
+    )
+    trajectory = [[0.22, 0.74], [0.48, 0.58], [0.78, 0.27]]
+    goal = [0.84, 0.20]
+
+    engineering = render_navigation_overlay(
+        render_projector_grid(base_calibration),
+        base_calibration,
+        robot_frame_uv=None,
+        trajectory_uv=trajectory,
+        goal_uv=goal,
+        goal_heading_uv=None,
+        animation_phase=0.25,
+    )
+    mission = render_navigation_overlay(
+        render_projector_grid(mission_calibration),
+        mission_calibration,
+        robot_frame_uv=None,
+        trajectory_uv=trajectory,
+        goal_uv=goal,
+        goal_heading_uv=None,
+        animation_phase=0.25,
+    )
+
+    assert mission_calibration.visualization_mode == "mission"
+    assert mission_calibration.mission_preset == preset
+    assert np.count_nonzero(mission) > 1000
+    assert not np.array_equal(mission, engineering)
+
+
+def test_mission_completion_adds_high_contrast_ready_animation():
+    calibration = ProjectorCalibration().with_visualization({"mode": "mission"})
+    base = render_projector_grid(calibration)
+    common = {
+        "robot_frame_uv": None,
+        "trajectory_uv": [[0.25, 0.7], [0.5, 0.5], [0.76, 0.28]],
+        "goal_uv": [0.8, 0.24],
+        "goal_heading_uv": None,
+        "animation_phase": 0.3,
+    }
+
+    approaching = render_navigation_overlay(
+        base, calibration, **common, distance_to_goal_m=1.2
+    )
+    complete = render_navigation_overlay(
+        base, calibration, **common, distance_to_goal_m=0.2
+    )
+
+    assert not np.array_equal(approaching, complete)
+    assert np.count_nonzero(complete[:, :, 2] > complete[:, :, 1] * 1.2) > 100
+
+
+def test_visualization_settings_validate_and_round_trip(tmp_path):
+    calibration = ProjectorCalibration().with_visualization(
+        {
+            "mode": "mission",
+            "preset": "intent_field",
+            "route_color": "#92FFD4",
+            "target_color": "#FFD94F",
+            "route_width": 0.08,
+            "goal_gap": 0.1,
+            "target_radius": 0.07,
+            "glow_strength": 1.0,
+            "animation_speed": 1.2,
+            "grid_intensity": 0.45,
+        }
+    )
+
+    restored = ProjectorCalibration.load(calibration.save(tmp_path / "projector.json"))
+
+    assert restored == calibration
+    assert restored.visualization_dict()["mode"] == "mission"
+    with pytest.raises(ValueError, match="unsupported visualization setting"):
+        calibration.with_visualization({"fake_control": 1})
+
+
+def test_visual_editor_exposes_both_modes_and_factory_presets():
+    assert 'data-mode="engineering"' in VISUAL_EDITOR_HTML
+    assert 'data-mode="mission"' in VISUAL_EDITOR_HTML
+    assert 'data-preset="intent_field"' in VISUAL_EDITOR_HTML
+    assert 'data-preset="beacon_trail"' in VISUAL_EDITOR_HTML
+    assert 'data-preset="safety_corridor"' in VISUAL_EDITOR_HTML
+    assert "/api/visualization" in VISUAL_EDITOR_HTML
 
 
 def test_operator_display_combines_camera_rerun_and_floor_telemetry():

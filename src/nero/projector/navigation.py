@@ -27,6 +27,58 @@ def _wrap_angle(angle: float) -> float:
     return (angle + math.pi) % (2.0 * math.pi) - math.pi
 
 
+def centered_bezier_waypoints(
+    start: list[float] | tuple[float, float],
+    goal: list[float] | tuple[float, float],
+    *,
+    center: tuple[float, float] = (0.0, 0.0),
+    samples: int = 81,
+) -> list[list[float]]:
+    """Create a quadratic route that passes exactly through the room center."""
+
+    start_xy = (float(start[0]), float(start[1]))
+    goal_xy = (float(goal[0]), float(goal[1]))
+    distance_to_center = math.hypot(start_xy[0] - center[0], start_xy[1] - center[1])
+    distance_from_center = math.hypot(goal_xy[0] - center[0], goal_xy[1] - center[1])
+    total = distance_to_center + distance_from_center
+    if samples < 3:
+        raise ValueError("centered Bezier path requires at least 3 samples")
+    if total < 1e-8 or min(distance_to_center, distance_from_center) < 1e-6:
+        return [
+            [
+                start_xy[0] + (goal_xy[0] - start_xy[0]) * index / (samples - 1),
+                start_xy[1] + (goal_xy[1] - start_xy[1]) * index / (samples - 1),
+            ]
+            for index in range(samples)
+        ]
+    center_t = min(0.82, max(0.18, distance_to_center / total))
+    inverse_t = 1.0 - center_t
+    denominator = 2.0 * inverse_t * center_t
+    control = (
+        (center[0] - inverse_t**2 * start_xy[0] - center_t**2 * goal_xy[0])
+        / denominator,
+        (center[1] - inverse_t**2 * start_xy[1] - center_t**2 * goal_xy[1])
+        / denominator,
+    )
+    points = []
+    for index in range(samples):
+        t = index / (samples - 1)
+        inverse = 1.0 - t
+        points.append(
+            [
+                inverse**2 * start_xy[0]
+                + 2.0 * inverse * t * control[0]
+                + t**2 * goal_xy[0],
+                inverse**2 * start_xy[1]
+                + 2.0 * inverse * t * control[1]
+                + t**2 * goal_xy[1],
+            ]
+        )
+    center_index = round(center_t * (samples - 1))
+    points[center_index] = [float(center[0]), float(center[1])]
+    return points
+
+
 class ProjectorNavigationState:
     """Thread-safe contract boundary; this class never commands the robot."""
 

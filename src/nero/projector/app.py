@@ -15,7 +15,7 @@ import numpy as np
 from .calibration import CalibrationState, ProjectorCalibration
 from .camera import RealSenseArucoCamera
 from .motion import MotionTracker
-from .navigation import ProjectorNavigationState
+from .navigation import ProjectorNavigationState, centered_bezier_waypoints
 from .render import (
     render_floor_calibration_target,
     render_motion_circle,
@@ -152,7 +152,12 @@ def run(args: argparse.Namespace) -> None:
                         total=floor_calibration["total"],
                     )
                 trajectory = navigation_state.get("trajectory") or {}
-                trajectory_uv = motion.room_points_to_floor_uv(trajectory.get("waypoints") or [])
+                trajectory_points = trajectory.get("waypoints") or []
+                if trajectory.get("source") == "direct-preview" and len(trajectory_points) == 2:
+                    trajectory_points = centered_bezier_waypoints(
+                        trajectory_points[0], trajectory_points[1]
+                    )
+                trajectory_uv = motion.room_points_to_floor_uv(trajectory_points)
                 goal = navigation_state.get("goal_pose")
                 goal_uv = None
                 goal_heading_uv = None
@@ -168,6 +173,15 @@ def run(args: argparse.Namespace) -> None:
                     )
                     if len(points) == 2:
                         goal_uv, goal_heading_uv = points
+                distance_to_goal_m = None
+                robot_pose = navigation_state.get("robot_pose")
+                if robot_pose and goal:
+                    distance_to_goal_m = float(
+                        np.hypot(
+                            goal["x"] - robot_pose["x"],
+                            goal["y"] - robot_pose["y"],
+                        )
+                    )
                 projector_frame = render_navigation_overlay(
                     projector_frame,
                     calibration,
@@ -175,9 +189,14 @@ def run(args: argparse.Namespace) -> None:
                     trajectory_uv=trajectory_uv,
                     goal_uv=goal_uv,
                     goal_heading_uv=goal_heading_uv,
-                    animation_phase=now * 0.8,
+                    animation_phase=now * calibration.mission_animation_speed,
+                    distance_to_goal_m=distance_to_goal_m,
                 )
-                if motion_state["valid"] and motion_state["uv"]:
+                if (
+                    calibration.visualization_mode == "engineering"
+                    and motion_state["valid"]
+                    and motion_state["uv"]
+                ):
                     projector_frame = render_motion_circle(
                         projector_frame,
                         calibration,

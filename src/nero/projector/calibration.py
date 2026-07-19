@@ -32,6 +32,15 @@ def _finite_point(value: Any, field_name: str) -> tuple[float, float]:
     return point
 
 
+def _hex_color(value: Any, field_name: str) -> str:
+    color = str(value).upper()
+    if len(color) != 7 or color[0] != "#" or any(
+        character not in "0123456789ABCDEF" for character in color[1:]
+    ):
+        raise ValueError(f"{field_name} must be a #RRGGBB color")
+    return color
+
+
 @dataclass(frozen=True, slots=True)
 class ProjectorCalibration:
     """Four projector pixels corresponding to marker centers 1, 2, 3, 4.
@@ -49,6 +58,16 @@ class ProjectorCalibration:
     handles: tuple[tuple[float, float], ...] = field(default_factory=_default_handles)
     grid_divisions: int = 12
     line_thickness: int = 2
+    visualization_mode: str = "engineering"
+    mission_preset: str = "intent_field"
+    mission_route_color: str = "#8CFFD0"
+    mission_target_color: str = "#FFD34D"
+    mission_route_width: float = 0.070
+    mission_goal_gap: float = 0.085
+    mission_target_radius: float = 0.065
+    mission_glow_strength: float = 0.90
+    mission_animation_speed: float = 0.80
+    mission_grid_intensity: float = 0.55
 
     def __post_init__(self) -> None:
         if self.width <= 0 or self.height <= 0:
@@ -74,6 +93,22 @@ class ProjectorCalibration:
             raise ValueError("grid_divisions must be between 4 and 40")
         if not 1 <= self.line_thickness <= 12:
             raise ValueError("line_thickness must be between 1 and 12")
+        if self.visualization_mode not in {"engineering", "mission"}:
+            raise ValueError("visualization_mode must be engineering or mission")
+        if self.mission_preset not in {"intent_field", "beacon_trail", "safety_corridor"}:
+            raise ValueError("unsupported mission_preset")
+        _hex_color(self.mission_route_color, "mission_route_color")
+        _hex_color(self.mission_target_color, "mission_target_color")
+        for name, value, lower, upper in (
+            ("mission_route_width", self.mission_route_width, 0.025, 0.140),
+            ("mission_goal_gap", self.mission_goal_gap, 0.020, 0.220),
+            ("mission_target_radius", self.mission_target_radius, 0.030, 0.140),
+            ("mission_glow_strength", self.mission_glow_strength, 0.10, 1.00),
+            ("mission_animation_speed", self.mission_animation_speed, 0.10, 2.50),
+            ("mission_grid_intensity", self.mission_grid_intensity, 0.15, 1.00),
+        ):
+            if not math.isfinite(value) or not lower <= value <= upper:
+                raise ValueError(f"{name} must be between {lower} and {upper}")
 
     @property
     def homography(self) -> np.ndarray:
@@ -99,6 +134,42 @@ class ProjectorCalibration:
             line_thickness=int(line_thickness),
         )
 
+    def with_visualization(self, payload: Any) -> "ProjectorCalibration":
+        if not isinstance(payload, dict):
+            raise ValueError("visualization settings must be an object")
+        current = self.visualization_dict()
+        unknown = set(payload) - set(current)
+        if unknown:
+            raise ValueError(f"unsupported visualization setting: {sorted(unknown)[0]}")
+        current.update(payload)
+        return replace(
+            self,
+            visualization_mode=str(current["mode"]),
+            mission_preset=str(current["preset"]),
+            mission_route_color=_hex_color(current["route_color"], "route_color"),
+            mission_target_color=_hex_color(current["target_color"], "target_color"),
+            mission_route_width=float(current["route_width"]),
+            mission_goal_gap=float(current["goal_gap"]),
+            mission_target_radius=float(current["target_radius"]),
+            mission_glow_strength=float(current["glow_strength"]),
+            mission_animation_speed=float(current["animation_speed"]),
+            mission_grid_intensity=float(current["grid_intensity"]),
+        )
+
+    def visualization_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.visualization_mode,
+            "preset": self.mission_preset,
+            "route_color": self.mission_route_color,
+            "target_color": self.mission_target_color,
+            "route_width": self.mission_route_width,
+            "goal_gap": self.mission_goal_gap,
+            "target_radius": self.mission_target_radius,
+            "glow_strength": self.mission_glow_strength,
+            "animation_speed": self.mission_animation_speed,
+            "grid_intensity": self.mission_grid_intensity,
+        }
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "version": 1,
@@ -113,6 +184,7 @@ class ProjectorCalibration:
                 "grid_divisions": self.grid_divisions,
                 "line_thickness": self.line_thickness,
             },
+            "visualization": self.visualization_dict(),
         }
 
     @classmethod
@@ -122,6 +194,7 @@ class ProjectorCalibration:
         projector = payload.get("projector") or {}
         markers = payload.get("markers") or {}
         style = payload.get("style") or {}
+        visualization = payload.get("visualization") or {}
         return cls(
             width=int(projector.get("width", DEFAULT_PROJECTOR_SIZE[0])),
             height=int(projector.get("height", DEFAULT_PROJECTOR_SIZE[1])),
@@ -134,6 +207,20 @@ class ProjectorCalibration:
             ),
             grid_divisions=int(style.get("grid_divisions", 12)),
             line_thickness=int(style.get("line_thickness", 2)),
+            visualization_mode=str(visualization.get("mode", "engineering")),
+            mission_preset=str(visualization.get("preset", "intent_field")),
+            mission_route_color=_hex_color(
+                visualization.get("route_color", "#8CFFD0"), "route_color"
+            ),
+            mission_target_color=_hex_color(
+                visualization.get("target_color", "#FFD34D"), "target_color"
+            ),
+            mission_route_width=float(visualization.get("route_width", 0.070)),
+            mission_goal_gap=float(visualization.get("goal_gap", 0.085)),
+            mission_target_radius=float(visualization.get("target_radius", 0.065)),
+            mission_glow_strength=float(visualization.get("glow_strength", 0.90)),
+            mission_animation_speed=float(visualization.get("animation_speed", 0.80)),
+            mission_grid_intensity=float(visualization.get("grid_intensity", 0.55)),
         )
 
     @classmethod
@@ -189,5 +276,11 @@ class CalibrationState:
             self._calibration = self._calibration.with_style(
                 grid_divisions=grid_divisions, line_thickness=line_thickness
             )
+            self._version += 1
+            return self._calibration
+
+    def update_visualization(self, payload: Any) -> ProjectorCalibration:
+        with self._lock:
+            self._calibration = self._calibration.with_visualization(payload)
             self._version += 1
             return self._calibration
