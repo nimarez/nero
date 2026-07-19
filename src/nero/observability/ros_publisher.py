@@ -443,6 +443,9 @@ class RosObservabilityPublisher:
                     "relocation_count": getattr(status, "relocation_count", None),
                     "relocation_limit": getattr(status, "relocation_limit", None),
                     "relocation_phase": getattr(status, "relocation_phase", None),
+                    "relocation_maneuver": getattr(
+                        status, "relocation_maneuver", None
+                    ),
                     "relocation_progress": getattr(status, "relocation_progress", None),
                     "relocation_distance": getattr(status, "relocation_distance", None),
                 },

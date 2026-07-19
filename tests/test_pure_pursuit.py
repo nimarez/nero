@@ -5,6 +5,7 @@ import numpy as np
 import nero.agents.pure_pursuit_agent as pursuit_agent
 from nero.agents.pure_pursuit_agent import (
     DEFAULT_HEAD_SCAN_POSES,
+    RELOCATION_MANEUVER_PATTERN,
     DirectPursuitPolicy,
     HeadScanConfig,
     PursuitState,
@@ -401,10 +402,12 @@ def test_direct_policy_relocates_then_stops_and_starts_a_new_scan(monkeypatch):
     now[0] = 0.04
     relocating = policy.step()
     assert relocating.state == PursuitState.RELOCATING
-    assert relocating.velocity_command.linear_x == 0.1
+    assert relocating.velocity_command.linear_x == 0.0
+    assert relocating.velocity_command.linear_y == 0.1
     assert relocating.velocity_command.angular_z == 0.0
+    assert relocating.relocation_maneuver == "sidestep_left"
 
-    odometry[0] = 0.5
+    odometry[1] = 0.5
     now[0] = 0.05
     rescanning = policy.step()
     assert rescanning.state == PursuitState.EXPLORING
@@ -423,7 +426,7 @@ def test_direct_policy_relocates_then_stops_and_starts_a_new_scan(monkeypatch):
     ]
 
 
-def test_direct_policy_turns_toward_clear_side_before_relocating(monkeypatch):
+def test_direct_policy_turns_around_before_relocating_forward(monkeypatch):
     now = [0.0]
     monkeypatch.setattr(pursuit_agent.time, "monotonic", lambda: now[0])
     velocities = []
@@ -472,11 +475,12 @@ def test_direct_policy_turns_toward_clear_side_before_relocating(monkeypatch):
         head_scan=HeadScanConfig(
             poses=((0.0, 0.0),), move_duration=0.01, settle_time=0.0
         ),
-        relocation=RelocationConfig(turn_angle=0.5, angular_velocity=0.2),
+        relocation=RelocationConfig(turnaround_angle=0.5, angular_velocity=0.2),
     )
     policy.start()
     policy.set_target("chair")
     policy.step()
+    policy._relocation_count = 1
     now[0] = 0.02
     assert policy.step().state == PursuitState.RELOCATING
 
@@ -485,6 +489,7 @@ def test_direct_policy_turns_toward_clear_side_before_relocating(monkeypatch):
     assert turning.state == PursuitState.RELOCATING
     assert turning.velocity_command.linear_x == 0.0
     assert turning.velocity_command.angular_z == 0.2
+    assert turning.relocation_maneuver == "turn_around_then_advance"
 
     odometry[2] = 0.5
     obstacles["center_clear"] = True
@@ -497,7 +502,32 @@ def test_direct_policy_turns_toward_clear_side_before_relocating(monkeypatch):
     advancing = policy.step()
     assert advancing.state == PursuitState.RELOCATING
     assert advancing.velocity_command.linear_x > 0.0
+    assert advancing.velocity_command.linear_y == 0.0
     assert advancing.velocity_command.angular_z == 0.0
+    assert advancing.relocation_maneuver == "advance_after_turn"
+
+
+def test_relocation_pattern_uses_both_sidestep_directions():
+    policy = DirectPursuitPolicy(
+        SimpleNamespace(),
+        object_detector=SimpleNamespace(),
+        relocation=RelocationConfig(lateral_velocity=0.09),
+    )
+
+    assert RELOCATION_MANEUVER_PATTERN == (
+        "sidestep_left",
+        "turn_around_then_advance",
+        "sidestep_right",
+    )
+    policy._relocation_maneuver = "sidestep_left"
+    left = policy._relocation_velocity_command()
+    policy._relocation_maneuver = "sidestep_right"
+    right = policy._relocation_velocity_command()
+
+    assert left.linear_x == right.linear_x == 0.0
+    assert left.linear_y == 0.09
+    assert right.linear_y == -0.09
+    assert left.angular_z == right.angular_z == 0.0
 
 
 def test_direct_policy_does_not_relocate_without_safe_depth(monkeypatch):

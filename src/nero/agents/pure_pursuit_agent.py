@@ -76,6 +76,11 @@ DEFAULT_HEAD_SCAN_POSES = (
     (0.65, -0.375),
     (0.65, -0.75),
 )
+RELOCATION_MANEUVER_PATTERN = (
+    "sidestep_left",
+    "turn_around_then_advance",
+    "sidestep_right",
+)
 _REVISION_UNSET = object()
 
 
@@ -109,8 +114,9 @@ class RelocationConfig:
 
     distance: float = 0.5
     linear_velocity: float = 0.12
+    lateral_velocity: float = 0.10
     angular_velocity: float = 0.35
-    turn_angle: float = math.pi / 3.0
+    turnaround_angle: float = math.pi
     max_relocations: int = 3
 
     def __post_init__(self) -> None:
@@ -118,10 +124,12 @@ class RelocationConfig:
             raise ValueError("relocation distance must be positive and finite")
         if not math.isfinite(self.linear_velocity) or self.linear_velocity <= 0:
             raise ValueError("relocation linear_velocity must be positive and finite")
+        if not math.isfinite(self.lateral_velocity) or self.lateral_velocity <= 0:
+            raise ValueError("relocation lateral_velocity must be positive and finite")
         if not math.isfinite(self.angular_velocity) or self.angular_velocity <= 0:
             raise ValueError("relocation angular_velocity must be positive and finite")
-        if not math.isfinite(self.turn_angle) or not 0 < self.turn_angle <= math.pi:
-            raise ValueError("relocation turn_angle must be in (0, pi]")
+        if not math.isfinite(self.turnaround_angle) or not 0 < self.turnaround_angle <= math.pi:
+            raise ValueError("relocation turnaround_angle must be in (0, pi]")
         if self.max_relocations < 0:
             raise ValueError("max_relocations must be non-negative")
 
@@ -147,6 +155,7 @@ class PursuitStatus:
     relocation_count: int = 0
     relocation_limit: int = 0
     relocation_phase: str | None = None
+    relocation_maneuver: str | None = None
     relocation_progress: float = 0.0
     relocation_distance: float = 0.0
 
@@ -199,8 +208,11 @@ class DirectPursuitPolicy:
         self._alignment_yaw = 0.0
         self._relocation_count = 0
         self._relocation_phase: str | None = None
+        self._relocation_plan: str | None = None
+        self._relocation_maneuver: str | None = None
         self._relocation_origin: np.ndarray | None = None
         self._relocation_target_yaw = 0.0
+        self._relocation_turn_complete = False
         self._relocation_progress = 0.0
         self._running = False
         self._last_obstacle_info: dict | None = None
@@ -476,6 +488,11 @@ class DirectPursuitPolicy:
             now + self.head_scan.move_duration + self.head_scan.settle_time
         )
         self._relocation_phase = "centering_head"
+        self._relocation_plan = RELOCATION_MANEUVER_PATTERN[
+            self._relocation_count % len(RELOCATION_MANEUVER_PATTERN)
+        ]
+        self._relocation_maneuver = self._relocation_plan
+        self._relocation_turn_complete = False
         self._relocation_origin = np.asarray(
             self.last_sensor.odometry[:2], dtype=float
         ).copy()
@@ -532,6 +549,8 @@ class DirectPursuitPolicy:
                 if stop_failure is not None:
                     return stop_failure
                 self._relocation_phase = "selecting_path"
+                self._relocation_turn_complete = True
+                self._relocation_maneuver = "advance_after_turn"
                 return self._status(
                     "Relocation turn complete; checking the forward path",
                     detections=detections,
@@ -542,67 +561,106 @@ class DirectPursuitPolicy:
             )
             return self._send_relocation_command(
                 command,
-                "Turning toward a clear relocation path",
+                "Turning around to explore a new heading",
                 detections,
                 safety,
             )
 
-        center_clear = bool(obstacles.get("center_clear", False))
         sensor_blind = bool(obstacles.get("sensor_blind", False))
-        path_clear = center_clear and not sensor_blind
-        if self._relocation_phase == "advancing" and not path_clear and self.safety_enforced:
+        maneuver_clear = self._maneuver_path_clear(obstacles)
+        if (
+            self._relocation_phase == "advancing"
+            and not maneuver_clear
+            and self.safety_enforced
+        ):
             stop_failure = self._stop_required(detections, safety)
             if stop_failure is not None:
                 return stop_failure
             self._relocation_phase = "selecting_path"
 
         if self._relocation_phase == "selecting_path":
-            if path_clear or not self.safety_enforced:
-                self._relocation_phase = "advancing"
-            else:
-                turn_sign = self._clear_side_turn(obstacles)
-                if turn_sign == 0.0:
-                    stop_failure = self._stop_required(detections, safety)
-                    if stop_failure is not None:
-                        return stop_failure
-                    reason = "depth is unavailable" if sensor_blind else "no clear sector"
-                    return self._status(
-                        f"Relocation blocked: {reason}",
-                        detections=detections,
-                        safety_status=safety,
-                    )
+            if (
+                self._relocation_plan == "turn_around_then_advance"
+                and not self._relocation_turn_complete
+            ):
                 self._relocation_target_yaw = self._normalize_angle(
-                    float(sensor.odometry[2]) + turn_sign * self.relocation.turn_angle
+                    float(sensor.odometry[2]) + self.relocation.turnaround_angle
                 )
                 self._relocation_phase = "turning"
+                yaw_error = self._normalize_angle(
+                    self._relocation_target_yaw - float(sensor.odometry[2])
+                )
                 command = VelocityCommand(
-                    angular_z=turn_sign * self.relocation.angular_velocity
+                    angular_z=math.copysign(self.relocation.angular_velocity, yaw_error)
                 )
                 return self._send_relocation_command(
                     command,
-                    "Turning toward a clear relocation path",
+                    "Turning around to explore a new heading",
                     detections,
                     safety,
                 )
 
-        command = VelocityCommand(linear_x=self.relocation.linear_velocity)
+            selected = self._select_translation_maneuver(obstacles)
+            if selected is None and self.safety_enforced:
+                stop_failure = self._stop_required(detections, safety)
+                if stop_failure is not None:
+                    return stop_failure
+                reason = "depth is unavailable" if sensor_blind else "no clear sector"
+                return self._status(
+                    f"Relocation blocked: {reason}",
+                    detections=detections,
+                    safety_status=safety,
+                )
+            if selected is not None:
+                self._relocation_maneuver = selected
+            self._relocation_phase = "advancing"
+
+        command = self._relocation_velocity_command()
+        maneuver_name = self._relocation_maneuver.replace("_", " ")
         return self._send_relocation_command(
             command,
-            f"Relocating to observation point {self._relocation_count + 2}",
+            f"Relocating via {maneuver_name} to observation point "
+            f"{self._relocation_count + 2}",
             detections,
             safety,
         )
 
-    def _clear_side_turn(self, obstacles: dict) -> float:
-        left_clear = bool(obstacles.get("left_clear", False))
-        right_clear = bool(obstacles.get("right_clear", False))
-        if left_clear and right_clear:
-            return 1.0 if self._relocation_count % 2 == 0 else -1.0
-        if left_clear:
-            return 1.0
-        if right_clear:
-            return -1.0
-        return 0.0
+    def _select_translation_maneuver(self, obstacles: dict) -> str | None:
+        if not self.safety_enforced:
+            if self._relocation_plan == "turn_around_then_advance":
+                return "advance_after_turn"
+            return self._relocation_plan
+
+        preferences = {
+            "sidestep_left": ("sidestep_left", "sidestep_right", "advance"),
+            "sidestep_right": ("sidestep_right", "sidestep_left", "advance"),
+            "turn_around_then_advance": (
+                "advance_after_turn",
+                "sidestep_left",
+                "sidestep_right",
+            ),
+        }
+        for maneuver in preferences[self._relocation_plan]:
+            if self._maneuver_path_clear(obstacles, maneuver=maneuver):
+                return maneuver
+        return None
+
+    def _maneuver_path_clear(self, obstacles: dict, *, maneuver: str | None = None) -> bool:
+        if bool(obstacles.get("sensor_blind", False)):
+            return False
+        maneuver = maneuver or self._relocation_maneuver
+        if maneuver == "sidestep_left":
+            return bool(obstacles.get("left_clear", False))
+        if maneuver == "sidestep_right":
+            return bool(obstacles.get("right_clear", False))
+        return bool(obstacles.get("center_clear", False))
+
+    def _relocation_velocity_command(self) -> VelocityCommand:
+        if self._relocation_maneuver == "sidestep_left":
+            return VelocityCommand(linear_y=self.relocation.lateral_velocity)
+        if self._relocation_maneuver == "sidestep_right":
+            return VelocityCommand(linear_y=-self.relocation.lateral_velocity)
+        return VelocityCommand(linear_x=self.relocation.linear_velocity)
 
     def _send_relocation_command(
         self,
@@ -637,8 +695,11 @@ class DirectPursuitPolicy:
 
     def _clear_relocation(self) -> None:
         self._relocation_phase = None
+        self._relocation_plan = None
+        self._relocation_maneuver = None
         self._relocation_origin = None
         self._relocation_target_yaw = 0.0
+        self._relocation_turn_complete = False
         self._relocation_progress = 0.0
 
     def _begin_confirmation(
@@ -936,6 +997,7 @@ class DirectPursuitPolicy:
             relocation_count=self._relocation_count,
             relocation_limit=self.relocation.max_relocations,
             relocation_phase=self._relocation_phase,
+            relocation_maneuver=self._relocation_maneuver,
             relocation_progress=self._relocation_progress,
             relocation_distance=self.relocation.distance,
         )
@@ -1002,10 +1064,22 @@ def parse_args() -> argparse.Namespace:
         help="Forward velocity in m/s while relocating between scans",
     )
     parser.add_argument(
+        "--relocation-lateral-velocity",
+        type=float,
+        default=0.10,
+        help="Side-step velocity in m/s while relocating between scans",
+    )
+    parser.add_argument(
         "--relocation-angular-velocity",
         type=float,
         default=0.35,
         help="Angular velocity in rad/s while selecting a relocation path",
+    )
+    parser.add_argument(
+        "--exploration-turn-angle",
+        type=float,
+        default=180.0,
+        help="Body turnaround angle in degrees during the exploration pattern",
     )
     parser.add_argument(
         "--max-relocations",
@@ -1036,7 +1110,11 @@ def run_agent(robot, args, *, object_detector=None, command_source=None) -> None
         relocation=RelocationConfig(
             distance=getattr(args, "relocation_distance", 0.5),
             linear_velocity=getattr(args, "relocation_velocity", 0.12),
+            lateral_velocity=getattr(args, "relocation_lateral_velocity", 0.10),
             angular_velocity=getattr(args, "relocation_angular_velocity", 0.35),
+            turnaround_angle=math.radians(
+                getattr(args, "exploration_turn_angle", 180.0)
+            ),
             max_relocations=getattr(args, "max_relocations", 3),
         ),
         safety_enforced=not getattr(args, "disable_safety", False),
