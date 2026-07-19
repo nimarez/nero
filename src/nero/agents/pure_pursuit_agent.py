@@ -66,6 +66,7 @@ class PursuitStatus:
     stand_off_tolerance: float = 0.0
     target_position_camera: list[float] | None = None
     obstacle_info: dict | None = None
+    detector_metrics: dict | None = None
 
 
 class DirectPursuitPolicy:
@@ -166,21 +167,15 @@ class DirectPursuitPolicy:
 
         if not safety.is_safe:
             self._stop_robot()
-            return self._status(
-                f"Motion blocked: {safety.reason}", safety_status=safety
-            )
+            return self._status(f"Motion blocked: {safety.reason}", safety_status=safety)
         if self.target is None:
             self.state = PursuitState.WAITING_FOR_OBJECT
             self._stop_robot()
             return self._status("Waiting for object name", safety_status=safety)
 
-        detections = self.detector.detect(
-            sensor.rgb, sensor.depth, sensor.camera_info
-        )
+        detections = self.detector.detect(sensor.rgb, sensor.depth, sensor.camera_info)
         revision = getattr(self.detector, "result_revision", None)
-        new_detection_result = (
-            revision is None or revision != self._last_detection_revision
-        )
+        new_detection_result = revision is None or revision != self._last_detection_revision
         if new_detection_result:
             self._last_detection_revision = revision
         target = self.detector.find_object(detections, self.target)
@@ -244,11 +239,7 @@ class DirectPursuitPolicy:
         if now - reference > timeout:
             return self._target_lost(detections, safety)
         self.state = PursuitState.DETECTING
-        angular = (
-            self.search_angular_velocity
-            if not obstacles.get("has_obstacle", True)
-            else 0.0
-        )
+        angular = self.search_angular_velocity if not obstacles.get("has_obstacle", True) else 0.0
         command = VelocityCommand(angular_z=angular)
         try:
             send_velocity(self.robot, command)
@@ -314,6 +305,7 @@ class DirectPursuitPolicy:
         safety_status: SafetyStatus | None = None,
         target_position=None,
     ) -> PursuitStatus:
+        telemetry = getattr(self.detector, "telemetry", None)
         return PursuitStatus(
             state=self.state,
             message=message,
@@ -324,18 +316,15 @@ class DirectPursuitPolicy:
             stand_off_distance=self.stand_off if self.target is not None else None,
             stand_off_tolerance=self.controller.config.position_tolerance,
             target_position_camera=(
-                None
-                if target_position is None
-                else [float(value) for value in target_position]
+                None if target_position is None else [float(value) for value in target_position]
             ),
             obstacle_info=self._last_obstacle_info,
+            detector_metrics=telemetry() if callable(telemetry) else None,
         )
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Nero direct RGB-D pure-pursuit object agent"
-    )
+    parser = argparse.ArgumentParser(description="Nero direct RGB-D pure-pursuit object agent")
     parser.add_argument("--no-display", action="store_true")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument(

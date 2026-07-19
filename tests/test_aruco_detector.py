@@ -35,6 +35,11 @@ def test_aruco_detector_projects_mapped_marker_with_live_depth_and_intrinsics():
     np.testing.assert_allclose(detection.position_3d, [0.0, 0.0, 2.0], atol=0.03)
     assert detection.distance == pytest.approx(2.0, abs=0.03)
     assert detector.find_object(detections, "GREEN CUP") is detection
+    telemetry = detector.telemetry()
+    assert telemetry["backend"] == "aruco"
+    assert telemetry["target"] == "green cup"
+    assert telemetry["inference_ms_ema"] >= 0.0
+    assert telemetry["result_age_seconds"] >= 0.0
 
 
 def test_aruco_mapping_file_and_agent_backend_selection(tmp_path, monkeypatch):

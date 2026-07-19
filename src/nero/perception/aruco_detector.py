@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -75,6 +76,9 @@ class ArucoObjectDetector:
         self.depth_threshold_max = depth_threshold_max
         self._target_name: str | None = None
         self._detector = None
+        self._inference_count = 0
+        self._inference_seconds_ema: float | None = None
+        self._last_result_monotonic: float | None = None
 
     def initialize(self) -> bool:
         if not self._marker_map:
@@ -85,9 +89,7 @@ class ArucoObjectDetector:
             logger.error("Unknown OpenCV ArUco dictionary: %s", self.dictionary_name)
             return False
         dictionary = cv2.aruco.getPredefinedDictionary(dictionary_id)
-        self._detector = cv2.aruco.ArucoDetector(
-            dictionary, cv2.aruco.DetectorParameters()
-        )
+        self._detector = cv2.aruco.ArucoDetector(dictionary, cv2.aruco.DetectorParameters())
         logger.info(
             "ArUco detector initialized (%s, %d mapped markers)",
             self.dictionary_name,
@@ -102,6 +104,21 @@ class ArucoObjectDetector:
     @property
     def result_revision(self) -> None:
         return None
+
+    def telemetry(self) -> dict[str, Any]:
+        elapsed = self._inference_seconds_ema
+        return {
+            "backend": self.backend,
+            "target": self._target_name,
+            "inference_ms_ema": None if elapsed is None else elapsed * 1000.0,
+            "inference_fps": None if not elapsed else 1.0 / elapsed,
+            "result_revision": self._inference_count,
+            "result_age_seconds": (
+                None
+                if self._last_result_monotonic is None
+                else max(0.0, time.monotonic() - self._last_result_monotonic)
+            ),
+        }
 
     def resolve_target(self, object_name: str) -> str | None:
         normalized = _normalize_name(object_name)
@@ -127,7 +144,16 @@ class ArucoObjectDetector:
             raise RuntimeError("ArUco detector is not initialized")
         image = np.asarray(rgb)
         gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY) if image.ndim == 3 else image
+        started = time.perf_counter()
         corners, ids, _ = self._detector.detectMarkers(gray)
+        elapsed = time.perf_counter() - started
+        self._inference_count += 1
+        self._inference_seconds_ema = (
+            elapsed
+            if self._inference_seconds_ema is None
+            else 0.2 * elapsed + 0.8 * self._inference_seconds_ema
+        )
+        self._last_result_monotonic = time.monotonic()
         if ids is None:
             return []
         height, width = gray.shape[:2]

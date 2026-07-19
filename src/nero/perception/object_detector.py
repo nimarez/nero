@@ -12,7 +12,7 @@ import time
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import cv2
 import numpy as np
@@ -75,7 +75,9 @@ def _parse_cpu_list(value: str) -> set[int]:
     return cpus
 
 
-def configure_qualcomm_cpu_partition(backend: str | None = None) -> tuple[set[int], set[int]] | None:
+def configure_qualcomm_cpu_partition(
+    backend: str | None = None,
+) -> tuple[set[int], set[int]] | None:
     """Reserve the fastest two K1 CPUs for the isolated detector process."""
     if os.getenv("NERO_CPU_PARTITION", "1") == "0":
         return None
@@ -89,9 +91,7 @@ def configure_qualcomm_cpu_partition(backend: str | None = None) -> tuple[set[in
         )
         return None
     if os.getenv("NERO_DETECTOR_PROCESS", "1") == "0":
-        logger.info(
-            "CPU partition disabled because detector process isolation is disabled"
-        )
+        logger.info("CPU partition disabled because detector process isolation is disabled")
         return None
     if not (
         platform.system() == "Linux"
@@ -122,9 +122,7 @@ def configure_qualcomm_cpu_partition(backend: str | None = None) -> tuple[set[in
     navigation = allowed - detector
     if len(navigation) < 2:
         return None
-    os.environ.setdefault(
-        "NERO_DETECTOR_CPUS", ",".join(str(cpu) for cpu in sorted(detector))
-    )
+    os.environ.setdefault("NERO_DETECTOR_CPUS", ",".join(str(cpu) for cpu in sorted(detector)))
     os.sched_setaffinity(0, navigation)
     logger.info(
         "QCS8550 CPU partition: navigation=%s detector=%s",
@@ -228,11 +226,7 @@ def _prompt_worker_detect(
         class_ids = boxes.cls.detach().cpu().numpy().astype(int)
         names = getattr(result, "names", {})
         for bounds, score, class_id in zip(xyxy, scores, class_ids):
-            label = (
-                names.get(class_id, target_name)
-                if hasattr(names, "get")
-                else names[class_id]
-            )
+            label = names.get(class_id, target_name) if hasattr(names, "get") else names[class_id]
             detections.append(
                 (
                     str(label),
@@ -241,6 +235,7 @@ def _prompt_worker_detect(
                 )
             )
     return detections, elapsed
+
 
 _FIXED_VOCAB_ALIASES = {
     "cellphone": "cell phone",
@@ -367,26 +362,18 @@ class ObjectDetector:
         self.backend = self._normalize_backend(configured_backend)
         self.model_path = Path(configured_model or _DEFAULT_MODELS[self.backend])
         self.text_model_path = (
-            Path(
-                text_model_path
-                or os.getenv("NERO_YOLOE_TEXT_MODEL", "config/mobileclip2_b.ts")
-            )
+            Path(text_model_path or os.getenv("NERO_YOLOE_TEXT_MODEL", "config/mobileclip2_b.ts"))
             if self.backend == "yoloe"
             else None
         )
-        if (
-            self.text_model_path is not None
-            and self.text_model_path.name != "mobileclip2_b.ts"
-        ):
+        if self.text_model_path is not None and self.text_model_path.name != "mobileclip2_b.ts":
             raise ValueError("YOLOE text model must be named mobileclip2_b.ts")
         self.inference_size = int(
             inference_size
             if inference_size is not None
             else os.getenv(
                 "NERO_OBJECT_IMGSZ",
-                os.getenv(
-                    "NERO_YOLO_IMGSZ", str(_DEFAULT_INFERENCE_SIZES[self.backend])
-                ),
+                os.getenv("NERO_YOLO_IMGSZ", str(_DEFAULT_INFERENCE_SIZES[self.backend])),
             )
         )
         if self.inference_size < 256 or self.inference_size % 32:
@@ -402,14 +389,13 @@ class ObjectDetector:
             raise ValueError("YOLO max detections must be positive")
         self._inference_count = 0
         self._inference_seconds_ema: float | None = None
+        self._last_result_monotonic: float | None = None
         process_default = (
             os.name == "posix"
             and platform.system() == "Linux"
             and platform.machine().lower() in {"aarch64", "arm64"}
         )
-        process_setting = os.getenv(
-            "NERO_DETECTOR_PROCESS", "1" if process_default else "0"
-        )
+        process_setting = os.getenv("NERO_DETECTOR_PROCESS", "1" if process_default else "0")
         if process_setting not in {"0", "1"}:
             raise ValueError("NERO_DETECTOR_PROCESS must be 0 or 1")
         self._use_prompt_process = process_setting == "1" and self.backend not in {
@@ -529,9 +515,7 @@ class ObjectDetector:
                 max_workers=1, thread_name_prefix=f"nero-{self.backend}"
             )
             self._initialized = True
-            logger.info(
-                "Ultralytics %s initialized from %s", self.backend, self.model_path
-            )
+            logger.info("Ultralytics %s initialized from %s", self.backend, self.model_path)
             return True
         try:
             self._net = cv2.dnn.readNetFromONNX(str(self.model_path))
@@ -582,9 +566,7 @@ class ObjectDetector:
 
             verified_model = verify_qnn_artifact(self.model_path.parent)
             if verified_model.resolve() != self.model_path.resolve():
-                raise RuntimeError(
-                    f"manifest selected {verified_model}, not {self.model_path}"
-                )
+                raise RuntimeError(f"manifest selected {verified_model}, not {self.model_path}")
             self._qnn_runtime = QNNYoloWorldRuntime(
                 self.model_path, inference_size=self.inference_size
             )
@@ -597,9 +579,7 @@ class ObjectDetector:
             self._prompt_encoder = None
             self._target_embedding = None
             return False
-        self._executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="nero-yolo-world-qnn"
-        )
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nero-yolo-world-qnn")
         self._initialized = True
         logger.info(
             "QNN YOLO-World initialized from %s (providers=%s)",
@@ -650,8 +630,7 @@ class ObjectDetector:
         self._prompt_process = True
         self._initialized = True
         logger.info(
-            "Ultralytics %s initialized in an isolated process from %s "
-            "(threads=%d, cpus=%s)",
+            "Ultralytics %s initialized in an isolated process from %s (threads=%d, cpus=%s)",
             self.backend,
             self.model_path,
             threads,
@@ -691,6 +670,27 @@ class ObjectDetector:
             return self._result_revision
         return None
 
+    def telemetry(self) -> dict[str, Any]:
+        """Return compact, lock-safe detector health for live observability."""
+        with self._result_lock:
+            elapsed = self._inference_seconds_ema
+            age = (
+                None
+                if self._last_result_monotonic is None
+                else max(0.0, time.monotonic() - self._last_result_monotonic)
+            )
+            return {
+                "backend": self.backend,
+                "target": self._target_name,
+                "inference_ms_ema": None if elapsed is None else elapsed * 1000.0,
+                "inference_fps": None if not elapsed else 1.0 / elapsed,
+                "result_revision": self._result_revision,
+                "result_age_seconds": age,
+                "confidence_threshold": self.confidence_threshold,
+                "inference_size": self.inference_size,
+                "max_detections": self.max_detections,
+            }
+
     def set_target(self, object_name: str) -> None:
         """Set an open-vocabulary prompt or select a fixed detector class."""
         normalized = " ".join(object_name.split()).strip()
@@ -698,18 +698,16 @@ class ObjectDetector:
             raise ValueError("object target must not be empty")
         resolved = self.resolve_target(normalized)
         if resolved is None:
-            raise ValueError(
-                f"{object_name!r} is not supported by the {self.backend} detector"
-            )
+            raise ValueError(f"{object_name!r} is not supported by the {self.backend} detector")
         if self._prompt_process:
             if self._future is not None:
                 self._future.result()
                 self._future = None
             if self._executor is None:
                 raise RuntimeError("open-vocabulary worker is not initialized")
-            acknowledged = self._executor.submit(
-                _prompt_worker_set_target, resolved
-            ).result(timeout=60.0)
+            acknowledged = self._executor.submit(_prompt_worker_set_target, resolved).result(
+                timeout=60.0
+            )
             if acknowledged != resolved:
                 raise RuntimeError("open-vocabulary worker rejected the target")
             with self._result_lock:
@@ -804,6 +802,7 @@ class ObjectDetector:
             with self._result_lock:
                 self._latest_detections = completed
                 self._result_revision += 1
+                self._last_result_monotonic = time.monotonic()
             self._future = None
             self._future_depth = None
             self._future_camera_matrix = None
@@ -829,18 +828,14 @@ class ObjectDetector:
                     self._target_name,
                 )
             else:
-                depth_copy = (
-                    None if depth is None else np.array(depth, copy=True, order="C")
-                )
+                depth_copy = None if depth is None else np.array(depth, copy=True, order="C")
                 if self._qnn_runtime:
                     detector = self._detect_qnn
                 elif self._modal_client:
                     detector = self._detect_modal
                 else:
                     detector = self._detect_prompt
-                self._future = self._executor.submit(
-                    detector, rgb_copy, depth_copy, camera_info
-                )
+                self._future = self._executor.submit(detector, rgb_copy, depth_copy, camera_info)
         with self._result_lock:
             return list(self._latest_detections)
 
@@ -850,8 +845,7 @@ class ObjectDetector:
         self._inference_seconds_ema = (
             elapsed
             if self._inference_seconds_ema is None
-            else smoothing * elapsed
-            + (1.0 - smoothing) * self._inference_seconds_ema
+            else smoothing * elapsed + (1.0 - smoothing) * self._inference_seconds_ema
         )
         if self._inference_count == 1 or self._inference_count % 20 == 0:
             logger.info(
@@ -872,9 +866,7 @@ class ObjectDetector:
         projected = []
         for label, score, bbox in detections:
             position = (
-                self._compute_3d_position(bbox, depth, camera_matrix)
-                if depth is not None
-                else None
+                self._compute_3d_position(bbox, depth, camera_matrix) if depth is not None else None
             )
             projected.append(
                 ObjectDetection(
@@ -882,9 +874,7 @@ class ObjectDetector:
                     confidence=score,
                     bbox=bbox,
                     position_3d=position,
-                    distance=(
-                        float(np.linalg.norm(position)) if position is not None else 0.0
-                    ),
+                    distance=(float(np.linalg.norm(position)) if position is not None else 0.0),
                 )
             )
         return projected
@@ -916,9 +906,7 @@ class ObjectDetector:
             )
         ]
         camera_matrix = (
-            None
-            if camera_info is None
-            else np.asarray(camera_info.k, dtype=float).reshape(3, 3)
+            None if camera_info is None else np.asarray(camera_info.k, dtype=float).reshape(3, 3)
         )
         return self._project_worker_detections(raw, depth, camera_matrix)
 
@@ -946,14 +934,9 @@ class ObjectDetector:
             elapsed * 1000.0,
             server_elapsed * 1000.0,
         )
-        raw = [
-            (detection.label, detection.confidence, detection.bbox)
-            for detection in detections
-        ]
+        raw = [(detection.label, detection.confidence, detection.bbox) for detection in detections]
         camera_matrix = (
-            None
-            if camera_info is None
-            else np.asarray(camera_info.k, dtype=float).reshape(3, 3)
+            None if camera_info is None else np.asarray(camera_info.k, dtype=float).reshape(3, 3)
         )
         return self._project_worker_detections(raw, depth, camera_matrix)
 
@@ -1018,11 +1001,7 @@ class ObjectDetector:
                         confidence=float(score),
                         bbox=bbox,
                         position_3d=position,
-                        distance=(
-                            float(np.linalg.norm(position))
-                            if position is not None
-                            else 0.0
-                        ),
+                        distance=(float(np.linalg.norm(position)) if position is not None else 0.0),
                     )
                 )
         return detections
@@ -1057,11 +1036,12 @@ class ObjectDetector:
         canvas = np.full((size, size, 3), 114, dtype=np.uint8)
         pad_x, pad_y = (size - resized_w) // 2, (size - resized_h) // 2
         canvas[pad_y : pad_y + resized_h, pad_x : pad_x + resized_w] = resized
-        blob = cv2.dnn.blobFromImage(
-            canvas, 1.0 / 255.0, (size, size), swapRB=True, crop=False
-        )
+        blob = cv2.dnn.blobFromImage(canvas, 1.0 / 255.0, (size, size), swapRB=True, crop=False)
         self._net.setInput(blob)
+        started = time.perf_counter()
         output = np.asarray(self._net.forward()).squeeze()
+        self._record_prompt_inference(time.perf_counter() - started)
+        self._last_result_monotonic = time.monotonic()
         if output.ndim == 1 and output.size == 4 + len(COCO80):
             output = output.reshape(4 + len(COCO80), 1)
         if output.ndim != 2:
@@ -1097,9 +1077,7 @@ class ObjectDetector:
             x, y, w, h = boxes[int(index)]
             bbox = (x, y, x + w, y + h)
             position = (
-                self._compute_3d_position(bbox, depth, camera_info)
-                if depth is not None
-                else None
+                self._compute_3d_position(bbox, depth, camera_info) if depth is not None else None
             )
             detections.append(
                 ObjectDetection(
@@ -1107,9 +1085,7 @@ class ObjectDetector:
                     confidence=scores[int(index)],
                     bbox=bbox,
                     position_3d=position,
-                    distance=(
-                        float(np.linalg.norm(position)) if position is not None else 0.0
-                    ),
+                    distance=(float(np.linalg.norm(position)) if position is not None else 0.0),
                 )
             )
         return detections

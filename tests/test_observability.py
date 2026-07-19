@@ -9,13 +9,17 @@ from nero.observability.rerun_bridge import (
     image_message_to_array,
     main as rerun_main,
     navigation_geometry_primitives,
+    occupancy_grid_points,
     pointcloud2_to_xyz,
+    predicted_swept_clearance,
 )
 from nero.observability.ros_publisher import (
     RosObservabilityPublisher,
     _point_cloud_xyz,
     _seconds_to_stamp,
+    inflated_occupancy_data,
     navigation_geometry_payload,
+    obstacle_mask_and_points,
     safety_payload,
 )
 from nero.observability.topics import ObservabilityTopics
@@ -283,6 +287,53 @@ def test_point_cloud_round_trip():
     np.testing.assert_allclose(restored, points)
 
 
+def test_obstacle_mask_is_expanded_and_back_projected_from_live_depth():
+    depth = np.full((4, 4), 1000, dtype=np.uint16)
+    mask, points = obstacle_mask_and_points(
+        depth,
+        np.array([[2.0, 0.0, 1.5], [0.0, 2.0, 1.5], [0.0, 0.0, 1.0]]),
+        {"obstacle_mask": np.array([[False, True, False, False]])},
+        stride=1,
+    )
+    assert mask.shape == depth.shape
+    assert mask[3, 1] == 1
+    np.testing.assert_allclose(points, [[-0.25, 0.75, 1.0]])
+
+
+def test_inflated_occupancy_grid_and_rerun_cell_centers_agree():
+    grid = SimpleNamespace(
+        data=np.array([[0, 0, 0], [0, 100, 0], [0, 0, 0]], dtype=np.int8),
+        resolution=0.5,
+        origin=(1.0, 2.0),
+        width=3,
+        height=3,
+    )
+    values = inflated_occupancy_data(grid, 0.5)
+    message = SimpleNamespace(
+        data=values,
+        info=SimpleNamespace(
+            width=3,
+            height=3,
+            resolution=0.5,
+            origin=SimpleNamespace(position=SimpleNamespace(x=1.0, y=2.0)),
+        ),
+    )
+    groups = occupancy_grid_points(message)
+    assert len(groups["occupied"]) == 1
+    assert len(groups["inflated"]) == 4
+    np.testing.assert_allclose(groups["occupied"][0], [1.75, 2.75, 0.015])
+
+
+def test_predicted_swept_clearance_curves_with_commanded_yaw():
+    centers, rings = predicted_swept_clearance(0.3, 0.0, 0.5, 0.25)
+    assert centers.shape == (21, 3)
+    assert len(rings) >= 2
+    assert centers[-1, 0] > 0.4
+    assert centers[-1, 1] > 0.1
+    radii = np.linalg.norm(rings[-1][:, :2] - centers[-1, :2], axis=1)
+    np.testing.assert_allclose(radii, 0.25)
+
+
 def test_ros_bgr_image_becomes_rerun_rgb():
     bgr = np.array([[[10, 20, 30], [40, 50, 60]]], dtype=np.uint8)
     message = SimpleNamespace(
@@ -314,9 +365,7 @@ def test_detection_telemetry_uses_firmware_safe_json():
     published = []
     publisher = RosObservabilityPublisher.__new__(RosObservabilityPublisher)
     publisher._types = {"String": lambda: SimpleNamespace(data="")}
-    publisher._publishers = {
-        "detections": SimpleNamespace(publish=published.append)
-    }
+    publisher._publishers = {"detections": SimpleNamespace(publish=published.append)}
     detection = SimpleNamespace(
         label="unusual brass umbrella stand",
         confidence=0.87,

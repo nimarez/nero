@@ -27,7 +27,11 @@ def create_default_blueprint(rrb: Any) -> Any:
         rrb.Grid(
             rrb.Spatial2DView(
                 origin=camera,
-                contents=[f"{camera}/rgb", f"{camera}/rgb/detections"],
+                contents=[
+                    f"{camera}/rgb",
+                    f"{camera}/rgb/detections",
+                    f"{camera}/rgb/obstacles",
+                ],
                 name="K1 RGB",
             ),
             rrb.Spatial2DView(
@@ -93,9 +97,7 @@ def _timestamp_ns(message: Any) -> int:
     return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
 
 
-def navigation_geometry_primitives(
-    payload: Any, *, segments: int = 64
-) -> dict[str, Any] | None:
+def navigation_geometry_primitives(payload: Any, *, segments: int = 64) -> dict[str, Any] | None:
     """Build frame-correct circle, bearing, and stand-off waypoint geometry."""
     if not isinstance(payload, dict) or segments < 8:
         return None
@@ -129,11 +131,7 @@ def navigation_geometry_primitives(
         distance = float(np.linalg.norm((center - robot)[:2]))
         approach = payload.get("approach")
         try:
-            approach = (
-                None
-                if approach is None
-                else np.asarray(approach, dtype=float).reshape(3)
-            )
+            approach = None if approach is None else np.asarray(approach, dtype=float).reshape(3)
         except (TypeError, ValueError):
             approach = None
         if approach is not None:
@@ -169,7 +167,81 @@ def navigation_geometry_primitives(
         "condition": condition,
         "distance": distance,
         "radius": radius,
+        "frame": frame,
+        "target": payload.get("target"),
+        "waypoint": payload.get("waypoint"),
     }
+
+
+def predicted_swept_clearance(
+    linear_x: float,
+    linear_y: float,
+    angular_z: float,
+    clearance_radius: float,
+    *,
+    horizon: float = 2.0,
+    steps: int = 20,
+    circle_segments: int = 32,
+) -> tuple[np.ndarray, list[np.ndarray]]:
+    """Integrate a planar body command and return its swept clearance rings."""
+    if steps < 1 or circle_segments < 8 or horizon <= 0 or clearance_radius <= 0:
+        raise ValueError("swept-clearance dimensions must be positive")
+    dt = horizon / steps
+    pose = np.zeros(3, dtype=float)
+    centers = [pose[:2].copy()]
+    for _ in range(steps):
+        cosine, sine = np.cos(pose[2]), np.sin(pose[2])
+        pose[0] += (cosine * linear_x - sine * linear_y) * dt
+        pose[1] += (sine * linear_x + cosine * linear_y) * dt
+        pose[2] += angular_z * dt
+        centers.append(pose[:2].copy())
+    centers_3d = np.column_stack((np.asarray(centers), np.full(len(centers), 0.03)))
+    angles = np.linspace(0.0, 2.0 * np.pi, circle_segments + 1)
+    rings = []
+    for center in centers_3d[:: max(1, steps // 6)]:
+        rings.append(
+            np.column_stack(
+                (
+                    center[0] + clearance_radius * np.cos(angles),
+                    center[1] + clearance_radius * np.sin(angles),
+                    np.full_like(angles, center[2]),
+                )
+            )
+        )
+    if not np.array_equal(rings[-1][0, :2], centers_3d[-1, :2] + [clearance_radius, 0]):
+        center = centers_3d[-1]
+        rings.append(
+            np.column_stack(
+                (
+                    center[0] + clearance_radius * np.cos(angles),
+                    center[1] + clearance_radius * np.sin(angles),
+                    np.full_like(angles, center[2]),
+                )
+            )
+        )
+    return centers_3d, rings
+
+
+def occupancy_grid_points(message: Any) -> dict[str, np.ndarray]:
+    """Convert ROS occupancy values into world-frame cell-center point sets."""
+    width, height = int(message.info.width), int(message.info.height)
+    values = np.asarray(message.data, dtype=np.int16).reshape(height, width)
+    origin = message.info.origin.position
+    resolution = float(message.info.resolution)
+    result = {}
+    for name, selected in (
+        ("occupied", values >= 100),
+        ("inflated", (values > 0) & (values < 100)),
+    ):
+        ys, xs = np.where(selected)
+        result[name] = np.column_stack(
+            (
+                float(origin.x) + (xs + 0.5) * resolution,
+                float(origin.y) + (ys + 0.5) * resolution,
+                np.full(len(xs), 0.015),
+            )
+        )
+    return result
 
 
 class RerunRosBridge:
@@ -183,7 +255,7 @@ class RerunRosBridge:
         import rerun as rr
         import rclpy
         from geometry_msgs.msg import PointStamped, PoseStamped, Twist
-        from nav_msgs.msg import Odometry, Path as RosPath
+        from nav_msgs.msg import OccupancyGrid, Odometry, Path as RosPath
         from sensor_msgs.msg import CameraInfo, Image, Imu, JointState, PointCloud2
         from std_msgs.msg import String
 
@@ -213,6 +285,14 @@ class RerunRosBridge:
             (RosPath, self._topics.reference_path, self._on_reference_path, 1),
             (PointCloud2, self._topics.reference_map, self._on_reference_map, sensor_qos),
             (String, self._topics.detections, self._on_detections, sensor_qos),
+            (Image, self._topics.obstacle_mask, self._on_obstacle_mask, sensor_qos),
+            (
+                PointCloud2,
+                self._topics.obstacle_points,
+                self._on_obstacle_points,
+                sensor_qos,
+            ),
+            (OccupancyGrid, self._topics.occupancy_grid, self._on_occupancy_grid, 1),
         ]
         self._subscription_topics = tuple(spec[1] for spec in specs)
         expected_topics = set(vars(self._topics).values())
@@ -233,6 +313,9 @@ class RerunRosBridge:
             rr.Transform3D(translation=transform[:3, 3], quaternion=mount_rotation),
             static=True,
         )
+        self._target_history: list[np.ndarray] = []
+        self._target_history_key: tuple[str, str | None] | None = None
+        self._safety_clearance_radius = 0.25
 
     @property
     def node(self) -> Any:
@@ -260,6 +343,30 @@ class RerunRosBridge:
         depth = image_message_to_array(message)
         meter = 1000.0 if depth.dtype == np.uint16 else 1.0
         self._recording.log("world/robot/camera/depth", self._rr.DepthImage(depth, meter=meter))
+
+    def _on_obstacle_mask(self, message: Any) -> None:
+        self._time(message)
+        self._recording.log(
+            "world/robot/camera/rgb/obstacles",
+            self._rr.SegmentationImage(image_message_to_array(message)),
+        )
+
+    def _on_obstacle_points(self, message: Any) -> None:
+        self._time(message)
+        self._recording.log(
+            "world/robot/camera/obstacles",
+            self._rr.Points3D(pointcloud2_to_xyz(message), colors=[255, 80, 40], radii=0.012),
+        )
+
+    def _on_occupancy_grid(self, message: Any) -> None:
+        self._time(message)
+        groups = occupancy_grid_points(message)
+        radius = max(0.005, float(message.info.resolution) * 0.45)
+        for name, color in (("occupied", [30, 30, 30]), ("inflated", [255, 140, 20])):
+            self._recording.log(
+                f"world/navigation/map/{name}",
+                self._rr.Points3D(groups[name], colors=color, radii=radius),
+            )
 
     def _on_camera_info(self, message: Any) -> None:
         self._time(message)
@@ -440,6 +547,7 @@ class RerunRosBridge:
             data.get("navigation_geometry") if isinstance(data, dict) else None
         )
         self._log_safety(data.get("safety") if isinstance(data, dict) else None)
+        self._log_detector(data.get("detector") if isinstance(data, dict) else None)
 
     def _log_navigation_geometry(self, payload: Any) -> None:
         world_root = "world/navigation/safety_geometry"
@@ -453,15 +561,11 @@ class RerunRosBridge:
         color = geometry["color"]
         self._recording.log(
             f"{root}/radius",
-            self._rr.LineStrips3D(
-                [geometry["circle"]], colors=color, radii=0.015
-            ),
+            self._rr.LineStrips3D([geometry["circle"]], colors=color, radii=0.015),
         )
         self._recording.log(
             f"{root}/target_bearing",
-            self._rr.LineStrips3D(
-                [geometry["bearing"]], colors=[255, 210, 40], radii=0.01
-            ),
+            self._rr.LineStrips3D([geometry["bearing"]], colors=[255, 210, 40], radii=0.01),
         )
         if geometry["approach"] is not None:
             self._recording.log(
@@ -472,6 +576,33 @@ class RerunRosBridge:
                     radii=0.07,
                     labels=[geometry["condition"]],
                 ),
+            )
+        waypoint = geometry.get("waypoint")
+        if waypoint is not None:
+            try:
+                waypoint = np.asarray(waypoint, dtype=float).reshape(3)
+            except (TypeError, ValueError):
+                waypoint = None
+        if waypoint is not None and np.all(np.isfinite(waypoint)):
+            self._recording.log(
+                f"{root}/active_planner_waypoint",
+                self._rr.Points3D(
+                    [waypoint], colors=[190, 90, 255], radii=0.08, labels=["active waypoint"]
+                ),
+            )
+        history_key = (geometry["frame"], geometry.get("target"))
+        if history_key != getattr(self, "_target_history_key", None):
+            self._target_history = []
+            self._target_history_key = history_key
+            self._recording.log(f"{root}/target_history", self._rr.Clear(recursive=False))
+        center = np.asarray(payload["center"], dtype=float)
+        if not self._target_history or np.linalg.norm(center - self._target_history[-1]) > 0.01:
+            self._target_history.append(center)
+            self._target_history = self._target_history[-100:]
+        if len(self._target_history) >= 2:
+            self._recording.log(
+                f"{root}/target_history",
+                self._rr.LineStrips3D([self._target_history], colors=[255, 80, 180], radii=0.008),
             )
         self._recording.log(
             "metrics/navigation/target_range",
@@ -506,6 +637,7 @@ class RerunRosBridge:
             limit = 0.25
         if not np.isfinite(limit) or limit <= 0:
             limit = 0.25
+        self._safety_clearance_radius = limit
         angles = np.linspace(0.0, 2.0 * np.pi, 65)
         ring = np.column_stack(
             (
@@ -515,11 +647,7 @@ class RerunRosBridge:
             )
         )
         clearance = payload.get("obstacle_distance")
-        clearance_text = (
-            "unknown"
-            if clearance is None
-            else f"{float(clearance):.2f}m"
-        )
+        clearance_text = "unknown" if clearance is None else f"{float(clearance):.2f}m"
         label = f"{condition} | clearance {clearance_text}"
         if reason:
             label += f" | {reason}"
@@ -557,9 +685,7 @@ class RerunRosBridge:
             "obstacle_distance_m": payload.get("obstacle_distance"),
             "battery_percent": payload.get("battery_percent"),
             "roll_degrees": (
-                None
-                if payload.get("roll_rad") is None
-                else np.degrees(float(payload["roll_rad"]))
+                None if payload.get("roll_rad") is None else np.degrees(float(payload["roll_rad"]))
             ),
             "pitch_degrees": (
                 None
@@ -572,6 +698,24 @@ class RerunRosBridge:
                 scalar_values[name] = float(value)
         for name, value in scalar_values.items():
             self._recording.log(f"metrics/safety/{name}", self._rr.Scalar(value))
+
+    def _log_detector(self, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            return
+        for name in (
+            "inference_ms_ema",
+            "inference_fps",
+            "result_age_seconds",
+            "result_revision",
+            "confidence_threshold",
+        ):
+            value = payload.get(name)
+            if value is not None and np.isfinite(float(value)):
+                self._recording.log(f"metrics/detector/{name}", self._rr.Scalar(float(value)))
+        summary = f"{payload.get('backend', 'unknown')} | target={payload.get('target') or 'none'}"
+        if summary != getattr(self, "_last_detector_text", None):
+            self._recording.log("status/detector", self._rr.TextLog(summary))
+            self._last_detector_text = summary
 
     def _on_tracking(self, message: Any) -> None:
         self._receipt_time()
@@ -622,10 +766,22 @@ class RerunRosBridge:
             )
             self._recording.log(
                 f"{root}/yaw_2s",
-                self._rr.LineStrips3D(
-                    [arc], colors=[255, 170, 40], radii=0.012
-                ),
+                self._rr.LineStrips3D([arc], colors=[255, 170, 40], radii=0.012),
             )
+        centers, rings = predicted_swept_clearance(
+            float(message.linear.x),
+            float(message.linear.y),
+            yaw_rate,
+            float(getattr(self, "_safety_clearance_radius", 0.25)),
+        )
+        self._recording.log(
+            f"{root}/swept_centerline",
+            self._rr.LineStrips3D([centers], colors=[80, 220, 255], radii=0.008),
+        )
+        self._recording.log(
+            f"{root}/swept_clearance",
+            self._rr.LineStrips3D(rings, colors=[255, 190, 40], radii=0.006),
+        )
 
 
 def parse_args() -> argparse.Namespace:

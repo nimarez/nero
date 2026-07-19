@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 
+import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation
 
@@ -57,7 +59,13 @@ def navigation_geometry_payload(status: Any) -> dict[str, Any] | None:
                 "radius": float(radius),
                 "tolerance": 0.12,
                 "state": state,
+                "target": getattr(goal, "object_name", None),
             }
+            waypoint = getattr(status, "active_waypoint", None)
+            if waypoint is not None:
+                values = np.asarray(waypoint, dtype=float).reshape(-1)
+                if values.size >= 2 and np.all(np.isfinite(values[:2])):
+                    payload["waypoint"] = [float(values[0]), float(values[1]), 0.03]
             if approach is not None:
                 values = np.asarray(approach, dtype=float).reshape(-1)
                 if values.size >= 2 and np.all(np.isfinite(values[:2])):
@@ -89,8 +97,68 @@ def navigation_geometry_payload(status: Any) -> dict[str, Any] | None:
         "radius": float(radius),
         "tolerance": float(getattr(status, "stand_off_tolerance", 0.12)),
         "state": state,
+        "target": getattr(status, "target", None),
         "robot": [0.0, 0.0, 0.0],
     }
+
+
+def obstacle_mask_and_points(
+    depth: np.ndarray | None,
+    camera_matrix: np.ndarray | None,
+    obstacle_info: dict[str, Any] | None,
+    *,
+    stride: int = 4,
+    max_points: int = 5_000,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Expand the controller mask and back-project its valid depth pixels."""
+    if depth is None:
+        return np.empty((0, 0), dtype=np.uint8), np.empty((0, 3), dtype=np.float32)
+    values = np.asarray(depth)
+    full_mask = np.zeros(values.shape[:2], dtype=np.uint8)
+    region = None if not obstacle_info else obstacle_info.get("obstacle_mask")
+    if region is not None:
+        region = np.asarray(region, dtype=bool)
+        height = min(full_mask.shape[0], region.shape[0])
+        width = min(full_mask.shape[1], region.shape[1])
+        full_mask[-height:, :width] = region[-height:, :width]
+    if camera_matrix is None or not np.any(full_mask):
+        return full_mask, np.empty((0, 3), dtype=np.float32)
+    depth_m = values.astype(np.float32)
+    if values.dtype == np.uint16:
+        depth_m /= 1000.0
+    sampled = full_mask.astype(bool)
+    lattice = np.zeros_like(sampled)
+    lattice[:: max(1, stride), :: max(1, stride)] = True
+    valid = sampled & lattice & np.isfinite(depth_m) & (depth_m > 0)
+    ys, xs = np.where(valid)
+    if len(xs) > max_points:
+        indices = np.linspace(0, len(xs) - 1, max_points, dtype=int)
+        ys, xs = ys[indices], xs[indices]
+    z = depth_m[ys, xs]
+    intrinsics = np.asarray(camera_matrix, dtype=float).reshape(3, 3)
+    points = np.column_stack(
+        (
+            (xs - intrinsics[0, 2]) * z / intrinsics[0, 0],
+            (ys - intrinsics[1, 2]) * z / intrinsics[1, 1],
+            z,
+        )
+    )
+    return full_mask, points.astype(np.float32)
+
+
+def inflated_occupancy_data(grid: Any, inflation_radius: float) -> np.ndarray:
+    """Return ROS-order occupancy values with inflated known-free cells as 75."""
+    data = np.asarray(grid.data, dtype=np.int8)
+    radius_pixels = max(0, int(np.ceil(float(inflation_radius) / grid.resolution)))
+    inflated = data.copy()
+    if radius_pixels:
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * radius_pixels + 1, 2 * radius_pixels + 1)
+        )
+        blocked = (data != 0).astype(np.uint8)
+        halo = cv2.dilate(blocked, kernel).astype(bool) & (data == 0)
+        inflated[halo] = 75
+    return np.flipud(inflated).reshape(-1)
 
 
 def safety_payload(status: Any) -> dict[str, Any] | None:
@@ -106,9 +174,7 @@ def safety_payload(status: Any) -> dict[str, Any] | None:
         number = float(value)
         return number if np.isfinite(number) else None
 
-    obstacle_distance = finite(
-        getattr(safety, "obstacle_distance", obstacles.get("min_distance"))
-    )
+    obstacle_distance = finite(getattr(safety, "obstacle_distance", obstacles.get("min_distance")))
     return {
         "is_safe": bool(getattr(safety, "is_safe", True)),
         "emergency_stop": bool(getattr(safety, "emergency_stop", False)),
@@ -118,9 +184,7 @@ def safety_payload(status: Any) -> dict[str, Any] | None:
         "pitch_rad": finite(getattr(safety, "pitch_rad", None)),
         "max_tilt_rad": finite(getattr(safety, "max_tilt_angle", None)),
         "obstacle_distance": obstacle_distance,
-        "min_obstacle_distance": finite(
-            getattr(safety, "min_obstacle_distance", None)
-        ),
+        "min_obstacle_distance": finite(getattr(safety, "min_obstacle_distance", None)),
         "battery_percent": finite(getattr(safety, "battery_level", None)),
         "depth_sensor_blind": bool(
             getattr(
@@ -149,7 +213,7 @@ class RosObservabilityPublisher:
     ) -> None:
         import rclpy
         from geometry_msgs.msg import PointStamped, PoseStamped, Twist
-        from nav_msgs.msg import Odometry, Path
+        from nav_msgs.msg import OccupancyGrid as RosOccupancyGrid, Odometry, Path
         from sensor_msgs.msg import (
             CameraInfo,
             Image,
@@ -177,6 +241,7 @@ class RosObservabilityPublisher:
             "Image": Image,
             "Imu": Imu,
             "Odometry": Odometry,
+            "OccupancyGrid": RosOccupancyGrid,
             "JointState": JointState,
             "PointCloud2": PointCloud2,
             "PointField": PointField,
@@ -212,8 +277,15 @@ class RosObservabilityPublisher:
             "reference_map": self._node.create_publisher(
                 PointCloud2, self._topics.reference_map, sensor_qos
             ),
-            "detections": self._node.create_publisher(
-                String, self._topics.detections, sensor_qos
+            "detections": self._node.create_publisher(String, self._topics.detections, sensor_qos),
+            "obstacle_mask": self._node.create_publisher(
+                Image, self._topics.obstacle_mask, sensor_qos
+            ),
+            "obstacle_points": self._node.create_publisher(
+                PointCloud2, self._topics.obstacle_points, sensor_qos
+            ),
+            "occupancy_grid": self._node.create_publisher(
+                RosOccupancyGrid, self._topics.occupancy_grid, 1
             ),
         }
         self._path = Path()
@@ -223,6 +295,9 @@ class RosObservabilityPublisher:
         self._reference_path = Path()
         self._reference_path.header.frame_id = map_frame
         self._last_sensor_timestamp: float | None = None
+        self._last_depth: np.ndarray | None = None
+        self._last_camera_matrix: np.ndarray | None = None
+        self._last_grid_publish_monotonic = 0.0
 
     @classmethod
     def try_create(
@@ -263,6 +338,7 @@ class RosObservabilityPublisher:
         self._last_sensor_timestamp = timestamp
         rgb = np.ascontiguousarray(robot.image_to_array(state.rgb))
         depth = np.ascontiguousarray(robot.image_to_array(state.depth))
+        self._last_depth = depth
 
         rgb_msg = self._types["Image"]()
         self._header(rgb_msg, timestamp, self._camera_frame)
@@ -284,6 +360,7 @@ class RosObservabilityPublisher:
 
         info = state.camera_info
         if info is not None:
+            self._last_camera_matrix = np.asarray(info.k, dtype=float).reshape(3, 3)
             info_msg = self._types["CameraInfo"]()
             self._header(info_msg, timestamp, self._camera_frame)
             info_msg.width, info_msg.height = int(info.width), int(info.height)
@@ -358,6 +435,7 @@ class RosObservabilityPublisher:
                 ),
                 "navigation_geometry": navigation_geometry_payload(status),
                 "safety": safety_payload(status),
+                "detector": getattr(status, "detector_metrics", None),
             },
             separators=(",", ":"),
         )
@@ -403,6 +481,52 @@ class RosObservabilityPublisher:
             )
             self._publishers["object_position"].publish(point)
         self.publish_detections(getattr(status, "detections", []), timestamp)
+        self.publish_obstacles(getattr(status, "obstacle_info", None), timestamp)
+        grid = getattr(status, "occupancy_grid", None)
+        if grid is not None and time.monotonic() - self._last_grid_publish_monotonic >= 1.0:
+            self.publish_occupancy_grid(
+                grid, timestamp, float(getattr(status, "map_inflation_radius", 0.0) or 0.0)
+            )
+            self._last_grid_publish_monotonic = time.monotonic()
+
+    def publish_obstacles(self, obstacle_info: dict | None, timestamp: float) -> None:
+        mask, points = obstacle_mask_and_points(
+            getattr(self, "_last_depth", None),
+            getattr(self, "_last_camera_matrix", None),
+            obstacle_info,
+        )
+        if not mask.size:
+            return
+        image = self._types["Image"]()
+        self._header(image, timestamp, self._camera_frame)
+        image.height, image.width = mask.shape
+        image.encoding = "mono8"
+        image.is_bigendian = False
+        image.step = int(mask.strides[0])
+        image.data = np.ascontiguousarray(mask).tobytes()
+        self._publishers["obstacle_mask"].publish(image)
+
+        cloud = self._types["PointCloud2"]()
+        self._header(cloud, timestamp, self._camera_frame)
+        field_type = self._types["PointField"]
+        cloud.fields = [
+            field_type(name=name, offset=offset, datatype=field_type.FLOAT32, count=1)
+            for name, offset in (("x", 0), ("y", 4), ("z", 8))
+        ]
+        _point_cloud_xyz(cloud, points)
+        self._publishers["obstacle_points"].publish(cloud)
+
+    def publish_occupancy_grid(self, grid: Any, timestamp: float, inflation_radius: float) -> None:
+        message = self._types["OccupancyGrid"]()
+        self._header(message, timestamp, self._map_frame)
+        message.info.resolution = float(grid.resolution)
+        message.info.width = int(grid.width)
+        message.info.height = int(grid.height)
+        message.info.origin.position.x = float(grid.origin[0])
+        message.info.origin.position.y = float(grid.origin[1])
+        message.info.origin.orientation.w = 1.0
+        message.data = inflated_occupancy_data(grid, inflation_radius).tolist()
+        self._publishers["occupancy_grid"].publish(message)
 
     def publish_plan(self, points: Any, timestamp: float) -> None:
         """Publish the current controller route, including an empty path to clear it."""
@@ -456,14 +580,10 @@ class RosObservabilityPublisher:
                     "confidence": float(detection.confidence),
                     "bbox": [int(value) for value in detection.bbox],
                     "position_3d": (
-                        np.asarray(position, dtype=float).tolist()
-                        if position is not None
-                        else None
+                        np.asarray(position, dtype=float).tolist() if position is not None else None
                     ),
                     "distance": float(getattr(detection, "distance", 0.0)),
-                    "coordinate_frame": str(
-                        getattr(detection, "coordinate_frame", "camera")
-                    ),
+                    "coordinate_frame": str(getattr(detection, "coordinate_frame", "camera")),
                 }
             )
         message.data = json.dumps(
