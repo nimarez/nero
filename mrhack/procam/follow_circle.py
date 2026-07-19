@@ -37,6 +37,12 @@ PROJ_W, PROJ_H = 1920, 1080
 TAG_SIZE_M = 0.15               # physical ArUco side in metres (MEASURE it) -> sets the metric scale
 VIVE_POSE_FILE = "/run/nero/vive_pose.json"
 VIVE_MAX_AGE = 0.15             # PR #6 freshness deadline (s)
+# Tracker->robot-ground offset in the TRACKER body frame (metres). The tracker rides ~30 in (0.762 m)
+# up on the K1's back strap, so its x,y is NOT the foot: it swings out when the robot leans and sits
+# behind centre on the strap. We project it to the ground THROUGH the tracker orientation, so the
+# point stays under the robot as it tilts. Default assumes the tracker's body -z points down; set the
+# horizontal back-strap component here (or calibrate with the robot upright on a known tag).
+MOUNT_OFFSET_BODY = (0.0, 0.0, -0.762)
 
 
 def transform_points(pts, H):
@@ -54,17 +60,35 @@ def yaw_from_quat_xyzw(q):
     return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
-def parse_vive_pose(d, max_age=VIVE_MAX_AGE, now=None):
+def quat_to_R(q):
+    """3x3 rotation matrix from a quaternion (x, y, z, w)."""
+    x, y, z, w = q
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+    ], float)
+
+
+def tracker_to_ground_xy(position, quat_xyzw, mount_offset=MOUNT_OFFSET_BODY):
+    """Project the tracker's 3D pose to the robot's ground point (x, y): foot = tracker + R @ offset.
+    Because the offset rides in the tracker frame, the projection stays under the robot as it leans."""
+    foot = np.asarray(position, float) + quat_to_R(quat_xyzw) @ np.asarray(mount_offset, float)
+    return float(foot[0]), float(foot[1])
+
+
+def parse_vive_pose(d, max_age=VIVE_MAX_AGE, now=None, mount_offset=None):
     """Parse a /run/nero/vive_pose.json dict (PR #6) -> (x, y, yaw) if valid+fresh, else None.
-    Uses position[x,y] as the floor plane and yaw from quaternion_xyzw."""
+    Projects the tracker DOWN to the robot's ground point (mount height) + yaw from quaternion_xyzw."""
     if not d.get("tracking_valid", False):
         return None
     if now is not None:
         ra = d.get("transport", {}).get("received_at")
         if ra is not None and (now - float(ra)) > max_age:
             return None
-    pos = d["position"]
-    return float(pos[0]), float(pos[1]), yaw_from_quat_xyzw(d["quaternion_xyzw"])
+    mo = MOUNT_OFFSET_BODY if mount_offset is None else mount_offset
+    gx, gy = tracker_to_ground_xy(d["position"], d["quaternion_xyzw"], mo)
+    return gx, gy, yaw_from_quat_xyzw(d["quaternion_xyzw"])
 
 
 def render_circle(H_floor2proj, cx, cy, radius_m, heading=None, thick=30, color=(255, 255, 255)):
@@ -186,6 +210,14 @@ def _selftest():
     chk("stale pose (age>150ms) rejected", parse_vive_pose(d, 0.15, now + 1.0) is None)
     chk("tracking_valid=False rejected", parse_vive_pose({**d, "tracking_valid": False}, 0.15, now) is None)
 
+    # mount-height projection (tracker ~0.762 m up on the robot's back)
+    up = {"tracking_valid": True, "position": [1.0, 2.0, 0.762], "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0], "transport": {"received_at": now}}
+    pu = parse_vive_pose(up, 0.15, now)
+    chk("mount: upright tracker -> ground (1,2)", pu is not None and abs(pu[0] - 1.0) < 1e-9 and abs(pu[1] - 2.0) < 1e-9)
+    pit = {**up, "quaternion_xyzw": [0.0, math.sin(math.pi / 4), 0.0, math.cos(math.pi / 4)]}   # 90deg pitch
+    pp = parse_vive_pose(pit, 0.15, now)
+    chk("mount: 90deg lean shifts ground by ~mount height", pp is not None and abs(pp[0] - (1.0 - 0.762)) < 1e-6 and abs(pp[1] - 2.0) < 1e-6)
+
     print("SELFTEST:", "PASS" if ok else "FAIL")
     return ok
 
@@ -195,7 +227,10 @@ def main():
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--mock", action="store_true")
     ap.add_argument("--tag-size-m", type=float, default=TAG_SIZE_M)
+    ap.add_argument("--mount-height", type=float, default=0.762, help="tracker height above the ground (m); 30 in = 0.762")
     a = ap.parse_args()
+    global MOUNT_OFFSET_BODY
+    MOUNT_OFFSET_BODY = (MOUNT_OFFSET_BODY[0], MOUNT_OFFSET_BODY[1], -a.mount_height)
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
     run(mock=a.mock, tag_size_m=a.tag_size_m)
