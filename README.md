@@ -494,7 +494,10 @@ plan, commands, and simulator or calibrated Vive reference data. Navigation
 geometry includes the class-aware stand-off circle, target-bearing ray, labeled
 stand-off waypoint, and a two-second linear/yaw command preview. The radius is
 cyan while approaching, green while holding, and red when inside the protected
-distance. Print the exact
+distance. A separate robot-centered clearance ring and Safety and State panel
+show SAFE/WARNING/E-STOP, obstacle distance, depth blindness, left/center/right
+corridor availability, roll/pitch, battery percentage, and the reason for any
+stop. Print the exact
 subscription contract without requiring ROS or Rerun to be installed:
 
 ```bash

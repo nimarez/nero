@@ -93,6 +93,49 @@ def navigation_geometry_payload(status: Any) -> dict[str, Any] | None:
     }
 
 
+def safety_payload(status: Any) -> dict[str, Any] | None:
+    """Serialize the live safety decision and the measurements behind it."""
+    safety = getattr(status, "safety_status", None)
+    if safety is None:
+        return None
+    obstacles = getattr(status, "obstacle_info", None) or {}
+
+    def finite(value: Any) -> float | None:
+        if value is None:
+            return None
+        number = float(value)
+        return number if np.isfinite(number) else None
+
+    obstacle_distance = finite(
+        getattr(safety, "obstacle_distance", obstacles.get("min_distance"))
+    )
+    return {
+        "is_safe": bool(getattr(safety, "is_safe", True)),
+        "emergency_stop": bool(getattr(safety, "emergency_stop", False)),
+        "reason": str(getattr(safety, "reason", "")),
+        "warnings": [str(value) for value in getattr(safety, "warnings", [])],
+        "roll_rad": finite(getattr(safety, "roll_rad", None)),
+        "pitch_rad": finite(getattr(safety, "pitch_rad", None)),
+        "max_tilt_rad": finite(getattr(safety, "max_tilt_angle", None)),
+        "obstacle_distance": obstacle_distance,
+        "min_obstacle_distance": finite(
+            getattr(safety, "min_obstacle_distance", None)
+        ),
+        "battery_percent": finite(getattr(safety, "battery_level", None)),
+        "depth_sensor_blind": bool(
+            getattr(
+                safety,
+                "depth_sensor_blind",
+                obstacles.get("sensor_blind", False),
+            )
+        ),
+        "has_obstacle": bool(obstacles.get("has_obstacle", False)),
+        "left_clear": bool(obstacles.get("left_clear", True)),
+        "center_clear": bool(obstacles.get("center_clear", True)),
+        "right_clear": bool(obstacles.get("right_clear", True)),
+    }
+
+
 class RosObservabilityPublisher:
     """Best-effort publisher for live sensors, policy state, and references."""
 
@@ -314,6 +357,7 @@ class RosObservabilityPublisher:
                     getattr(status, "current_pose", None), "confidence", None
                 ),
                 "navigation_geometry": navigation_geometry_payload(status),
+                "safety": safety_payload(status),
             },
             separators=(",", ":"),
         )

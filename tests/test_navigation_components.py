@@ -206,6 +206,8 @@ def test_safety_monitor_emergency_and_tracking_timeout():
     monitor = SafetyMonitor(max_tilt_angle=0.2, max_tracking_lost_time=0.01)
     tilted = monitor.check_safety(imu_rpy=np.array([0.3, 0, 0]))
     assert not tilted.is_safe and tilted.emergency_stop
+    assert tilted.roll_rad == pytest.approx(0.3)
+    assert tilted.max_tilt_angle == pytest.approx(0.2)
 
     monitor.reset()
     monitor.check_safety(slam_tracking=False)
@@ -215,6 +217,7 @@ def test_safety_monitor_emergency_and_tracking_timeout():
 
     critical = monitor.check_safety(battery_level=4)
     assert not critical.is_safe and critical.reason == "Critical battery level"
+    assert critical.battery_level == 4.0
 
 
 def test_navigation_runtime_feeds_real_battery_soc_into_safety():

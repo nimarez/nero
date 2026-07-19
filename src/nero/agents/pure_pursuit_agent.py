@@ -65,6 +65,7 @@ class PursuitStatus:
     stand_off_distance: float | None = None
     stand_off_tolerance: float = 0.0
     target_position_camera: list[float] | None = None
+    obstacle_info: dict | None = None
 
 
 class DirectPursuitPolicy:
@@ -104,6 +105,7 @@ class DirectPursuitPolicy:
         self._search_started: float | None = None
         self._last_detection_revision: int | None = None
         self._running = False
+        self._last_obstacle_info: dict | None = None
 
     def start(self) -> PursuitStatus:
         try:
@@ -149,10 +151,12 @@ class DirectPursuitPolicy:
             self.last_sensor = sensor
             depth_m = self.depth.preprocess(sensor.depth)
             obstacles = self.depth.detect_obstacles(depth_m)
+            self._last_obstacle_info = obstacles
             safety = self.safety.check_safety(
                 imu_rpy=sensor.imu_rpy,
                 obstacle_distance=float(obstacles["min_distance"]),
                 battery_level=getattr(sensor.raw_state, "battery_level", None),
+                depth_sensor_blind=bool(obstacles.get("sensor_blind", False)),
             )
         except Exception as exc:
             logger.exception("Direct pursuit sensor failure")
@@ -324,6 +328,7 @@ class DirectPursuitPolicy:
                 if target_position is None
                 else [float(value) for value in target_position]
             ),
+            obstacle_info=self._last_obstacle_info,
         )
 
 

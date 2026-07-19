@@ -37,6 +37,7 @@ def create_default_blueprint(rrb: Any) -> Any:
             ),
             rrb.Spatial3DView(origin="world", name="Robot, SLAM, and Goals"),
             rrb.TimeSeriesView(origin="metrics", name="Sensors and Commands"),
+            rrb.TextLogView(origin="status", name="Safety and State"),
             grid_columns=2,
         ),
         auto_views=False,
@@ -438,6 +439,7 @@ class RerunRosBridge:
         self._log_navigation_geometry(
             data.get("navigation_geometry") if isinstance(data, dict) else None
         )
+        self._log_safety(data.get("safety") if isinstance(data, dict) else None)
 
     def _log_navigation_geometry(self, payload: Any) -> None:
         world_root = "world/navigation/safety_geometry"
@@ -479,6 +481,97 @@ class RerunRosBridge:
             "metrics/navigation/stand_off_radius",
             self._rr.Scalar(geometry["radius"]),
         )
+
+    def _log_safety(self, payload: Any) -> None:
+        root = "world/robot/safety"
+        self._recording.log(root, self._rr.Clear(recursive=True))
+        if not isinstance(payload, dict):
+            return
+        is_safe = bool(payload.get("is_safe", True))
+        emergency = bool(payload.get("emergency_stop", False))
+        sensor_blind = bool(payload.get("depth_sensor_blind", False))
+        warnings = [str(value) for value in payload.get("warnings", [])]
+        reason = str(payload.get("reason", ""))
+        if emergency or not is_safe:
+            color, condition = [255, 60, 60], "E-STOP"
+        elif sensor_blind or warnings:
+            color, condition = [255, 170, 40], "WARNING"
+        else:
+            color, condition = [80, 255, 80], "SAFE"
+
+        limit = payload.get("min_obstacle_distance")
+        try:
+            limit = float(limit)
+        except (TypeError, ValueError):
+            limit = 0.25
+        if not np.isfinite(limit) or limit <= 0:
+            limit = 0.25
+        angles = np.linspace(0.0, 2.0 * np.pi, 65)
+        ring = np.column_stack(
+            (
+                limit * np.cos(angles),
+                limit * np.sin(angles),
+                np.full_like(angles, 0.03),
+            )
+        )
+        clearance = payload.get("obstacle_distance")
+        clearance_text = (
+            "unknown"
+            if clearance is None
+            else f"{float(clearance):.2f}m"
+        )
+        label = f"{condition} | clearance {clearance_text}"
+        if reason:
+            label += f" | {reason}"
+        self._recording.log(
+            f"{root}/clearance_limit",
+            self._rr.LineStrips3D([ring], colors=color, radii=0.018),
+        )
+        self._recording.log(
+            f"{root}/state",
+            self._rr.Points3D(
+                [[0.0, 0.0, 0.12]],
+                colors=color,
+                radii=0.055,
+                labels=[label],
+                show_labels=True,
+            ),
+        )
+        safety_text = label
+        if warnings:
+            safety_text += " | " + "; ".join(warnings)
+        if safety_text != getattr(self, "_last_safety_text", None):
+            self._recording.log("status/safety", self._rr.TextLog(safety_text))
+            self._last_safety_text = safety_text
+
+        scalar_values = {
+            "safe": float(is_safe),
+            "emergency_stop": float(emergency),
+            "depth_sensor_blind": float(sensor_blind),
+            "has_obstacle": float(bool(payload.get("has_obstacle", False))),
+            "left_clear": float(bool(payload.get("left_clear", True))),
+            "center_clear": float(bool(payload.get("center_clear", True))),
+            "right_clear": float(bool(payload.get("right_clear", True))),
+        }
+        optional_values = {
+            "obstacle_distance_m": payload.get("obstacle_distance"),
+            "battery_percent": payload.get("battery_percent"),
+            "roll_degrees": (
+                None
+                if payload.get("roll_rad") is None
+                else np.degrees(float(payload["roll_rad"]))
+            ),
+            "pitch_degrees": (
+                None
+                if payload.get("pitch_rad") is None
+                else np.degrees(float(payload["pitch_rad"]))
+            ),
+        }
+        for name, value in optional_values.items():
+            if value is not None and np.isfinite(float(value)):
+                scalar_values[name] = float(value)
+        for name, value in scalar_values.items():
+            self._recording.log(f"metrics/safety/{name}", self._rr.Scalar(value))
 
     def _on_tracking(self, message: Any) -> None:
         self._receipt_time()

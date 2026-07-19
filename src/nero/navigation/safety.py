@@ -19,6 +19,13 @@ class SafetyStatus:
     reason: str = ""
     emergency_stop: bool = False
     warnings: list[str] = field(default_factory=list)
+    roll_rad: float | None = None
+    pitch_rad: float | None = None
+    obstacle_distance: float = float("inf")
+    battery_level: float | None = None
+    depth_sensor_blind: bool = False
+    max_tilt_angle: float = 0.2
+    min_obstacle_distance: float = 0.25
 
 
 class SafetyMonitor:
@@ -54,6 +61,7 @@ class SafetyMonitor:
         obstacle_distance: float = 10.0,
         slam_tracking: bool = True,
         battery_level: Optional[float] = None,
+        depth_sensor_blind: bool = False,
     ) -> SafetyStatus:
         """Check all safety conditions.
 
@@ -63,6 +71,7 @@ class SafetyMonitor:
             obstacle_distance: Distance to nearest obstacle (m)
             slam_tracking: Whether SLAM is tracking
             battery_level: Battery percentage (0-100)
+            depth_sensor_blind: Whether no valid operating-range depth was available
 
         Returns:
             SafetyStatus
@@ -123,6 +132,15 @@ class SafetyMonitor:
             reason=reason,
             emergency_stop=emergency_stop,
             warnings=warnings,
+            roll_rad=float(imu_rpy[0]) if imu_rpy is not None else None,
+            pitch_rad=float(imu_rpy[1]) if imu_rpy is not None else None,
+            obstacle_distance=float(obstacle_distance),
+            battery_level=(
+                float(battery_level) if battery_level is not None else None
+            ),
+            depth_sensor_blind=bool(depth_sensor_blind),
+            max_tilt_angle=self.max_tilt_angle,
+            min_obstacle_distance=self.min_obstacle_distance,
         )
 
         # Log warnings

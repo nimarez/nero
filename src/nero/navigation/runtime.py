@@ -94,6 +94,7 @@ def localize_sensor_frame(
         imu_rpy=sensor.imu_rpy,
         obstacle_distance=float(obstacle_info.get("min_distance", float("inf"))),
         battery_level=getattr(sensor.raw_state, "battery_level", None),
+        depth_sensor_blind=bool(obstacle_info.get("sensor_blind", False)),
     )
     return LocalizedFrame(
         sensor=sensor,

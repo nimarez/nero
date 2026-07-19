@@ -89,6 +89,7 @@ class PolicyStatus:
     planned_path: np.ndarray = field(
         default_factory=lambda: np.empty((0, 3), dtype=float)
     )  # Nx3 active-frame path for observability
+    obstacle_info: dict | None = None
 
 
 class NavigationPolicy:
@@ -176,6 +177,7 @@ class NavigationPolicy:
         self._running = False
         self._start_time: Optional[float] = None
         self._last_sensor: SensorFrame | None = None
+        self._last_obstacle_info: dict | None = None
 
         # Tracking
         self._object_not_found_count = 0
@@ -378,6 +380,7 @@ class NavigationPolicy:
                     depth_processor=self.depth_processor,
                     safety=self.safety,
                 )
+                self._last_obstacle_info = localized.obstacle_info
             except Exception as exc:
                 logger.exception("Navigation localization failure")
                 self._stop_robot()
@@ -1132,6 +1135,7 @@ class NavigationPolicy:
             detections=detections or [],
             robot_pose=robot_pose,
             planned_path=planned_path,
+            obstacle_info=self._last_obstacle_info,
         )
         return self._status
 

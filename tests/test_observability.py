@@ -16,6 +16,7 @@ from nero.observability.ros_publisher import (
     _point_cloud_xyz,
     _seconds_to_stamp,
     navigation_geometry_payload,
+    safety_payload,
 )
 from nero.observability.topics import ObservabilityTopics
 
@@ -111,6 +112,38 @@ def test_safety_radius_state_colors(distance, condition, color):
 
     assert geometry["condition"] == condition
     assert geometry["color"] == color
+
+
+def test_structured_safety_payload_includes_decision_inputs():
+    status = SimpleNamespace(
+        safety_status=SimpleNamespace(
+            is_safe=False,
+            emergency_stop=True,
+            reason="Excessive tilt",
+            warnings=["Excessive tilt"],
+            roll_rad=0.3,
+            pitch_rad=0.1,
+            obstacle_distance=0.9,
+            battery_level=42.0,
+            depth_sensor_blind=False,
+            max_tilt_angle=0.2,
+            min_obstacle_distance=0.25,
+        ),
+        obstacle_info={
+            "has_obstacle": True,
+            "left_clear": True,
+            "center_clear": False,
+            "right_clear": True,
+        },
+    )
+
+    payload = safety_payload(status)
+
+    assert payload["is_safe"] is False
+    assert payload["emergency_stop"] is True
+    assert payload["battery_percent"] == 42.0
+    assert payload["obstacle_distance"] == 0.9
+    assert payload["center_clear"] is False
 
 
 def test_odometry_and_joint_callbacks_log_sensor_metrics():
@@ -434,7 +467,14 @@ def test_rerun_callbacks_create_a_real_recording():
             data=(
                 '{"state":"navigating","message":"ok","navigation_geometry":'
                 '{"frame":"camera","center":[0.0,0.0,1.5],'
-                '"radius":0.8,"tolerance":0.12,"robot":[0.0,0.0,0.0]}}'
+                '"radius":0.8,"tolerance":0.12,"robot":[0.0,0.0,0.0]},'
+                '"safety":{"is_safe":true,"emergency_stop":false,'
+                '"reason":"","warnings":[],"roll_rad":0.01,'
+                '"pitch_rad":0.02,"max_tilt_rad":0.2,'
+                '"obstacle_distance":1.2,"min_obstacle_distance":0.25,'
+                '"battery_percent":80.0,"depth_sensor_blind":false,'
+                '"has_obstacle":false,"left_clear":true,'
+                '"center_clear":true,"right_clear":true}}'
             )
         )
     )
