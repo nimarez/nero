@@ -32,6 +32,7 @@ VIVE_POSE_FILE = "/run/nero/vive_pose.json"
 NAV_STATE_FILE = "/run/nero/nav.json"
 VIVE_MAX_AGE = 0.15             # PR #6 freshness deadline (s)
 DEADMAN_S = 0.30               # no fresh pose for this long -> blank the projector (safety)
+NAV_MAX_AGE = 0.50            # drop the nav overlay if the telemetry is older than this (s)
 BARRIER_RADIUS_M = 1.20
 # Tracker->robot-ground offset in the TRACKER body frame (m). Tracker ~30 in (0.762 m) up on the back
 # strap; projected DOWN through the tracker orientation so it stays under the robot on lean. Default
@@ -157,9 +158,14 @@ def render_scene(H, pose, safety_r, barrier_r=BARRIER_RADIUS_M, nav=None, thick=
             if b is not None:
                 _arrow(out, H, cx, cy, cx + reach * math.cos(b), cy + reach * math.sin(b), C_BEARING, thick)
         elif phase == "close" and nav.get("path") and len(nav["path"]) >= 2:
-            pts, n = _finite_int(transform_points(np.asarray(nav["path"], float), H))
+            fpts = np.asarray(nav["path"], float)
+            pts, n = _finite_int(transform_points(fpts, H))
             if n >= 2:
-                cv2.polylines(out, [pts], False, C_PATH, thick, cv2.LINE_AA)
+                cv2.polylines(out, [pts], False, C_PATH, max(4, thick // 2), cv2.LINE_AA)     # the path line
+                step = max(1, len(fpts) // 8)                                                 # direction arrows along it
+                for i in range(0, len(fpts) - 1, step):
+                    j = min(i + step, len(fpts) - 1)
+                    _arrow(out, H, fpts[i][0], fpts[i][1], fpts[j][0], fpts[j][1], C_PATH, thick)
         if goal is not None and all(math.isfinite(v) for v in goal):
             g, n = _finite_int(transform_points([goal], H))
             if n == 1:
@@ -208,6 +214,33 @@ def load_nav_state(path=NAV_STATE_FILE):
         return None
 
 
+def nav_rel_to_floor(nav, fx, fy, fyaw, now=None, max_age=NAV_MAX_AGE):
+    """Convert robot-RELATIVE nav (bearing_rel/range or goal_rel, + path_rel, in the robot body frame) to
+    floor-absolute {phase, goal:[x,y], path:[[x,y]...]} using the robot floor pose. None if stale/absent."""
+    if not nav:
+        return None
+    if now is not None and nav.get("t") is not None:
+        try:
+            if now - float(nav["t"]) > max_age:
+                return None
+        except (TypeError, ValueError):
+            return None
+    c, s = math.cos(fyaw), math.sin(fyaw)
+
+    def b2f(dx, dy):
+        return [fx + c * dx - s * dy, fy + s * dx + c * dy]
+
+    out = {"phase": nav.get("phase")}
+    if nav.get("bearing_rel") is not None and nav.get("range") is not None:
+        br, rng = float(nav["bearing_rel"]), float(nav["range"])
+        out["goal"] = b2f(rng * math.cos(br), rng * math.sin(br))
+    elif nav.get("goal_rel") is not None:
+        out["goal"] = b2f(float(nav["goal_rel"][0]), float(nav["goal_rel"][1]))
+    if nav.get("path_rel"):
+        out["path"] = [b2f(float(dx), float(dy)) for dx, dy in nav["path_rel"]]
+    return out
+
+
 # --------------------------------------------------------------------- pose sources
 def vive_file_source(path=VIVE_POSE_FILE, max_age=VIVE_MAX_AGE, hz=30.0):
     """Poll nero-vive-udp-receive's latest-state file (PR #6). Yields (x,y,yaw) when fresh+valid, else None."""
@@ -252,7 +285,8 @@ def run(mock=False, tag_size_m=TAG_SIZE_M, barrier_r=BARRIER_RADIUS_M):
         fyaw = _wrap(vyaw + se2_yaw)
         speed = math.hypot(fx - last[0], fy - last[1]) / (now - last_t) if last and now > last_t else 0.0
         last, last_t = (fx, fy), now
-        nav = {"phase": "far", "goal": [fx + 2.0, fy]} if mock else load_nav_state()
+        raw = {"phase": "far", "bearing_rel": 0.3, "range": 2.0} if mock else load_nav_state()
+        nav = nav_rel_to_floor(raw, fx, fy, fyaw, now)
         project_png(render_scene(H, (fx, fy, fyaw), safety_radius(speed), barrier_r, nav))
 
 
@@ -285,6 +319,15 @@ def _selftest():
     chk("close: green path drawn", _cnt(close, C_PATH) > _cnt(base, C_PATH))
     chk("one-point path draws nothing (no crash)", _cnt(render_scene(H, (1.0, 1.0, 0.0), 0.4, 0.9, nav={"phase": "close", "path": [[1.0, 1.0]]}), C_PATH) == 0)
     chk("lost_frame is red", _cnt(lost_frame(), C_LOST) > 0)
+
+    # robot-relative nav -> floor conversion (bridge contract)
+    nf = nav_rel_to_floor({"phase": "far", "bearing_rel": 0.0, "range": 2.0}, 1.0, 1.0, 0.0)
+    chk("nav_rel_to_floor: bearing 0 range 2 @origin -> goal (3,1)", nf["goal"] == [3.0, 1.0])
+    nf2 = nav_rel_to_floor({"phase": "close", "path_rel": [[0.0, 0.0], [1.0, 0.0]]}, 1.0, 1.0, math.pi / 2)
+    chk("nav_rel_to_floor: path_rel rotated by robot yaw", abs(nf2["path"][1][0] - 1.0) < 1e-9 and abs(nf2["path"][1][1] - 2.0) < 1e-9)
+    chk("nav_rel_to_floor: stale nav dropped", nav_rel_to_floor({"phase": "far", "goal_rel": [1, 0], "t": 0.0}, 1.0, 1.0, 0.0, now=10.0) is None)
+    manyp = render_scene(H, (1.0, 1.0, 0.0), 0.4, 0.9, nav={"phase": "close", "path": [[1.0, 1.0], [1.3, 1.1], [1.6, 1.0], [1.9, 1.1], [2.2, 1.0]]})
+    chk("close: path drawn with direction arrows", _cnt(manyp, C_PATH) > _cnt(base, C_PATH))
 
     now = 1_000_000.0
     d = {"tracking_valid": True, "position": [1.5, 2.5, 0.1],
