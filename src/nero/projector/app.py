@@ -15,7 +15,7 @@ import numpy as np
 from .calibration import CalibrationState, ProjectorCalibration
 from .camera import RealSenseArucoCamera
 from .motion import MotionTracker
-from .render import render_motion_circle, render_projector_grid
+from .render import render_floor_calibration_target, render_motion_circle, render_projector_grid
 from .server import CalibrationWebServer
 
 logger = logging.getLogger(__name__)
@@ -119,15 +119,24 @@ def run(args: argparse.Namespace) -> None:
                 and now - last_motion_draw >= 1.0 / 60.0
             )
             if should_draw_motion:
+                projector_frame = base_projector_frame
+                floor_calibration = motion_state["calibration"]
+                if floor_calibration["active"] and floor_calibration["target_uv"]:
+                    projector_frame = render_floor_calibration_target(
+                        projector_frame,
+                        calibration,
+                        floor_calibration["target_uv"],
+                        index=floor_calibration["captured"] + 1,
+                        total=floor_calibration["total"],
+                    )
                 if motion_state["valid"] and motion_state["uv"]:
                     projector_frame = render_motion_circle(
-                        base_projector_frame,
+                        projector_frame,
                         calibration,
                         motion_state["uv"],
+                        ring_uv=motion_state["ring_uv"],
                         label=str(motion_state["controller_id"] or "CONTROLLER"),
                     )
-                else:
-                    projector_frame = base_projector_frame
                 cv2.imshow("Nero Projector", projector_frame)
                 last_motion_sequence = motion_sequence
                 last_motion_valid = bool(motion_state["valid"])

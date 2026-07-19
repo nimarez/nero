@@ -8,8 +8,20 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
+from math import cos, pi, sin
 from pathlib import Path
 from typing import Any
+
+import numpy as np
+
+
+FLOOR_TARGETS = (
+    (0.5, 0.5),
+    (0.18, 0.18),
+    (0.82, 0.18),
+    (0.82, 0.82),
+    (0.18, 0.82),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,15 +55,20 @@ class MotionTracker:
         self,
         pose_path: str | Path = "/run/nero/vive_pose.json",
         center_path: str | Path = "~/.config/nero/controller-center.json",
+        mapping_path: str | Path = "~/.config/nero/controller-floor-mapping.json",
         *,
         stale_after_s: float = 0.15,
     ) -> None:
         self.pose_path = Path(pose_path)
         self.center_path = Path(center_path).expanduser()
+        self.mapping_path = Path(mapping_path).expanduser()
         self.stale_after_s = stale_after_s
         self._lock = threading.Lock()
         self._latest: MotionPose | None = None
         self._origin = self._load_origin()
+        self._mapping = self._load_mapping()
+        self._calibration_samples: list[tuple[tuple[float, float], tuple[float, float]]] = []
+        self._calibration_active = False
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -61,6 +78,14 @@ class MotionTracker:
             if len(values) != 3:
                 return None
             return tuple(float(value) for value in values)
+        except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+
+    def _load_mapping(self) -> tuple[tuple[float, float, float], ...] | None:
+        try:
+            rows = json.loads(self.mapping_path.read_text(encoding="utf-8"))["matrix"]
+            matrix = tuple(tuple(float(value) for value in row) for row in rows)
+            return matrix if len(matrix) == 2 and all(len(row) == 3 for row in matrix) else None
         except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
             return None
 
@@ -133,12 +158,138 @@ class MotionTracker:
             raise
         return True
 
+    def begin_floor_calibration(self) -> dict[str, Any]:
+        with self._lock:
+            # The operator already established center with ``recenter``. Reuse
+            # that exact pose as point one so the guided pass starts at a corner.
+            self._calibration_samples = (
+                [((self._origin[0], self._origin[1]), FLOOR_TARGETS[0])]
+                if self._origin is not None
+                else []
+            )
+            self._calibration_active = True
+        return self.calibration_status()
+
+    def capture_floor_point(self) -> dict[str, Any]:
+        with self._lock:
+            pose = self._latest
+            if not self._calibration_active:
+                raise ValueError("floor calibration is not active")
+            if not self._valid_locked(pose):
+                raise ValueError("controller is not currently tracked")
+            assert pose is not None
+            target = FLOOR_TARGETS[len(self._calibration_samples)]
+            self._calibration_samples.append(((pose.position[0], pose.position[1]), target))
+            samples = tuple(self._calibration_samples)
+
+        if len(samples) >= 3:
+            source = np.asarray([[x, y, 1.0] for (x, y), _ in samples], dtype=np.float64)
+            destination = np.asarray([uv for _, uv in samples], dtype=np.float64)
+            solution, _, rank, _ = np.linalg.lstsq(source, destination, rcond=None)
+            if rank < 3:
+                raise ValueError("captured controller points are not spread across the floor")
+            matrix = tuple(tuple(float(value) for value in row) for row in solution.T)
+            with self._lock:
+                self._mapping = matrix
+            self._save_mapping(matrix, samples)
+
+        with self._lock:
+            if len(self._calibration_samples) == len(FLOOR_TARGETS):
+                self._calibration_active = False
+        return self.calibration_status()
+
+    def _save_mapping(
+        self,
+        matrix: tuple[tuple[float, float, float], ...],
+        samples: tuple[tuple[tuple[float, float], tuple[float, float]], ...],
+    ) -> None:
+        self.mapping_path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{self.mapping_path.name}.", dir=self.mapping_path.parent
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                json.dump(
+                    {
+                        "version": 1,
+                        "matrix": [list(row) for row in matrix],
+                        "samples": [
+                            {"vive_xy": list(xy), "floor_uv": list(uv)} for xy, uv in samples
+                        ],
+                    },
+                    stream,
+                    indent=2,
+                )
+                stream.write("\n")
+            os.replace(temporary, self.mapping_path)
+        except Exception:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+            raise
+
+    def calibration_status(self) -> dict[str, Any]:
+        with self._lock:
+            captured = len(self._calibration_samples)
+            active = self._calibration_active
+            mapping_ready = self._mapping is not None
+        target = FLOOR_TARGETS[captured] if active and captured < len(FLOOR_TARGETS) else None
+        return {
+            "active": active,
+            "captured": captured,
+            "total": len(FLOOR_TARGETS),
+            "target_uv": list(target) if target else None,
+            "mapping_ready": mapping_ready,
+        }
+
+    @staticmethod
+    def _apply_mapping(
+        position: tuple[float, float, float],
+        matrix: tuple[tuple[float, float, float], ...],
+    ) -> tuple[float, float]:
+        x, y = position[:2]
+        return (
+            matrix[0][0] * x + matrix[0][1] * y + matrix[0][2],
+            matrix[1][0] * x + matrix[1][1] * y + matrix[1][2],
+        )
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             pose = self._latest
             origin = self._origin
+            mapping = self._mapping
             valid = self._valid_locked(pose)
-        uv = map_floor_position(pose.position, origin) if valid and pose and origin else None
+        uv = None
+        ring_uv = None
+        if valid and pose:
+            if mapping:
+                uv = self._apply_mapping(pose.position, mapping)
+                radius_m = 0.28
+                ring_uv = [
+                    self._apply_mapping(
+                        (
+                            pose.position[0] + radius_m * cos(index * 2 * pi / 96),
+                            pose.position[1] + radius_m * sin(index * 2 * pi / 96),
+                            pose.position[2],
+                        ),
+                        mapping,
+                    )
+                    for index in range(96)
+                ]
+            elif origin:
+                uv = map_floor_position(pose.position, origin)
+                ring_uv = [
+                    map_floor_position(
+                        (
+                            pose.position[0] + 0.28 * cos(index * 2 * pi / 96),
+                            pose.position[1] + 0.28 * sin(index * 2 * pi / 96),
+                            pose.position[2],
+                        ),
+                        origin,
+                    )
+                    for index in range(96)
+                ]
         return {
             "valid": valid,
             "centered": origin is not None,
@@ -147,5 +298,7 @@ class MotionTracker:
             "position": list(pose.position) if pose else None,
             "origin": list(origin) if origin else None,
             "uv": list(uv) if uv else None,
+            "ring_uv": [list(point) for point in ring_uv] if ring_uv else None,
             "age_ms": (time.time() - pose.received_at) * 1000 if pose else None,
+            "calibration": self.calibration_status(),
         }
