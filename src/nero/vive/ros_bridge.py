@@ -45,9 +45,15 @@ def read_latest_pose(
     if not math.isfinite(received_at) or received_at <= 0:
         raise ValueError("transport.received_at must be a positive finite time")
     age_s = max(0.0, wall_clock() - received_at)
-    valid = packet.tracking_valid and age_s <= stale_after_s
+    quaternion_norm = math.sqrt(sum(value * value for value in packet.quaternion_xyzw))
+    valid = packet.tracking_valid and age_s <= stale_after_s and quaternion_norm > 1e-9
+    quaternion = (
+        tuple(value / quaternion_norm for value in packet.quaternion_xyzw)
+        if quaternion_norm > 1e-9
+        else packet.quaternion_xyzw
+    )
     return VivePoseState(
-        packet=replace(packet, tracking_valid=valid),
+        packet=replace(packet, quaternion_xyzw=quaternion, tracking_valid=valid),
         received_at=received_at,
         age_s=age_s,
     )

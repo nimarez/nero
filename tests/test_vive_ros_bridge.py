@@ -49,3 +49,14 @@ def test_read_latest_pose_preserves_explicit_tracking_loss(tmp_path) -> None:
     state = read_latest_pose(path, stale_after_s=0.15, wall_clock=lambda: 100.01)
 
     assert state.packet.tracking_valid is False
+
+
+def test_read_latest_pose_rejects_zero_quaternion(tmp_path) -> None:
+    path = tmp_path / "vive_pose.json"
+    payload = state_payload()
+    payload["quaternion_xyzw"] = [0.0, 0.0, 0.0, 0.0]
+    path.write_text(json.dumps(payload))
+
+    state = read_latest_pose(path, stale_after_s=0.15, wall_clock=lambda: 100.01)
+
+    assert state.packet.tracking_valid is False
