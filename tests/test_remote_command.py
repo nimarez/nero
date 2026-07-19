@@ -251,6 +251,27 @@ def test_aruco_options_are_forwarded_only_to_policy_start(monkeypatch):
     assert "--object-backend" not in relay
 
 
+def test_command_can_start_direct_pure_pursuit(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["nero-command", "--no-rerun", "--policy", "pure-pursuit"],
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, check: calls.append(command) or SimpleNamespace(returncode=0),
+    )
+
+    remote_command.main()
+
+    remote = shlex.split(calls[0][-1])[2]
+    assert "nohup uv run nero-pure-pursuit --no-display" in remote
+    assert "/tmp/nero-pure-pursuit.log" in remote
+    assert "another Nero navigation policy is already running" in remote
+
+
 def test_policy_bootstrap_really_waits_for_a_new_unix_socket(tmp_path):
     socket_path = f"/tmp/nero-bootstrap-{os.getpid()}-{time.time_ns()}.sock"
     log_path = tmp_path / "policy.log"

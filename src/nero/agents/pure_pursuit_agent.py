@@ -30,7 +30,9 @@ from nero.navigation.controller import VelocityCommand
 from nero.navigation.pure_pursuit import PurePursuitConfig, PurePursuitController
 from nero.navigation.runtime import SensorFrame, read_sensor_frame, send_velocity
 from nero.navigation.safety import SafetyMonitor, SafetyStatus
+from nero.observability import RosObservabilityPublisher
 from nero.perception.depth_processor import DepthProcessor
+from nero.perception.detector_factory import create_object_detector
 from nero.perception.object_detector import (
     ObjectDetection,
     ObjectDetector,
@@ -59,6 +61,7 @@ class PursuitStatus:
     velocity_command: VelocityCommand = field(default_factory=VelocityCommand)
     detections: list[ObjectDetection] = field(default_factory=list)
     safety_status: SafetyStatus | None = None
+    target: str | None = None
 
 
 class DirectPursuitPolicy:
@@ -151,17 +154,17 @@ class DirectPursuitPolicy:
         except Exception as exc:
             logger.exception("Direct pursuit sensor failure")
             self.state = PursuitState.ERROR
-            send_velocity(self.robot)
+            self._stop_robot()
             return self._status(f"Sensor failure: {exc}")
 
         if not safety.is_safe:
-            send_velocity(self.robot)
+            self._stop_robot()
             return self._status(
                 f"Motion blocked: {safety.reason}", safety_status=safety
             )
         if self.target is None:
             self.state = PursuitState.WAITING_FOR_OBJECT
-            send_velocity(self.robot)
+            self._stop_robot()
             return self._status("Waiting for object name", safety_status=safety)
 
         detections = self.detector.detect(
@@ -191,7 +194,7 @@ class DirectPursuitPolicy:
                 else self.controller.compute_command(target.position_3d, self.stand_off)
             )
         except ValueError as exc:
-            send_velocity(self.robot)
+            self._stop_robot()
             return self._status(
                 f"Invalid target depth: {exc}",
                 detections=detections,
@@ -200,7 +203,7 @@ class DirectPursuitPolicy:
 
         if arrived:
             self.state = PursuitState.ARRIVED
-            send_velocity(self.robot)
+            self._stop_robot()
             return self._status(
                 f"Holding stand-off from '{self.target}'",
                 detections=detections,
@@ -211,7 +214,10 @@ class DirectPursuitPolicy:
         # allowed so the live target can be reacquired around an obstacle.
         if not obstacles.get("center_clear", False):
             command = VelocityCommand(angular_z=command.angular_z)
-        send_velocity(self.robot, command)
+        try:
+            send_velocity(self.robot, command)
+        except RuntimeError as exc:
+            return self._locomotion_error(exc, detections, safety)
         return self._status(
             f"Pursuing '{self.target}'",
             command=command,
@@ -234,7 +240,10 @@ class DirectPursuitPolicy:
             else 0.0
         )
         command = VelocityCommand(angular_z=angular)
-        send_velocity(self.robot, command)
+        try:
+            send_velocity(self.robot, command)
+        except RuntimeError as exc:
+            return self._locomotion_error(exc, detections, safety)
         return self._status(
             f"Searching for '{self.target}'",
             command=command,
@@ -244,7 +253,7 @@ class DirectPursuitPolicy:
 
     def _target_lost(self, detections, safety) -> PursuitStatus:
         self.state = PursuitState.LOST
-        send_velocity(self.robot)
+        self._stop_robot()
         return self._status(
             f"Could not find '{self.target}'",
             detections=detections,
@@ -252,7 +261,7 @@ class DirectPursuitPolicy:
         )
 
     def reset(self) -> PursuitStatus:
-        send_velocity(self.robot)
+        self._stop_robot()
         self.target = None
         self._last_seen = None
         self._search_started = None
@@ -263,12 +272,28 @@ class DirectPursuitPolicy:
     def stop(self) -> None:
         self._running = False
         try:
-            send_velocity(self.robot)
+            self._stop_robot()
         finally:
             try:
                 self.detector.close()
             finally:
                 self.state = PursuitState.IDLE
+
+    def _stop_robot(self) -> None:
+        """Hold position even if Booster already dropped walking control."""
+        try:
+            send_velocity(self.robot)
+        except RuntimeError:
+            logger.exception("Robot locomotion controller rejected the stop command")
+
+    def _locomotion_error(self, exc, detections, safety) -> PursuitStatus:
+        self.state = PursuitState.ERROR
+        self._stop_robot()
+        return self._status(
+            f"Locomotion command failed: {exc}",
+            detections=detections,
+            safety_status=safety,
+        )
 
     def _status(
         self,
@@ -284,6 +309,7 @@ class DirectPursuitPolicy:
             velocity_command=command or VelocityCommand(),
             detections=detections or [],
             safety_status=safety_status,
+            target=self.target,
         )
 
 
@@ -299,10 +325,28 @@ def parse_args() -> argparse.Namespace:
         default="socket",
     )
     parser.add_argument("--command-socket", default="/tmp/nero-navigation.sock")
+    parser.add_argument(
+        "--no-ros-observability",
+        action="store_true",
+        help="Disable normalized /nero ROS 2 telemetry topics",
+    )
+    parser.add_argument(
+        "--object-backend",
+        help="Detector backend (default: NERO_OBJECT_BACKEND or K1 QNN)",
+    )
+    parser.add_argument(
+        "--aruco-map",
+        help="JSON marker-ID to object-name mapping (or set NERO_ARUCO_MAP)",
+    )
+    parser.add_argument(
+        "--aruco-dictionary",
+        help="OpenCV ArUco dictionary (default: DICT_4X4_50)",
+    )
     parser.add_argument("--max-velocity", type=float, default=0.25)
     parser.add_argument("--max-angular-velocity", type=float, default=0.7)
     parser.add_argument("--target-timeout", type=float, default=3.0)
     parser.add_argument("--acquisition-timeout", type=float, default=20.0)
+    parser.add_argument("--search-angular-velocity", type=float, default=0.12)
     return parser.parse_args()
 
 
@@ -319,10 +363,12 @@ def run_agent(robot, args, *, object_detector=None, command_source=None) -> None
         controller=controller,
         target_timeout=args.target_timeout,
         acquisition_timeout=args.acquisition_timeout,
+        search_angular_velocity=getattr(args, "search_angular_velocity", 0.12),
     )
     shutdown = False
     policy_started = False
     listener = None
+    telemetry = None
 
     def handle_signal(_sig, _frame):
         nonlocal shutdown
@@ -331,6 +377,9 @@ def run_agent(robot, args, *, object_detector=None, command_source=None) -> None
     try:
         policy.start()
         policy_started = True
+        telemetry = RosObservabilityPublisher.try_create(
+            enabled=not getattr(args, "no_ros_observability", False)
+        )
         signal.signal(signal.SIGTERM, handle_signal)
         commands = command_source or TerminalCommandSource()
         listener = NavigationTargetListener(
@@ -343,6 +392,7 @@ def run_agent(robot, args, *, object_detector=None, command_source=None) -> None
         viz = Visualization()
         target_name = None
         announced_arrival = False
+        announced_failure = False
 
         while not shutdown:
             started = time.monotonic()
@@ -351,12 +401,17 @@ def run_agent(robot, args, *, object_detector=None, command_source=None) -> None
                 if target_name is not None:
                     policy.set_target(target_name)
                     announced_arrival = False
+                    announced_failure = False
 
             status = policy.step()
+            sensor = policy.last_sensor
+            if sensor is not None and telemetry is not None:
+                if sensor.raw_state is not None:
+                    telemetry.publish_robot_state(sensor.raw_state, robot)
+                telemetry.publish_policy(status, sensor.timestamp)
             if status.state == PursuitState.ERROR:
                 logger.error("Direct pursuit stopped: %s", status.message)
                 break
-            sensor = policy.last_sensor
             if sensor is not None and not args.no_display:
                 frame = viz.draw_navigation_info(
                     sensor.rgb,
@@ -389,6 +444,12 @@ def run_agent(robot, args, *, object_detector=None, command_source=None) -> None
                     announced_arrival = False
                     listener.start()
             elif status.state == PursuitState.LOST:
+                if not announced_failure and target_name is not None:
+                    try:
+                        robot.speak(f"I could not detect the {target_name}.")
+                    except RuntimeError as exc:
+                        logger.warning("Could not announce missing object: %s", exc)
+                    announced_failure = True
                 policy.reset()
                 target_name = None
                 announced_arrival = False
@@ -414,6 +475,8 @@ def run_agent(robot, args, *, object_detector=None, command_source=None) -> None
                 listener.close()
             except Exception:
                 logger.exception("Command listener cleanup failed")
+        if telemetry is not None:
+            telemetry.close()
         if not args.no_display:
             cv2.destroyAllWindows()
 
@@ -424,7 +487,16 @@ def main() -> None:
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
-    configure_qualcomm_cpu_partition()
+    configure_qualcomm_cpu_partition(args.object_backend)
+    try:
+        object_detector = create_object_detector(
+            backend=args.object_backend,
+            aruco_map=args.aruco_map,
+            aruco_dictionary=args.aruco_dictionary,
+        )
+    except ValueError as exc:
+        logger.error("Invalid object detector configuration: %s", exc)
+        raise SystemExit(2) from exc
     robot = RobotInterface()
     if args.command_source == "socket":
         command_source = UnixSocketCommandSource(args.command_socket)
@@ -434,7 +506,12 @@ def main() -> None:
         command_source = K1VoiceCommandSource()
         command_source.start_listening()
         command_source.stop_listening()
-    run_agent(robot, args, command_source=command_source)
+    run_agent(
+        robot,
+        args,
+        object_detector=object_detector,
+        command_source=command_source,
+    )
 
 
 if __name__ == "__main__":

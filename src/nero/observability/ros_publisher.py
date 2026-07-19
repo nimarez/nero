@@ -248,11 +248,14 @@ class RosObservabilityPublisher:
     def publish_policy(self, status: Any, timestamp: float) -> None:
         state_name = getattr(getattr(status, "state", None), "value", "unknown")
         status_message = self._types["String"]()
+        goal_name = getattr(getattr(status, "current_goal", None), "object_name", None)
+        if goal_name is None:
+            goal_name = getattr(status, "target", None)
         status_message.data = json.dumps(
             {
                 "state": state_name,
                 "message": getattr(status, "message", ""),
-                "goal": getattr(getattr(status, "current_goal", None), "object_name", None),
+                "goal": goal_name,
                 "tracking_confidence": getattr(
                     getattr(status, "current_pose", None), "confidence", None
                 ),

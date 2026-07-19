@@ -365,6 +365,7 @@ def test_hardware_agent_clis_use_k1_sensors_implicitly(monkeypatch):
         map_nav_agent,
         mapping_agent,
         orb_slam_agent,
+        pure_pursuit_agent,
     )
 
     monkeypatch.setattr(sys, "argv", ["nero-orb-slam"])
@@ -374,6 +375,13 @@ def test_hardware_agent_clis_use_k1_sensors_implicitly(monkeypatch):
     assert not hasattr(orb_args, "robot_serial")
     assert not hasattr(orb_args, "object")
     assert not hasattr(orb_args, "target_distance")
+
+    monkeypatch.setattr(sys, "argv", ["nero-pure-pursuit"])
+    pursuit_args = pure_pursuit_agent.parse_args()
+    assert not hasattr(pursuit_args, "camera")
+    assert not hasattr(pursuit_args, "depth_camera")
+    assert not hasattr(pursuit_args, "object")
+    assert not hasattr(pursuit_args, "target_distance")
 
     monkeypatch.setattr(sys, "argv", ["nero-mapping"])
     mapping_args = mapping_agent.parse_args()

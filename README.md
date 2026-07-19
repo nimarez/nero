@@ -335,6 +335,21 @@ goals. It uses the target's live camera-frame RGB-D position as the pursuit poin
 keeps the tilt/depth/battery safety gate, and stops at the same class-aware
 stand-off distance. Because it has no persistent world pose, it stops and searches
 when the object leaves view and cannot route around occlusions or map obstacles.
+It publishes the same sensor, detection, status, and command topics as the SLAM
+policy, so Rerun still shows the live RGB/depth images, labeled detection boxes,
+3D camera-frame centroids, and commanded velocities. A world-frame route is
+intentionally absent because this controller does not claim to know one.
+
+To have the Mac command interface start or reuse this policy on the robot:
+
+```bash
+uv run nero-command --policy pure-pursuit
+```
+
+Add `--object-backend aruco --aruco-map config/aruco_markers.json` to the same
+command for marker-based pursuit. `nero-command` refuses to silently switch if
+the other navigation policy already owns the command socket; stop that process
+first so two controllers can never compete for walking control.
 
 The bundled real main-room splat can be converted without Open3D. The alias
 `assets/main_room.ply` resolves to its Git-LFS location:

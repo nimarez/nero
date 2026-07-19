@@ -18,7 +18,6 @@ DEFAULT_CONNECT_TIMEOUT = 5
 DEFAULT_KEEPALIVE_INTERVAL = 5
 DEFAULT_KEEPALIVE_COUNT = 3
 DEFAULT_POLICY_START_TIMEOUT = 60.0
-DEFAULT_POLICY_LOG = "/tmp/nero-orb-slam.log"
 
 
 def _mac_address_for(robot_host: str) -> str:
@@ -142,21 +141,28 @@ def _policy_bootstrap_script(
     start_timeout: float,
     policy_log: str,
     policy_args: tuple[str, ...] = (),
+    policy_command: str = "nero-orb-slam",
 ) -> str:
     """Return a robot-side shell fragment that leaves one policy running."""
     socket_arg = shlex.quote(socket_path)
     log_arg = shlex.quote(policy_log)
     timeout_arg = str(max(1, math.ceil(start_timeout)))
     startup_failure = shlex.quote(
-        "nero-orb-slam exited during startup; log follows:"
+        f"{policy_command} exited during startup; log follows:"
     )
     timeout_failure = shlex.quote(
-        f"nero-orb-slam did not create {socket_path} within "
+        f"{policy_command} did not create {socket_path} within "
         f"{timeout_arg}s; log follows:"
     )
     launch = " ".join(
-        ("uv", "run", "nero-orb-slam", "--no-display")
+        ("uv", "run", policy_command, "--no-display")
         + tuple(shlex.quote(argument) for argument in policy_args)
+    )
+    process_pattern = shlex.quote(f"[/]{policy_command}( |$)")
+    any_policy_pattern = shlex.quote("[/]nero-(orb-slam|pure-pursuit)( |$)")
+    conflict = shlex.quote(
+        "another Nero navigation policy is already running; stop it before "
+        f"selecting {policy_command}"
     )
     return "\n".join(
         (
@@ -165,10 +171,16 @@ def _policy_bootstrap_script(
             "if [ -f /opt/booster/BoosterAgent/install/setup.bash ]; then "
             ". /opt/booster/BoosterAgent/install/setup.bash; fi",
             "policy_pid=$(pgrep -u \"$(id -u)\" -f "
-            "'[/]nero-orb-slam( |$)' | head -n 1 || true)",
+            f"{process_pattern} | head -n 1 || true)",
+            "any_policy_pid=$(pgrep -u \"$(id -u)\" -f "
+            f"{any_policy_pattern} | head -n 1 || true)",
             'if [ -z "$policy_pid" ]; then',
+            '  if [ -n "$any_policy_pid" ]; then',
+            f"    echo {conflict} >&2",
+            "    exit 1",
+            "  fi",
             f"  if [ -S {socket_arg} ]; then rm -f -- {socket_arg}; fi",
-            '  echo "Starting nero-orb-slam on the robot..."',
+            f"  echo \"Starting {policy_command} on the robot...\"",
             f"  nohup {launch} >{log_arg} 2>&1 </dev/null &",
             "  policy_pid=$!",
             "fi",
@@ -236,27 +248,32 @@ def main() -> None:
         help="Missed SSH keepalives before disconnecting",
     )
     parser.add_argument(
+        "--policy",
+        choices=("orb-slam", "pure-pursuit"),
+        default="orb-slam",
+        help="Robot navigation policy to reuse or start",
+    )
+    parser.add_argument(
         "--policy-start-timeout",
         type=float,
         default=DEFAULT_POLICY_START_TIMEOUT,
-        help="Seconds to wait for nero-orb-slam to create its command socket",
+        help="Seconds to wait for the robot policy to create its command socket",
     )
     parser.add_argument(
         "--policy-log",
-        default=DEFAULT_POLICY_LOG,
-        help="Robot-side log used when nero-command starts nero-orb-slam",
+        help="Robot-side startup log (default: /tmp/<policy>.log)",
     )
     parser.add_argument(
         "--object-backend",
-        help="Robot detector backend to use when starting nero-orb-slam",
+        help="Robot detector backend passed to a newly started policy",
     )
     parser.add_argument(
         "--aruco-map",
-        help="Robot-side ArUco marker mapping passed to nero-orb-slam",
+        help="Robot-side ArUco marker mapping passed to a newly started policy",
     )
     parser.add_argument(
         "--aruco-dictionary",
-        help="OpenCV ArUco dictionary passed to nero-orb-slam",
+        help="OpenCV ArUco dictionary passed to a newly started policy",
     )
     args = parser.parse_args()
     if not 1 <= args.rerun_port <= 65535:
@@ -273,6 +290,8 @@ def main() -> None:
 
     viewer = None
     try:
+        policy_command = f"nero-{args.policy}"
+        policy_log = args.policy_log or f"/tmp/{policy_command}.log"
         policy_args = []
         for option, value in (
             ("--object-backend", args.object_backend),
@@ -284,8 +303,9 @@ def main() -> None:
         bootstrap = _policy_bootstrap_script(
             args.socket,
             args.policy_start_timeout,
-            args.policy_log,
+            policy_log,
             tuple(policy_args),
+            policy_command,
         )
         if args.no_rerun:
             remote_script = "\n".join(

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import signal
 import time
 
@@ -29,8 +28,8 @@ from nero.navigation.policy import NavigationPolicy, PolicyState
 from nero.navigation.map_policy import MapNavConfig
 from nero.navigation.global_localization import GlobalLocalizationConfig
 from nero.observability import RosObservabilityPublisher
-from nero.perception.aruco_detector import ArucoObjectDetector
-from nero.perception.object_detector import ObjectDetector, configure_qualcomm_cpu_partition
+from nero.perception.detector_factory import create_object_detector
+from nero.perception.object_detector import configure_qualcomm_cpu_partition
 
 logger = logging.getLogger(__name__)
 
@@ -105,15 +104,11 @@ def parse_args() -> argparse.Namespace:
 
 def build_object_detector(args: argparse.Namespace):
     """Build the selected detector without exposing K1 camera parameters."""
-    backend = getattr(args, "object_backend", None) or os.getenv("NERO_OBJECT_BACKEND")
-    if backend and backend.strip().lower().replace("_", "-") == "aruco":
-        return ArucoObjectDetector(
-            mapping_path=getattr(args, "aruco_map", None),
-            dictionary=getattr(args, "aruco_dictionary", None),
-        )
-    if getattr(args, "aruco_map", None):
-        raise ValueError("--aruco-map requires --object-backend aruco")
-    return ObjectDetector(backend=backend)
+    return create_object_detector(
+        backend=getattr(args, "object_backend", None),
+        aruco_map=getattr(args, "aruco_map", None),
+        aruco_dictionary=getattr(args, "aruco_dictionary", None),
+    )
 
 
 def run_agent(

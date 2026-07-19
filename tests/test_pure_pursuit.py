@@ -194,6 +194,124 @@ def test_direct_policy_uses_separate_initial_acquisition_timeout(monkeypatch):
     assert policy.step().state == PursuitState.LOST
 
 
+def test_direct_policy_survives_rejected_zero_velocity_command():
+    state = SimpleNamespace(
+        rgb=np.zeros((8, 8, 3), dtype=np.uint8),
+        depth=np.full((8, 8), 2000, dtype=np.uint16),
+        camera_info=SimpleNamespace(k=np.eye(3)),
+        orientation_rpy=np.zeros(3),
+        position_2d=np.zeros(3),
+        battery_level=100.0,
+    )
+    robot = SimpleNamespace(
+        get_state=lambda include_images=True: state,
+        image_to_array=np.asarray,
+        image_timestamp=lambda _image: 1.0,
+        set_velocity=lambda *_values: (_ for _ in ()).throw(
+            RuntimeError("API call failed, code = 400")
+        ),
+    )
+    policy = DirectPursuitPolicy(robot, object_detector=SimpleNamespace())
+    policy._running = True
+    policy.state = PursuitState.WAITING_FOR_OBJECT
+
+    status = policy.step()
+
+    assert status.state == PursuitState.WAITING_FOR_OBJECT
+
+
+def test_run_agent_streams_telemetry_and_announces_missing_target_once(monkeypatch):
+    spoken = []
+    published = []
+    sensor = SimpleNamespace(
+        rgb=np.zeros((4, 4, 3), dtype=np.uint8),
+        timestamp=1.0,
+        raw_state=SimpleNamespace(),
+    )
+
+    class LostPolicy:
+        last_sensor = sensor
+
+        def __init__(self, *args, **kwargs):
+            self.calls = 0
+
+        def start(self):
+            pass
+
+        def supports_target(self, _name):
+            return True
+
+        def set_target(self, name):
+            self.target = name
+
+        def step(self):
+            self.calls += 1
+            state = PursuitState.LOST if self.calls == 1 else PursuitState.ERROR
+            return SimpleNamespace(
+                state=state,
+                message="not found",
+                velocity_command=SimpleNamespace(linear_x=0.0, angular_z=0.0),
+            )
+
+        def reset(self):
+            pass
+
+        def stop(self):
+            pass
+
+    class Listener:
+        def __init__(self, *args, **kwargs):
+            self.commands = ["green cup"]
+
+        def start(self):
+            pass
+
+        def poll(self):
+            return self.commands.pop(0) if self.commands else None
+
+        def close(self):
+            pass
+
+    telemetry = SimpleNamespace(
+        publish_robot_state=lambda *args: published.append("sensors"),
+        publish_policy=lambda *args: published.append("policy"),
+        close=lambda: published.append("closed"),
+    )
+    monkeypatch.setattr(pursuit_agent, "DirectPursuitPolicy", LostPolicy)
+    monkeypatch.setattr(pursuit_agent, "NavigationTargetListener", Listener)
+    monkeypatch.setattr(pursuit_agent.signal, "signal", lambda *_args: None)
+    monkeypatch.setattr(
+        pursuit_agent.RosObservabilityPublisher,
+        "try_create",
+        lambda **kwargs: telemetry,
+    )
+    robot = SimpleNamespace(
+        stop=lambda: None,
+        speak=spoken.append,
+    )
+    args = SimpleNamespace(
+        max_velocity=0.25,
+        max_angular_velocity=0.7,
+        target_timeout=3.0,
+        acquisition_timeout=20.0,
+        search_angular_velocity=0.12,
+        no_ros_observability=False,
+        no_display=True,
+    )
+
+    pursuit_agent.run_agent(
+        robot,
+        args,
+        object_detector=SimpleNamespace(),
+        command_source=SimpleNamespace(),
+    )
+
+    assert spoken == ["I could not detect the green cup."]
+    assert published.count("sensors") == 2
+    assert published.count("policy") == 2
+    assert published[-1] == "closed"
+
+
 def test_run_agent_cleans_up_when_listener_start_fails(monkeypatch):
     events = []
 
