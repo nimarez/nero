@@ -1,7 +1,7 @@
 # M2 Vive localization -> ROS 2 handoff
 
-Owner: Jon (`hi@jonny.sh`)  
-Consumer: Nima / navigation and K1 integration  
+Owner: Jon (`hi@jonny.sh`)<br>
+Consumer: Nima / navigation and K1 integration<br>
 Implementation PR: <https://github.com/nimarez/nero/pull/6>
 
 ## What is live now
