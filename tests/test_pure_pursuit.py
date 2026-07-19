@@ -3,7 +3,12 @@ from types import SimpleNamespace
 import numpy as np
 
 import nero.agents.pure_pursuit_agent as pursuit_agent
-from nero.agents.pure_pursuit_agent import DirectPursuitPolicy, PursuitState
+from nero.agents.pure_pursuit_agent import (
+    DEFAULT_HEAD_SCAN_POSES,
+    DirectPursuitPolicy,
+    HeadScanConfig,
+    PursuitState,
+)
 from nero.navigation.pure_pursuit import PurePursuitConfig, PurePursuitController
 from nero.perception.object_detector import ObjectDetection
 
@@ -50,8 +55,11 @@ def test_pure_pursuit_rejects_minimum_above_configured_maximum():
         )
 
 
-def test_direct_policy_pursues_live_detection_without_slam():
+def test_direct_policy_pursues_live_detection_without_slam(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(pursuit_agent.time, "monotonic", lambda: now[0])
     velocities = []
+    head_poses = []
     state = SimpleNamespace(
         rgb=np.zeros((8, 8, 3), dtype=np.uint8),
         depth=np.full((8, 8), 2000, dtype=np.uint16),
@@ -67,6 +75,7 @@ def test_direct_policy_pursues_live_detection_without_slam():
         image_to_array=np.asarray,
         image_timestamp=lambda _image: 1.0,
         set_velocity=lambda *values: velocities.append(values),
+        set_head_pose=lambda *values: head_poses.append(values),
     )
     detection = ObjectDetection(
         label="chair",
@@ -84,10 +93,22 @@ def test_direct_policy_pursues_live_detection_without_slam():
         find_object=lambda detections, _name: detections[0],
         close=lambda: None,
     )
-    policy = DirectPursuitPolicy(robot, object_detector=detector)
+    policy = DirectPursuitPolicy(
+        robot,
+        object_detector=detector,
+        head_scan=HeadScanConfig(poses=((0.0, 0.0),), move_duration=0.01, settle_time=0.0),
+    )
 
     policy.start()
     policy.set_target("chair")
+    assert policy.step().state == PursuitState.EXPLORING
+    now[0] = 0.02
+    assert policy.step().state == PursuitState.DETECTING
+    now[0] = 0.03
+    assert policy.step().state == PursuitState.ALIGNING
+    now[0] = 0.05
+    assert policy.step().state == PursuitState.DETECTING
+    now[0] = 0.06
     status = policy.step()
 
     assert status.state == PursuitState.NAVIGATING
@@ -96,6 +117,8 @@ def test_direct_policy_pursues_live_detection_without_slam():
     assert status.stand_off_distance == 1.0
     assert status.stand_off_tolerance == 0.12
     assert status.target_position_camera == [0.0, 0.0, 2.0]
+    assert head_poses == [(0.0, 0.0, 0.01), (0.0, 0.0, 0.01)]
+    assert all(values == (0.0, 0.0, 0.0) for values in velocities[:-1])
 
 
 def test_direct_policy_safety_opt_out_preserves_diagnostics_but_allows_motion():
@@ -113,6 +136,7 @@ def test_direct_policy_safety_opt_out_preserves_diagnostics_but_allows_motion():
         image_to_array=np.asarray,
         image_timestamp=lambda _image: 1.0,
         set_velocity=lambda *values: velocities.append(values),
+        set_head_pose=lambda *_values: None,
     )
     detection = ObjectDetection(
         label="chair",
@@ -184,6 +208,7 @@ def test_direct_policy_expires_replayed_async_detection(monkeypatch):
         image_to_array=np.asarray,
         image_timestamp=lambda _image: 1.0,
         set_velocity=lambda *values: velocities.append(values),
+        set_head_pose=lambda *_values: None,
     )
     detection = ObjectDetection(
         label="chair",
@@ -205,12 +230,17 @@ def test_direct_policy_expires_replayed_async_detection(monkeypatch):
     policy = DirectPursuitPolicy(robot, object_detector=detector, target_timeout=1.0)
     policy.start()
     policy.set_target("chair")
-    assert policy.step().state == PursuitState.NAVIGATING
+    assert policy.step().state == PursuitState.EXPLORING
 
-    now[0] = 1.1
+    now[0] = 0.5
+    assert policy.step().state == PursuitState.EXPLORING
+    detector.result_revision = 2
+    now[0] = 0.6
+    assert policy.step().state == PursuitState.DETECTING
+    now[0] = 1.7
     status = policy.step()
 
-    assert status.state == PursuitState.LOST
+    assert status.state == PursuitState.EXPLORING
     assert velocities[-1] == (0.0, 0.0, 0.0)
 
 
@@ -232,6 +262,7 @@ def test_direct_policy_uses_separate_initial_acquisition_timeout(monkeypatch):
         image_to_array=np.asarray,
         image_timestamp=lambda _image: 1.0,
         set_velocity=lambda *_values: None,
+        set_head_pose=lambda *_values: None,
     )
     detector = SimpleNamespace(
         result_revision=0,
@@ -253,9 +284,194 @@ def test_direct_policy_uses_separate_initial_acquisition_timeout(monkeypatch):
     policy.set_target("chair")
 
     now[0] = 2.0
-    assert policy.step().state == PursuitState.DETECTING
+    assert policy.step().state == PursuitState.EXPLORING
     now[0] = 10.1
     assert policy.step().state == PursuitState.LOST
+
+
+def test_direct_policy_scans_every_default_head_pose_without_moving_base(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(pursuit_agent.time, "monotonic", lambda: now[0])
+    velocities = []
+    head_poses = []
+    state = SimpleNamespace(
+        rgb=np.zeros((8, 8, 3), dtype=np.uint8),
+        depth=np.full((8, 8), 2000, dtype=np.uint16),
+        camera_info=SimpleNamespace(k=np.eye(3)),
+        orientation_rpy=np.zeros(3),
+        position_2d=np.zeros(3),
+        battery_level=100.0,
+    )
+    robot = SimpleNamespace(
+        initialize=lambda: None,
+        stop=lambda: None,
+        get_state=lambda include_images=True: state,
+        image_to_array=np.asarray,
+        image_timestamp=lambda _image: 1.0,
+        set_velocity=lambda *values: velocities.append(values),
+        set_head_pose=lambda *values: head_poses.append(values),
+    )
+    detector = SimpleNamespace(
+        initialize=lambda: True,
+        supports_target=lambda _name: True,
+        resolve_target=lambda name: name,
+        set_target=lambda _name: None,
+        detect=lambda *_args: [],
+        find_object=lambda _detections, _name: None,
+        close=lambda: None,
+    )
+    policy = DirectPursuitPolicy(robot, object_detector=detector)
+    policy.start()
+    policy.set_target("chair")
+
+    status = policy.step()
+    for index in range(1, len(DEFAULT_HEAD_SCAN_POSES)):
+        now[0] = index * 0.51
+        status = policy.step()
+
+    assert status.state == PursuitState.EXPLORING
+    assert status.exploration_step == len(DEFAULT_HEAD_SCAN_POSES)
+    assert status.exploration_steps == len(DEFAULT_HEAD_SCAN_POSES)
+    assert head_poses == [(pitch, yaw, 0.35) for pitch, yaw in DEFAULT_HEAD_SCAN_POSES]
+    assert velocities
+    assert all(values == (0.0, 0.0, 0.0) for values in velocities)
+
+
+def test_direct_policy_only_rotates_after_side_detection_then_reconfirms(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(pursuit_agent.time, "monotonic", lambda: now[0])
+    velocities = []
+    odometry = np.zeros(3)
+    state = SimpleNamespace(
+        rgb=np.zeros((8, 8, 3), dtype=np.uint8),
+        depth=np.full((8, 8), 2000, dtype=np.uint16),
+        camera_info=SimpleNamespace(k=np.eye(3)),
+        orientation_rpy=np.zeros(3),
+        position_2d=odometry,
+        battery_level=100.0,
+    )
+    robot = SimpleNamespace(
+        initialize=lambda: None,
+        stop=lambda: None,
+        get_state=lambda include_images=True: state,
+        image_to_array=np.asarray,
+        image_timestamp=lambda _image: 1.0,
+        set_velocity=lambda *values: velocities.append(values),
+        set_head_pose=lambda *_values: None,
+    )
+    detection = ObjectDetection(
+        label="chair",
+        confidence=0.9,
+        bbox=(1, 1, 4, 4),
+        position_3d=np.array([0.0, 0.0, 2.0]),
+        distance=2.0,
+    )
+    detector = SimpleNamespace(
+        initialize=lambda: True,
+        supports_target=lambda _name: True,
+        resolve_target=lambda name: name,
+        set_target=lambda _name: None,
+        detect=lambda *_args: [detection],
+        find_object=lambda detections, _name: detections[0],
+        close=lambda: None,
+    )
+    policy = DirectPursuitPolicy(
+        robot,
+        object_detector=detector,
+        head_scan=HeadScanConfig(poses=((0.0, 0.75),), move_duration=0.01, settle_time=0.0),
+    )
+    policy.start()
+    policy.set_target("chair")
+
+    assert policy.step().state == PursuitState.EXPLORING
+    now[0] = 0.02
+    assert policy.step().state == PursuitState.DETECTING
+    now[0] = 0.03
+    assert policy.step().state == PursuitState.ALIGNING
+    assert all(values == (0.0, 0.0, 0.0) for values in velocities)
+
+    now[0] = 0.05
+    aligning = policy.step()
+    assert aligning.state == PursuitState.ALIGNING
+    assert aligning.velocity_command.linear_x == 0.0
+    assert aligning.velocity_command.angular_z > 0.0
+
+    odometry[2] = 0.75
+    now[0] = 0.06
+    assert policy.step().state == PursuitState.DETECTING
+    now[0] = 0.07
+    navigating = policy.step()
+    assert navigating.state == PursuitState.NAVIGATING
+    assert navigating.velocity_command.linear_x > 0.0
+
+
+def test_direct_policy_stops_when_head_scan_command_is_rejected():
+    velocities = []
+    state = SimpleNamespace(
+        rgb=np.zeros((8, 8, 3), dtype=np.uint8),
+        depth=np.full((8, 8), 2000, dtype=np.uint16),
+        camera_info=SimpleNamespace(k=np.eye(3)),
+        orientation_rpy=np.zeros(3),
+        position_2d=np.zeros(3),
+        battery_level=100.0,
+    )
+    robot = SimpleNamespace(
+        initialize=lambda: None,
+        stop=lambda: None,
+        get_state=lambda include_images=True: state,
+        image_to_array=np.asarray,
+        image_timestamp=lambda _image: 1.0,
+        set_velocity=lambda *values: velocities.append(values),
+        set_head_pose=lambda *_values: (_ for _ in ()).throw(
+            RuntimeError("head service unavailable")
+        ),
+    )
+    detector = SimpleNamespace(
+        initialize=lambda: True,
+        supports_target=lambda _name: True,
+        resolve_target=lambda name: name,
+        set_target=lambda _name: None,
+        detect=lambda *_args: [],
+        find_object=lambda _detections, _name: None,
+        close=lambda: None,
+    )
+    policy = DirectPursuitPolicy(robot, object_detector=detector)
+    policy.start()
+    policy.set_target("chair")
+
+    status = policy.step()
+
+    assert status.state == PursuitState.ERROR
+    assert "Head command failed" in status.message
+    assert velocities[-1] == (0.0, 0.0, 0.0)
+
+
+def test_direct_policy_never_starts_head_scan_when_base_stop_is_rejected():
+    head_poses = []
+    robot = SimpleNamespace(
+        initialize=lambda: None,
+        stop=lambda: None,
+        set_velocity=lambda *_values: (_ for _ in ()).throw(
+            RuntimeError("walking controller rejected stop")
+        ),
+        set_head_pose=lambda *values: head_poses.append(values),
+    )
+    detector = SimpleNamespace(
+        initialize=lambda: True,
+        supports_target=lambda _name: True,
+        resolve_target=lambda name: name,
+        set_target=lambda _name: None,
+        close=lambda: None,
+    )
+    policy = DirectPursuitPolicy(robot, object_detector=detector)
+    policy.start()
+
+    status = policy.set_target("chair")
+
+    assert status.state == PursuitState.ERROR
+    assert "Locomotion command failed" in status.message
+    assert head_poses == []
+    assert policy.step().state == PursuitState.ERROR
 
 
 def test_direct_policy_survives_rejected_zero_velocity_command():
@@ -394,6 +610,7 @@ def test_run_agent_cleans_up_when_listener_start_fails(monkeypatch):
         initialize=lambda: events.append("robot initialize"),
         stop=lambda: events.append("robot stop"),
         set_velocity=lambda *_values: events.append("robot velocity"),
+        set_head_pose=lambda *_values: events.append("head pose"),
     )
     detector = SimpleNamespace(
         initialize=lambda: events.append("detector initialize") or True,

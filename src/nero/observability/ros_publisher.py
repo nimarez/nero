@@ -435,6 +435,12 @@ class RosObservabilityPublisher:
                     getattr(status, "current_pose", None), "confidence", None
                 ),
                 "navigation_geometry": navigation_geometry_payload(status),
+                "head": {
+                    "pitch": getattr(status, "head_pitch", None),
+                    "yaw": getattr(status, "head_yaw", None),
+                    "exploration_step": getattr(status, "exploration_step", None),
+                    "exploration_steps": getattr(status, "exploration_steps", None),
+                },
                 "safety": safety_payload(status),
                 "detector": getattr(status, "detector_metrics", None),
             },

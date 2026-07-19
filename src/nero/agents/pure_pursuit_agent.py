@@ -13,11 +13,13 @@ from __future__ import annotations
 import argparse
 import enum
 import logging
+import math
 import signal
 import time
 from dataclasses import dataclass, field
 
 import cv2
+import numpy as np
 
 from nero.interaction import (
     K1VoiceCommandSource,
@@ -38,7 +40,7 @@ from nero.perception.object_detector import (
     ObjectDetector,
     configure_qualcomm_cpu_partition,
 )
-from nero.robot import RobotInterface
+from nero.robot import K1_HEAD_PITCH_LIMITS, K1_HEAD_YAW_LIMITS, RobotInterface
 from nero.utils.visualization import Visualization
 
 logger = logging.getLogger(__name__)
@@ -48,10 +50,56 @@ class PursuitState(enum.Enum):
     IDLE = "idle"
     WAITING_FOR_OBJECT = "waiting_for_object"
     DETECTING = "detecting"
+    EXPLORING = "exploring"
+    ALIGNING = "aligning"
     NAVIGATING = "navigating"
     ARRIVED = "arrived"
     LOST = "lost"
     ERROR = "error"
+
+
+DEFAULT_HEAD_SCAN_POSES = (
+    (0.0, 0.0),
+    (0.0, -0.375),
+    (0.0, -0.75),
+    (-0.25, -0.75),
+    (-0.25, -0.375),
+    (-0.25, 0.0),
+    (-0.25, 0.375),
+    (-0.25, 0.75),
+    (0.0, 0.75),
+    (0.0, 0.375),
+    (0.65, 0.75),
+    (0.65, 0.375),
+    (0.65, 0.0),
+    (0.65, -0.375),
+    (0.65, -0.75),
+)
+_REVISION_UNSET = object()
+
+
+@dataclass(frozen=True)
+class HeadScanConfig:
+    """Safe K1 head poses and timing for stationary visual exploration."""
+
+    poses: tuple[tuple[float, float], ...] = DEFAULT_HEAD_SCAN_POSES
+    move_duration: float = 0.35
+    settle_time: float = 0.15
+
+    def __post_init__(self) -> None:
+        if not self.poses:
+            raise ValueError("head scan must contain at least one pose")
+        if not math.isfinite(self.move_duration) or self.move_duration <= 0:
+            raise ValueError("head scan move_duration must be positive and finite")
+        if not math.isfinite(self.settle_time) or self.settle_time < 0:
+            raise ValueError("head scan settle_time must be non-negative and finite")
+        for pitch, yaw in self.poses:
+            if not math.isfinite(pitch) or not math.isfinite(yaw):
+                raise ValueError("head scan poses must be finite")
+            if not K1_HEAD_PITCH_LIMITS[0] <= pitch <= K1_HEAD_PITCH_LIMITS[1]:
+                raise ValueError("head scan pitch must stay within K1 limits")
+            if not K1_HEAD_YAW_LIMITS[0] <= yaw <= K1_HEAD_YAW_LIMITS[1]:
+                raise ValueError("head scan yaw must stay within K1 limits")
 
 
 @dataclass
@@ -68,6 +116,10 @@ class PursuitStatus:
     target_position_camera: list[float] | None = None
     obstacle_info: dict | None = None
     detector_metrics: dict | None = None
+    head_pitch: float = 0.0
+    head_yaw: float = 0.0
+    exploration_step: int | None = None
+    exploration_steps: int = 0
 
 
 class DirectPursuitPolicy:
@@ -81,13 +133,11 @@ class DirectPursuitPolicy:
         controller=None,
         depth_processor=None,
         safety=None,
-        search_angular_velocity: float = 0.08,
+        head_scan: HeadScanConfig | None = None,
         target_timeout: float = 3.0,
         acquisition_timeout: float = 20.0,
         safety_enforced: bool = True,
     ) -> None:
-        if search_angular_velocity < 0:
-            raise ValueError("search_angular_velocity must be non-negative")
         if target_timeout <= 0:
             raise ValueError("target_timeout must be positive")
         if acquisition_timeout <= 0:
@@ -98,7 +148,7 @@ class DirectPursuitPolicy:
         self.depth = depth_processor or DepthProcessor()
         self.safety = safety or SafetyMonitor()
         self.safety_enforced = bool(safety_enforced)
-        self.search_angular_velocity = search_angular_velocity
+        self.head_scan = head_scan or HeadScanConfig()
         self.target_timeout = target_timeout
         self.acquisition_timeout = acquisition_timeout
         self.state = PursuitState.IDLE
@@ -106,8 +156,16 @@ class DirectPursuitPolicy:
         self.stand_off = 0.8
         self.last_sensor: SensorFrame | None = None
         self._last_seen: float | None = None
-        self._search_started: float | None = None
+        self._exploration_started: float | None = None
         self._last_detection_revision: int | None = None
+        self._confirmation_started: float | None = None
+        self._confirmation_revision: int | None = None
+        self._confirmation_requires_alignment = False
+        self._scan_index = 0
+        self._scan_pose_ready_at: float | None = None
+        self._scan_settle_revision = _REVISION_UNSET
+        self._head_pose = (0.0, 0.0)
+        self._alignment_yaw = 0.0
         self._running = False
         self._last_obstacle_info: dict | None = None
 
@@ -116,6 +174,8 @@ class DirectPursuitPolicy:
             logger.warning("SAFETY ENFORCEMENT IS DISABLED; hazard checks are diagnostic only")
         try:
             self.robot.initialize()
+            if not callable(getattr(self.robot, "set_head_pose", None)):
+                raise RuntimeError("Pure pursuit requires K1 head pose control")
             if not self.detector.initialize():
                 raise RuntimeError("No live object detector is available")
             self.safety.reset()
@@ -145,14 +205,21 @@ class DirectPursuitPolicy:
         self.target = resolved
         self.stand_off = safe_stand_off_distance(resolved)
         self._last_seen = None
-        self._search_started = time.monotonic()
+        self._begin_exploration(time.monotonic(), reset_scan=True)
         self._last_detection_revision = None
-        self.state = PursuitState.DETECTING
-        return self._status(f"Searching for '{resolved}'")
+        self._confirmation_started = None
+        self._confirmation_revision = None
+        self._confirmation_requires_alignment = False
+        stop_failure = self._stop_required([], None)
+        if stop_failure is not None:
+            return stop_failure
+        return self._status(f"Exploring for '{resolved}' with the head")
 
     def step(self) -> PursuitStatus:
         if not self._running:
             return self._status("Policy not running")
+        if self.state == PursuitState.ERROR:
+            return self._status("Policy stopped after a command or sensor error")
         try:
             sensor = read_sensor_frame(self.robot)
             self.last_sensor = sensor
@@ -171,9 +238,6 @@ class DirectPursuitPolicy:
             self._stop_robot()
             return self._status(f"Sensor failure: {exc}")
 
-        if self.safety_enforced and not safety.is_safe:
-            self._stop_robot()
-            return self._status(f"Motion blocked: {safety.reason}", safety_status=safety)
         if self.target is None:
             self.state = PursuitState.WAITING_FOR_OBJECT
             self._stop_robot()
@@ -185,14 +249,61 @@ class DirectPursuitPolicy:
         if new_detection_result:
             self._last_detection_revision = revision
         target = self.detector.find_object(detections, self.target)
-        if target is None or target.position_3d is None:
-            return self._search(detections, safety, obstacles)
-
         now = time.monotonic()
+
+        if self.state == PursuitState.EXPLORING:
+            observation_ready = self._scan_observation_ready(now, revision)
+            if (
+                observation_ready
+                and new_detection_result
+                and target is not None
+                and target.position_3d is not None
+            ):
+                return self._begin_confirmation(detections, safety, revision, now)
+            return self._explore(
+                detections,
+                safety,
+                revision,
+                now,
+                observation_ready=observation_ready,
+            )
+
+        if self.state == PursuitState.ALIGNING:
+            return self._align_to_discovery(sensor, detections, safety, revision, now)
+
+        if self._confirmation_started is not None:
+            return self._confirm_detection(
+                target,
+                detections,
+                safety,
+                obstacles,
+                revision,
+                now,
+                new_detection_result,
+            )
+
+        if target is None or target.position_3d is None:
+            self._begin_exploration(now, reset_scan=True)
+            return self._explore(detections, safety, revision, now)
+
         if new_detection_result:
             self._last_seen = now
         elif self._last_seen is None or now - self._last_seen > self.target_timeout:
-            return self._target_lost(detections, safety)
+            self._begin_exploration(now, reset_scan=True)
+            return self._explore(detections, safety, revision, now)
+        return self._pursue(target, detections, safety, obstacles)
+
+    def _pursue(self, target, detections, safety, obstacles) -> PursuitStatus:
+        if self.safety_enforced and not safety.is_safe:
+            stop_failure = self._stop_required(detections, safety)
+            if stop_failure is not None:
+                return stop_failure
+            return self._status(
+                f"Motion blocked: {safety.reason}",
+                detections=detections,
+                safety_status=safety,
+                target_position=target.position_3d,
+            )
         self.state = PursuitState.NAVIGATING
         try:
             arrived = self.controller.has_arrived(target.position_3d, self.stand_off)
@@ -236,32 +347,250 @@ class DirectPursuitPolicy:
             target_position=target.position_3d,
         )
 
-    def _search(self, detections, safety, obstacles) -> PursuitStatus:
-        now = time.monotonic()
-        acquired = self._last_seen is not None
-        reference = self._last_seen if acquired else self._search_started
-        reference = now if reference is None else reference
-        timeout = self.target_timeout if acquired else self.acquisition_timeout
-        if now - reference > timeout:
+    def _begin_exploration(self, now: float, *, reset_scan: bool) -> None:
+        self.state = PursuitState.EXPLORING
+        self._confirmation_started = None
+        self._confirmation_revision = None
+        self._confirmation_requires_alignment = False
+        if reset_scan or self._exploration_started is None:
+            self._exploration_started = now
+        if reset_scan:
+            self._scan_index = 0
+            self._scan_pose_ready_at = None
+            self._scan_settle_revision = _REVISION_UNSET
+
+    def _scan_observation_ready(self, now: float, revision: int | None) -> bool:
+        if self._scan_pose_ready_at is None or now < self._scan_pose_ready_at:
+            return False
+        if revision is None:
+            return True
+        if self._scan_settle_revision is _REVISION_UNSET:
+            self._scan_settle_revision = revision
+            return False
+        return revision != self._scan_settle_revision
+
+    def _explore(
+        self,
+        detections,
+        safety,
+        revision,
+        now: float,
+        *,
+        observation_ready: bool = False,
+    ) -> PursuitStatus:
+        self.state = PursuitState.EXPLORING
+        stop_failure = self._stop_required(detections, safety)
+        if stop_failure is not None:
+            return stop_failure
+        started = now if self._exploration_started is None else self._exploration_started
+        self._exploration_started = started
+        if now - started > self.acquisition_timeout:
             return self._target_lost(detections, safety)
+        if observation_ready:
+            self._scan_index = (self._scan_index + 1) % len(self.head_scan.poses)
+            self._scan_pose_ready_at = None
+            self._scan_settle_revision = _REVISION_UNSET
+        if self._scan_pose_ready_at is None:
+            pitch, yaw = self.head_scan.poses[self._scan_index]
+            try:
+                self.robot.set_head_pose(pitch, yaw, self.head_scan.move_duration)
+            except (RuntimeError, ValueError) as exc:
+                return self._head_control_error(exc, detections, safety)
+            self._head_pose = (pitch, yaw)
+            self._scan_pose_ready_at = (
+                now + self.head_scan.move_duration + self.head_scan.settle_time
+            )
+            self._scan_settle_revision = _REVISION_UNSET
+        pitch, yaw = self._head_pose
+        return self._status(
+            f"Exploring for '{self.target}' with head pose "
+            f"{self._scan_index + 1}/{len(self.head_scan.poses)} "
+            f"(pitch={pitch:+.2f}, yaw={yaw:+.2f})",
+            detections=detections,
+            safety_status=safety,
+        )
+
+    def _begin_confirmation(
+        self,
+        detections,
+        safety,
+        revision: int | None,
+        now: float,
+    ) -> PursuitStatus:
         self.state = PursuitState.DETECTING
-        obstacle_blocked = self.safety_enforced and obstacles.get("has_obstacle", True)
-        angular = self.search_angular_velocity if not obstacle_blocked else 0.0
+        self._confirmation_started = now
+        self._confirmation_revision = revision
+        self._confirmation_requires_alignment = True
+        stop_failure = self._stop_required(detections, safety)
+        if stop_failure is not None:
+            return stop_failure
+        return self._status(
+            f"Confirming '{self.target}' at the current head pose",
+            detections=detections,
+            safety_status=safety,
+        )
+
+    def _confirm_detection(
+        self,
+        target,
+        detections,
+        safety,
+        obstacles,
+        revision: int | None,
+        now: float,
+        new_detection_result: bool,
+    ) -> PursuitStatus:
+        stop_failure = self._stop_required(detections, safety)
+        if stop_failure is not None:
+            return stop_failure
+        if now - self._confirmation_started > self.target_timeout:
+            self._resume_exploration(now, advance_scan=True)
+            return self._explore(detections, safety, revision, now)
+        fresh = revision is None or (
+            new_detection_result and revision != self._confirmation_revision
+        )
+        if not fresh:
+            return self._status(
+                f"Waiting for a fresh '{self.target}' detection",
+                detections=detections,
+                safety_status=safety,
+            )
+        if target is None or target.position_3d is None:
+            self._resume_exploration(now, advance_scan=True)
+            return self._explore(detections, safety, revision, now)
+        self._last_seen = now
+        self._confirmation_started = None
+        self._confirmation_revision = None
+        requires_alignment = self._confirmation_requires_alignment
+        self._confirmation_requires_alignment = False
+        if requires_alignment:
+            return self._begin_alignment(target, detections, safety, now)
+        self._exploration_started = None
+        return self._pursue(target, detections, safety, obstacles)
+
+    def _begin_alignment(self, target, detections, safety, now: float) -> PursuitStatus:
+        stop_failure = self._stop_required(detections, safety)
+        if stop_failure is not None:
+            return stop_failure
+        try:
+            target_base = self._target_at_base_heading(target.position_3d)
+            lateral = -float(target_base[0])
+            forward = float(target_base[2])
+            bearing = math.atan2(lateral, forward)
+            current_yaw = float(self.last_sensor.odometry[2])
+            self._alignment_yaw = self._normalize_angle(current_yaw + bearing)
+            self.robot.set_head_pose(0.0, 0.0, self.head_scan.move_duration)
+        except (RuntimeError, ValueError, IndexError) as exc:
+            return self._head_control_error(exc, detections, safety)
+        self._head_pose = (0.0, 0.0)
+        self._scan_pose_ready_at = now + self.head_scan.move_duration + self.head_scan.settle_time
+        self.state = PursuitState.ALIGNING
+        self._stop_robot()
+        return self._status(
+            f"Centering the head before pursuing '{self.target}'",
+            detections=detections,
+            safety_status=safety,
+            target_position=target.position_3d,
+        )
+
+    def _align_to_discovery(
+        self,
+        sensor,
+        detections,
+        safety,
+        revision: int | None,
+        now: float,
+    ) -> PursuitStatus:
+        if self._scan_pose_ready_at is not None and now < self._scan_pose_ready_at:
+            stop_failure = self._stop_required(detections, safety)
+            if stop_failure is not None:
+                return stop_failure
+            return self._status(
+                f"Centering the head before pursuing '{self.target}'",
+                detections=detections,
+                safety_status=safety,
+            )
+        if (
+            self._exploration_started is not None
+            and now - self._exploration_started > self.acquisition_timeout
+        ):
+            return self._target_lost(detections, safety)
+        if self.safety_enforced and not safety.is_safe:
+            stop_failure = self._stop_required(detections, safety)
+            if stop_failure is not None:
+                return stop_failure
+            return self._status(
+                f"Alignment blocked: {safety.reason}",
+                detections=detections,
+                safety_status=safety,
+            )
+        current_yaw = float(sensor.odometry[2])
+        yaw_error = self._normalize_angle(self._alignment_yaw - current_yaw)
+        if abs(yaw_error) <= self.controller.config.bearing_tolerance:
+            self.state = PursuitState.DETECTING
+            self._confirmation_started = now
+            self._confirmation_revision = revision
+            self._confirmation_requires_alignment = False
+            stop_failure = self._stop_required(detections, safety)
+            if stop_failure is not None:
+                return stop_failure
+            return self._status(
+                f"Confirming centered view of '{self.target}'",
+                detections=detections,
+                safety_status=safety,
+            )
+        angular = float(
+            np.clip(
+                2.0 * yaw_error,
+                -self.controller.config.max_angular_velocity,
+                self.controller.config.max_angular_velocity,
+            )
+        )
         command = VelocityCommand(angular_z=angular)
         try:
             send_velocity(self.robot, command)
         except RuntimeError as exc:
             return self._locomotion_error(exc, detections, safety)
         return self._status(
-            f"Searching for '{self.target}'",
+            f"Aligning the body with '{self.target}'",
             command=command,
             detections=detections,
             safety_status=safety,
         )
 
+    def _resume_exploration(self, now: float, *, advance_scan: bool) -> None:
+        self.state = PursuitState.EXPLORING
+        self._confirmation_started = None
+        self._confirmation_revision = None
+        self._confirmation_requires_alignment = False
+        if advance_scan:
+            self._scan_index = (self._scan_index + 1) % len(self.head_scan.poses)
+        self._scan_pose_ready_at = None
+        self._scan_settle_revision = _REVISION_UNSET
+        if self._exploration_started is None:
+            self._exploration_started = now
+
+    def _target_at_base_heading(self, target_camera) -> np.ndarray:
+        target = np.asarray(target_camera, dtype=float)
+        if target.shape != (3,) or not np.all(np.isfinite(target)):
+            raise ValueError("target_camera must be a finite [x, y, z] vector")
+        pitch, yaw = self._head_pose
+        x_camera, y_camera, z_camera = map(float, target)
+        forward_at_yaw = z_camera * math.cos(pitch) - y_camera * math.sin(pitch)
+        x_base_camera = x_camera * math.cos(yaw) - forward_at_yaw * math.sin(yaw)
+        forward_base = forward_at_yaw * math.cos(yaw) + x_camera * math.sin(yaw)
+        if forward_base <= 0:
+            raise ValueError("discovered target is behind the robot")
+        return np.array([x_base_camera, 0.0, forward_base], dtype=float)
+
+    @staticmethod
+    def _normalize_angle(angle: float) -> float:
+        return (angle + math.pi) % (2.0 * math.pi) - math.pi
+
     def _target_lost(self, detections, safety) -> PursuitStatus:
         self.state = PursuitState.LOST
         self._stop_robot()
+        self._center_head_best_effort()
         return self._status(
             f"Could not find '{self.target}'",
             detections=detections,
@@ -270,10 +599,17 @@ class DirectPursuitPolicy:
 
     def reset(self) -> PursuitStatus:
         self._stop_robot()
+        self._center_head_best_effort()
         self.target = None
         self._last_seen = None
-        self._search_started = None
+        self._exploration_started = None
         self._last_detection_revision = None
+        self._confirmation_started = None
+        self._confirmation_revision = None
+        self._confirmation_requires_alignment = False
+        self._scan_index = 0
+        self._scan_pose_ready_at = None
+        self._scan_settle_revision = _REVISION_UNSET
         self.state = PursuitState.WAITING_FOR_OBJECT
         return self._status("Ready for another object command")
 
@@ -281,6 +617,7 @@ class DirectPursuitPolicy:
         self._running = False
         try:
             self._stop_robot()
+            self._center_head_best_effort()
         finally:
             try:
                 self.detector.close()
@@ -294,6 +631,14 @@ class DirectPursuitPolicy:
         except RuntimeError:
             logger.exception("Robot locomotion controller rejected the stop command")
 
+    def _stop_required(self, detections, safety) -> PursuitStatus | None:
+        """Stop the base or fail closed before any stationary head behavior."""
+        try:
+            send_velocity(self.robot)
+        except RuntimeError as exc:
+            return self._locomotion_error(exc, detections, safety)
+        return None
+
     def _locomotion_error(self, exc, detections, safety) -> PursuitStatus:
         self.state = PursuitState.ERROR
         self._stop_robot()
@@ -302,6 +647,22 @@ class DirectPursuitPolicy:
             detections=detections,
             safety_status=safety,
         )
+
+    def _head_control_error(self, exc, detections, safety) -> PursuitStatus:
+        self.state = PursuitState.ERROR
+        self._stop_robot()
+        return self._status(
+            f"Head command failed: {exc}",
+            detections=detections,
+            safety_status=safety,
+        )
+
+    def _center_head_best_effort(self) -> None:
+        try:
+            self.robot.set_head_pose(0.0, 0.0, self.head_scan.move_duration)
+            self._head_pose = (0.0, 0.0)
+        except (AttributeError, RuntimeError, ValueError):
+            logger.exception("Could not return the K1 head to its neutral pose")
 
     def _status(
         self,
@@ -328,6 +689,12 @@ class DirectPursuitPolicy:
             ),
             obstacle_info=self._last_obstacle_info,
             detector_metrics=telemetry() if callable(telemetry) else None,
+            head_pitch=self._head_pose[0],
+            head_yaw=self._head_pose[1],
+            exploration_step=(
+                self._scan_index + 1 if self.state == PursuitState.EXPLORING else None
+            ),
+            exploration_steps=len(self.head_scan.poses),
         )
 
 
@@ -367,7 +734,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-angular-velocity", type=float, default=0.7)
     parser.add_argument("--target-timeout", type=float, default=3.0)
     parser.add_argument("--acquisition-timeout", type=float, default=20.0)
-    parser.add_argument("--search-angular-velocity", type=float, default=0.12)
+    parser.add_argument(
+        "--head-scan-move-time",
+        type=float,
+        default=0.35,
+        help="Seconds allowed for each K1 head scan movement",
+    )
+    parser.add_argument(
+        "--head-scan-settle-time",
+        type=float,
+        default=0.15,
+        help="Seconds to wait after each head movement before accepting detections",
+    )
     return parser.parse_args()
 
 
@@ -384,7 +762,10 @@ def run_agent(robot, args, *, object_detector=None, command_source=None) -> None
         controller=controller,
         target_timeout=args.target_timeout,
         acquisition_timeout=args.acquisition_timeout,
-        search_angular_velocity=getattr(args, "search_angular_velocity", 0.12),
+        head_scan=HeadScanConfig(
+            move_duration=getattr(args, "head_scan_move_time", 0.35),
+            settle_time=getattr(args, "head_scan_settle_time", 0.15),
+        ),
         safety_enforced=not getattr(args, "disable_safety", False),
     )
     shutdown = False

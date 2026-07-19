@@ -624,8 +624,17 @@ class RerunRosBridge:
         self._log_navigation_geometry(
             data.get("navigation_geometry") if isinstance(data, dict) else None
         )
+        self._log_head(data.get("head") if isinstance(data, dict) else None)
         self._log_safety(data.get("safety") if isinstance(data, dict) else None)
         self._log_detector(data.get("detector") if isinstance(data, dict) else None)
+
+    def _log_head(self, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            return
+        for name in ("pitch", "yaw", "exploration_step", "exploration_steps"):
+            value = payload.get(name)
+            if value is not None and np.isfinite(float(value)):
+                self._recording.log(f"metrics/head/{name}", self._rr.Scalar(float(value)))
 
     def _log_navigation_geometry(self, payload: Any) -> None:
         world_root = "world/navigation/safety_geometry"

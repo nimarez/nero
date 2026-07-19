@@ -20,7 +20,7 @@ import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from nero.robot import RobotState
+from nero.robot import K1_HEAD_PITCH_LIMITS, K1_HEAD_YAW_LIMITS, RobotState
 from nero.perception.object_detector import ObjectDetection, ObjectDetector
 from nero.slam.k1_calibration import K1Calibration, estimate_frequency
 
@@ -623,6 +623,25 @@ class BoosterStudioRobotInterface:
             raise RuntimeError(
                 f"Booster Studio rejected velocity command ({error}); set the K1 to WALK mode"
             )
+
+    def set_head_pose(self, pitch: float, yaw: float, duration: float = 0.35) -> None:
+        values = np.asarray([pitch, yaw, duration], dtype=float)
+        if not np.all(np.isfinite(values)):
+            raise ValueError("head pose command must be finite")
+        if not K1_HEAD_PITCH_LIMITS[0] <= pitch <= K1_HEAD_PITCH_LIMITS[1]:
+            raise ValueError(
+                f"head pitch must be within {K1_HEAD_PITCH_LIMITS} radians"
+            )
+        if not K1_HEAD_YAW_LIMITS[0] <= yaw <= K1_HEAD_YAW_LIMITS[1]:
+            raise ValueError(f"head yaw must be within {K1_HEAD_YAW_LIMITS} radians")
+        if duration <= 0:
+            raise ValueError("head motion duration must be positive")
+        rotate = getattr(self._loco, "RotateHeadWithTime", None)
+        if rotate is None:
+            raise RuntimeError("Booster Studio SDK does not provide RotateHeadWithTime")
+        error = rotate(float(pitch), float(yaw), max(1, int(round(duration * 1000.0))))
+        if error not in (None, 0):
+            raise RuntimeError(f"Booster Studio rejected head pose command ({error})")
 
     def stop(self) -> None:
         self.set_velocity(0.0, 0.0, 0.0)

@@ -83,6 +83,39 @@ def test_robot_image_helpers_normalize_k1_images():
     assert RobotInterface.image_timestamp(stamped) == 12.5
 
 
+def test_robot_head_pose_uses_timed_sdk_command_and_validates_k1_limits():
+    calls = []
+    robot = RobotInterface.__new__(RobotInterface)
+    robot._initialized = True
+    robot._loco = SimpleNamespace(
+        RotateHeadWithTime=lambda *values: calls.append(values) or 0,
+    )
+
+    robot.set_head_pose(0.65, -0.75, 0.35)
+
+    assert calls == [(0.65, -0.75, 350)]
+    with np.testing.assert_raises_regex(ValueError, "head pitch"):
+        robot.set_head_pose(0.9, 0.0)
+    with np.testing.assert_raises_regex(ValueError, "head yaw"):
+        robot.set_head_pose(0.0, 1.1)
+
+
+def test_robot_propagates_rejected_velocity_and_head_commands():
+    robot = RobotInterface.__new__(RobotInterface)
+    robot._initialized = True
+    robot._loco = SimpleNamespace(
+        Move=lambda *_values: 400,
+        RotateHeadWithTime=lambda *_values: 503,
+    )
+
+    with np.testing.assert_raises_regex(RuntimeError, r"velocity command \(400\)"):
+        robot.set_velocity(0.1, 0.0, 0.0)
+    with np.testing.assert_raises_regex(RuntimeError, r"velocity command \(400\)"):
+        robot.stop()
+    with np.testing.assert_raises_regex(RuntimeError, r"head pose command \(503\)"):
+        robot.set_head_pose(0.0, 0.0)
+
+
 def test_robot_image_helpers_decode_production_k1_encodings():
     depth = np.arange(12, dtype=np.uint16).reshape(3, 4)
     depth_message = SimpleNamespace(encoding="mono16", height=3, width=4, data=depth.tobytes())

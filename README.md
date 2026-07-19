@@ -401,8 +401,11 @@ front end; it does not own a second sensor, safety, localization, or control loo
 `nero-pure-pursuit` is the intentionally smaller alternative for visible-object
 goals. It uses the target's live camera-frame RGB-D position as the pursuit point,
 keeps the tilt/depth/battery safety gate, and stops at the same class-aware
-stand-off distance. Because it has no persistent world pose, it stops and searches
-when the object leaves view and cannot route around occlusions or map obstacles.
+stand-off distance. While acquiring or reacquiring a target, the walking base stays
+stopped and the K1 head performs a 15-pose pan/tilt raster. A side-looking detection
+must be confirmed, the head is then centered, and the body only rotates in place
+until a fresh centered detection permits pursuit. Because it has no persistent world
+pose, it cannot route around occlusions or map obstacles.
 It publishes the same sensor, detection, status, and command topics as the SLAM
 policy, so Rerun still shows the live RGB/depth images, labeled detection boxes,
 3D camera-frame centroids, and commanded velocities. A world-frame route is

@@ -26,6 +26,8 @@ class MockRobotState:
     vx: float = 0.0  # m/s
     vy: float = 0.0  # m/s
     vyaw: float = 0.0  # rad/s
+    head_pitch: float = 0.0  # radians
+    head_yaw: float = 0.0  # radians
     mode: str = "kPrepare"
     battery: float = 100.0
     timestamp: float = 0.0
@@ -92,6 +94,13 @@ class MockRobot:
         self.state.vx = np.clip(vx, -max_vx, max_vx)
         self.state.vy = np.clip(vy, -max_vy, max_vy)
         self.state.vyaw = np.clip(vyaw, -max_vyaw, max_vyaw)
+
+    def set_head_pose(self, pitch: float, yaw: float, duration: float = 0.35) -> None:
+        """Set the simulated K1 head pose immediately."""
+        if duration <= 0:
+            raise ValueError("head motion duration must be positive")
+        self.state.head_pitch = float(np.clip(pitch, -0.349, 0.855))
+        self.state.head_yaw = float(np.clip(yaw, -1.0, 1.0))
 
     def get_pose(self) -> np.ndarray:
         """Get current robot pose.

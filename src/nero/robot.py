@@ -18,6 +18,9 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+K1_HEAD_YAW_LIMITS = (-1.0, 1.0)
+K1_HEAD_PITCH_LIMITS = (-0.349, 0.855)
+
 
 @dataclass(frozen=True)
 class K1Topics:
@@ -77,6 +80,7 @@ class RobotAdapter(Protocol):
     def image_to_array(self, image: Any) -> np.ndarray: ...
     def image_timestamp(self, image: Any) -> float: ...
     def set_velocity(self, vx: float, vy: float, vyaw: float) -> None: ...
+    def set_head_pose(self, pitch: float, yaw: float, duration: float = 0.35) -> None: ...
     def speak(self, text: str) -> None: ...
     def stop(self) -> None: ...
 
@@ -532,23 +536,50 @@ class RobotInterface:
         values = np.asarray([vx, vy, vyaw], dtype=float)
         if not np.all(np.isfinite(values)):
             raise ValueError("velocity command must be finite")
-        self._loco.Move(float(vx), float(vy), float(vyaw))
+        error = self._loco.Move(float(vx), float(vy), float(vyaw))
+        if error not in (None, 0):
+            raise RuntimeError(f"K1 rejected velocity command ({error})")
+
+    def set_head_pose(self, pitch: float, yaw: float, duration: float = 0.35) -> None:
+        """Move the K1 head to an absolute pitch/yaw pose within ``duration``."""
+        values = np.asarray([pitch, yaw, duration], dtype=float)
+        if not np.all(np.isfinite(values)):
+            raise ValueError("head pose command must be finite")
+        if not K1_HEAD_PITCH_LIMITS[0] <= pitch <= K1_HEAD_PITCH_LIMITS[1]:
+            raise ValueError(f"head pitch must be within {K1_HEAD_PITCH_LIMITS} radians")
+        if not K1_HEAD_YAW_LIMITS[0] <= yaw <= K1_HEAD_YAW_LIMITS[1]:
+            raise ValueError(f"head yaw must be within {K1_HEAD_YAW_LIMITS} radians")
+        if duration <= 0:
+            raise ValueError("head motion duration must be positive")
+        if not self._initialized:
+            raise RuntimeError("initialize() must pass before head commands")
+        rotate = getattr(self._loco, "RotateHeadWithTime", None)
+        if rotate is None:
+            raise RuntimeError("Booster SDK does not provide RotateHeadWithTime")
+        error = rotate(float(pitch), float(yaw), max(1, int(round(duration * 1000.0))))
+        if error not in (None, 0):
+            raise RuntimeError(f"K1 rejected head pose command ({error})")
 
     def stop(self) -> None:
         if self._initialized:
-            self._loco.Move(0.0, 0.0, 0.0)
+            self.set_velocity(0.0, 0.0, 0.0)
 
     def close(self) -> None:
         if self._closed:
             return
-        self.stop()
-        self._initialized = False
-        self._closed = True
-        if hasattr(self, "_low_state_subscriber"):
-            self._low_state_subscriber.CloseChannel()
-        if hasattr(self, "_battery_state_subscriber"):
-            self._battery_state_subscriber.CloseChannel()
-        if hasattr(self, "_spin_thread"):
-            self._spin_thread.join(timeout=1.0)
-        if hasattr(self, "_node"):
-            self._node.destroy_node()
+        try:
+            try:
+                self.stop()
+            except RuntimeError as exc:
+                logger.warning("Could not send final zero velocity: %s", exc)
+        finally:
+            self._initialized = False
+            self._closed = True
+            if hasattr(self, "_low_state_subscriber"):
+                self._low_state_subscriber.CloseChannel()
+            if hasattr(self, "_battery_state_subscriber"):
+                self._battery_state_subscriber.CloseChannel()
+            if hasattr(self, "_spin_thread"):
+                self._spin_thread.join(timeout=1.0)
+            if hasattr(self, "_node"):
+                self._node.destroy_node()
