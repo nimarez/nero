@@ -115,6 +115,8 @@ def main() -> None:
             )
     finally:
         detector.close()
+        if slam is not None:
+            slam.shutdown()
         if robot is not None:
             robot.close()
 

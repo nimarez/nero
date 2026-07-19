@@ -79,6 +79,20 @@ def configure_qualcomm_cpu_partition() -> tuple[set[int], set[int]] | None:
     """Reserve the fastest two K1 CPUs for the isolated detector process."""
     if os.getenv("NERO_CPU_PARTITION", "1") == "0":
         return None
+    configured_backend = os.getenv("NERO_OBJECT_BACKEND", QNN_BACKEND)
+    normalized_backend = configured_backend.strip().lower().replace("_", "-")
+    backend = _BACKEND_ALIASES.get(normalized_backend, normalized_backend)
+    if backend in {QNN_BACKEND, MODAL_BACKEND, "opencv"}:
+        logger.info(
+            "CPU partition disabled for %s; navigation retains every K1 CPU",
+            backend,
+        )
+        return None
+    if os.getenv("NERO_DETECTOR_PROCESS", "1") == "0":
+        logger.info(
+            "CPU partition disabled because detector process isolation is disabled"
+        )
+        return None
     if not (
         platform.system() == "Linux"
         and platform.machine().lower() in {"aarch64", "arm64"}

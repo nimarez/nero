@@ -18,6 +18,7 @@ import nero.perception.qnn_deploy as qnn_deploy
 import nero.perception.qnn_worker as qnn_worker
 import nero.perception.qnn_yolo_world as qnn_runtime
 from nero.perception.object_detector import ObjectDetector
+from nero.perception.object_detector import configure_qualcomm_cpu_partition
 
 
 def test_qnn_preprocess_matches_yolo_letterbox_and_channel_order():
@@ -32,6 +33,18 @@ def test_qnn_preprocess_matches_yolo_letterbox_and_channel_order():
     assert (geometry.left, geometry.top) == (0, 22)
     np.testing.assert_allclose(tensor[0, :, 100, 100], np.array([30, 20, 10]) / 255, atol=1e-6)
     np.testing.assert_allclose(tensor[0, :, 0, 0], np.array([114, 114, 114]) / 255, atol=1e-6)
+
+
+def test_qnn_retains_all_cpus_for_slam(monkeypatch):
+    monkeypatch.setenv("NERO_OBJECT_BACKEND", "yolo-world-qnn")
+    monkeypatch.setattr(
+        qnn_runtime.os,
+        "sched_getaffinity",
+        lambda _pid: pytest.fail("QNN must not change process affinity"),
+        raising=False,
+    )
+
+    assert configure_qualcomm_cpu_partition() is None
 
 
 def test_qnn_decode_unletterboxes_filters_and_suppresses_overlaps():
