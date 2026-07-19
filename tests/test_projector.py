@@ -6,7 +6,7 @@ import pytest
 
 from nero.projector.calibration import CalibrationState, ProjectorCalibration
 from nero.projector.camera import annotate_aruco
-from nero.projector.motion import map_floor_position
+from nero.projector.motion import MotionTracker, map_floor_position
 from nero.projector.render import render_motion_circle, render_projector_grid
 
 
@@ -62,6 +62,30 @@ def test_centered_vive_pose_maps_to_projector_center_and_draws_circle():
     assert uv == (0.5, 0.5)
     assert not np.array_equal(frame, grid)
     assert np.any(frame[center[1], center[0]] != grid[center[1], center[0]])
+
+
+def test_controller_height_does_not_change_floor_mapping():
+    matrix = ((0.2, 0.1, 0.5), (-0.1, 0.3, 0.4))
+
+    floor_pose = MotionTracker._apply_mapping((1.2, -0.4, 0.1), matrix)
+    raised_pose = MotionTracker._apply_mapping((1.2, -0.4, 1.8), matrix)
+
+    assert raised_pose == floor_pose
+
+
+def test_floor_calibration_recaptures_center_instead_of_reusing_saved_origin(tmp_path):
+    center_path = tmp_path / "center.json"
+    center_path.write_text('{"position": [9.0, 8.0, 7.0]}')
+    tracker = MotionTracker(
+        pose_path=tmp_path / "pose.json",
+        center_path=center_path,
+        mapping_path=tmp_path / "mapping.json",
+    )
+
+    status = tracker.begin_floor_calibration()
+
+    assert status["captured"] == 0
+    assert status["target_uv"] == [0.5, 0.5]
 
 
 def test_aruco_overlay_detects_only_expected_ids():

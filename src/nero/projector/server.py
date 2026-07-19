@@ -40,12 +40,12 @@ label{color:var(--muted)}input[type=range]{vertical-align:middle}.help{padding:0
 <main>
 <section class=panel><div class=bar><strong>RealSense D435i</strong><span>POS screen + browser · annotated 30 fps</span></div><div class=stage><img id=cam src="/stream.mjpg"></div><div class=help>Physical markers expected: IDs 1, 2, 3, 4. Green outlines are detections; orange dots are measured centers.</div></section>
 <section class=panel><div class=bar><strong>Physical projector surface</strong><span>drag ID handles · updates live</span></div><div class=stage><canvas id=preview width=960 height=540></canvas></div>
-<div class=controls><button id=reset>Reset</button><button id=recenter>Center controller</button><button id=captureheight>Capture height</button><button id=startmotion>Start 5-point</button><button id=capturemotion class=primary>Capture target</button><span id=motionstep></span><button id=save>Save grid</button><label>grid <input id=density type=range min=6 max=24 value=12></label><label>weight <input id=weight type=range min=1 max=6 value=2></label><span id=saved></span></div>
-<div class=help>Assumed floor order: ID 1 top-left → ID 2 top-right → ID 3 bottom-right → ID 4 bottom-left. Drag until the projected white/green targets sit on the matching ArUco centers.</div></section>
+<div class=controls><button id=reset>Reset</button><button id=recenter>Center controller</button><button id=startmotion>Start 5-point</button><button id=capturemotion class=primary>Capture target</button><span id=motionstep></span><button id=save>Save grid</button><label>grid <input id=density type=range min=6 max=24 value=12></label><label>weight <input id=weight type=range min=1 max=6 value=2></label><span id=saved></span></div>
+<div class=help>Assumed floor order: ID 1 top-left → ID 2 top-right → ID 3 bottom-right → ID 4 bottom-left. Controller height is ignored: hold it anywhere directly above each cyan floor target and capture.</div></section>
 </main>
 <script>
 const cv=document.querySelector('#preview'),x=cv.getContext('2d'),WS=960,HS=540,S=2;
-const markers=document.querySelector('#markers'),density=document.querySelector('#density'),weight=document.querySelector('#weight'),ws=document.querySelector('#ws'),lat=document.querySelector('#lat'),motion=document.querySelector('#motion'),motionstep=document.querySelector('#motionstep'),saved=document.querySelector('#saved'),reset=document.querySelector('#reset'),recenter=document.querySelector('#recenter'),captureheight=document.querySelector('#captureheight'),startmotion=document.querySelector('#startmotion'),capturemotion=document.querySelector('#capturemotion'),save=document.querySelector('#save');
+const markers=document.querySelector('#markers'),density=document.querySelector('#density'),weight=document.querySelector('#weight'),ws=document.querySelector('#ws'),lat=document.querySelector('#lat'),motion=document.querySelector('#motion'),motionstep=document.querySelector('#motionstep'),saved=document.querySelector('#saved'),reset=document.querySelector('#reset'),recenter=document.querySelector('#recenter'),startmotion=document.querySelector('#startmotion'),capturemotion=document.querySelector('#capturemotion'),save=document.querySelector('#save');
 let handles=[[360,220],[1560,220],[1560,860],[360,860]],drag=-1,queued=false,seq=0,sock;
 for(let i=1;i<=4;i++){let e=document.createElement('span');e.className='marker';e.id='m'+i;e.textContent=i;markers.appendChild(e)}
 function homography(p){let [p0,p1,p2,p3]=p,dx1=p1[0]-p2[0],dy1=p1[1]-p2[1],dx2=p3[0]-p2[0],dy2=p3[1]-p2[1],sx=p0[0]-p1[0]+p2[0]-p3[0],sy=p0[1]-p1[1]+p2[1]-p3[1],den=dx1*dy2-dx2*dy1,g=(sx*dy2-dx2*sy)/den,h=(dx1*sy-sx*dy1)/den;return[p1[0]-p0[0]+g*p1[0],p3[0]-p0[0]+h*p3[0],p0[0],p1[1]-p0[1]+g*p1[1],p3[1]-p0[1]+h*p3[1],p0[1],g,h,1]}
@@ -61,7 +61,6 @@ cv.onpointermove=e=>{if(drag<0)return;let p=point(e);handles[drag]=[Math.max(-10
 cv.onpointerup=()=>{drag=-1;send()};density.oninput=weight.oninput=()=>{draw();queueSend()}
 reset.onclick=()=>{handles=[[360,220],[1560,220],[1560,860],[360,860]];density.value=12;weight.value=2;draw();send('handles')};save.onclick=()=>send('save')
 recenter.onclick=()=>send('recenter')
-captureheight.onclick=async()=>{let r=await fetch('/api/motion/height-center',{method:'POST'}),d=await r.json();saved.textContent=r.ok?'height compensation saved':(d.error||'height capture failed')}
 startmotion.onclick=async()=>{await fetch('/api/motion/calibration/start',{method:'POST'});saved.textContent='move controller to cyan target'}
 capturemotion.onclick=async()=>{let r=await fetch('/api/motion/calibration/capture',{method:'POST'}),d=await r.json();saved.textContent=r.ok?(d.active?'captured · move to next target':'controller mapping saved'):(d.error||'capture failed')}
 function connect(){sock=new WebSocket(`ws://${location.host}/ws`);sock.onopen=()=>{ws.textContent='live';ws.className='badge ok'};sock.onclose=()=>{ws.textContent='reconnecting';ws.className='badge';setTimeout(connect,600)};sock.onmessage=e=>{let d=JSON.parse(e.data);if(d.type==='state'){handles=d.calibration.handles;density.value=d.calibration.style.grid_divisions;weight.value=d.calibration.style.line_thickness;draw()}if(d.type==='applied'){let t=pending[d.client_seq];if(t){lat.textContent=Math.round(performance.now()-t)+' ms';delete pending[d.client_seq]}}if(d.type==='saved'){saved.textContent='saved · '+new Date().toLocaleTimeString()}}}
@@ -111,7 +110,6 @@ class CalibrationWebServer:
         app.router.add_get("/api/state", self._api_state)
         app.router.add_post("/api/motion/calibration/start", self._motion_calibration_start)
         app.router.add_post("/api/motion/calibration/capture", self._motion_calibration_capture)
-        app.router.add_post("/api/motion/height-center", self._motion_height_center)
         app.router.add_get("/ws", self._websocket)
         return app
 
@@ -139,12 +137,6 @@ class CalibrationWebServer:
     async def _motion_calibration_capture(self, _request: web.Request) -> web.Response:
         try:
             return web.json_response(self.motion.capture_floor_point())
-        except ValueError as error:
-            return web.json_response({"error": str(error)}, status=409)
-
-    async def _motion_height_center(self, _request: web.Request) -> web.Response:
-        try:
-            return web.json_response(self.motion.capture_height_at_center())
         except ValueError as error:
             return web.json_response({"error": str(error)}, status=409)
 
