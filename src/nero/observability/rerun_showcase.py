@@ -23,9 +23,11 @@ the scene always renders something compelling.
 """
 
 import argparse
+import gzip
 import json
 import math
 import os
+import struct
 import time
 
 import numpy as np
@@ -97,41 +99,78 @@ def safety_radius(speed, conf):
 # --------------------------------------------------------------------------- #
 # room: Marble/splat .ply, else synthetic                                      #
 # --------------------------------------------------------------------------- #
-def load_room_ply(path, up_axis="y", scale=1.0, max_points=200_000):
-    """Load a colored/Gaussian-splat .ply -> (xyz Nx3, rgb Nx3 uint8), floor at z=0.
-    Handles regular red/green/blue clouds and 3DGS f_dc_* colors. Returns None on
-    an LFS pointer or a missing/unreadable file."""
-    if not path or not os.path.exists(path):
-        return None
-    with open(path, "rb") as f:
-        if f.read(64).startswith(b"version https://git-lfs"):
-            print("  room: %s is a Git LFS pointer (run `git lfs pull`) -> synthetic" % path)
-            return None
+def _read_ply(path):
+    """.ply (colored cloud or 3DGS f_dc) -> raw (xyz, rgb) or None."""
     try:
         from plyfile import PlyData
     except ImportError:
-        print("  room: install plyfile to load splats (uv --with plyfile) -> synthetic")
+        print("  room: install plyfile for .ply (uv --with plyfile) -> synthetic")
         return None
     v = PlyData.read(path)["vertex"].data
     xyz = np.column_stack([v["x"], v["y"], v["z"]]).astype(np.float32)
-    names = v.dtype.names
-    if {"red", "green", "blue"} <= set(names):
+    names = set(v.dtype.names)
+    if {"red", "green", "blue"} <= names:
         rgb = np.column_stack([v["red"], v["green"], v["blue"]]).astype(np.uint8)
-    elif {"f_dc_0", "f_dc_1", "f_dc_2"} <= set(names):        # spherical-harmonic DC
+    elif {"f_dc_0", "f_dc_1", "f_dc_2"} <= names:
         dc = np.column_stack([v["f_dc_0"], v["f_dc_1"], v["f_dc_2"]]).astype(np.float32)
         rgb = np.clip((0.5 + 0.28209479 * dc) * 255.0, 0, 255).astype(np.uint8)
     else:
         rgb = np.full((len(xyz), 3), 190, np.uint8)
-    if up_axis == "y":                                        # splats are usually Y-up
+    return xyz, rgb
+
+
+def _read_spz(path):
+    """Niantic SPZ (gzipped Gaussian splat) -> raw (xyz, rgb) or None.
+    Decodes 24-bit fixed-point positions + DC colors; ignores scale/rot/alpha/SH."""
+    raw = open(path, "rb").read()
+    data = gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw
+    magic, _ver, n = struct.unpack_from("<III", data, 0)
+    if magic != 0x5053474E:
+        print("  room: not an SPZ file (bad magic) -> synthetic")
+        return None
+    _sh, frac, _flags, _res = struct.unpack_from("<BBBB", data, 12)
+    pos = np.frombuffer(data, np.uint8, count=n * 9, offset=16).reshape(n, 3, 3).astype(np.int32)
+    vals = pos[:, :, 0] | (pos[:, :, 1] << 8) | (pos[:, :, 2] << 16)     # 24-bit LE
+    vals = np.where(vals >= (1 << 23), vals - (1 << 24), vals)          # sign
+    xyz = (vals.astype(np.float32) / (1 << frac))
+    col_off = 16 + n * 9 + n * 3 + n * 3 + n * 1                        # pos+scale+rot+alpha
+    col = np.frombuffer(data, np.uint8, count=n * 3, offset=col_off).reshape(n, 3).astype(np.float32)
+    f = (col / 255.0 - 0.5) / 0.15                                      # SPZ DC dequant
+    rgb = (np.clip(0.5 + 0.28209479 * f, 0, 1) * 255).astype(np.uint8)
+    print("  room: decoded SPZ %d gaussians (%d frac bits)" % (n, frac))
+    return xyz, rgb
+
+
+def _finalize_room(raw, up_axis, scale, max_points):
+    if raw is None:
+        return None
+    xyz, rgb = raw
+    xyz = xyz.astype(np.float32)
+    if up_axis == "y":                                     # Y-up splat -> Z-up world
         xyz = np.column_stack([xyz[:, 0], -xyz[:, 2], xyz[:, 1]])
-    xyz *= scale
-    xyz[:, :2] -= np.median(xyz[:, :2], axis=0)               # centre the room on the origin
-    xyz[:, 2] -= np.percentile(xyz[:, 2], 1.0)                # drop the floor to z=0
-    if len(xyz) > max_points:                                 # deterministic subsample
+    xyz = xyz * scale
+    xyz[:, :2] -= np.median(xyz[:, :2], axis=0)            # centre the room
+    xyz[:, 2] -= np.percentile(xyz[:, 2], 1.0)             # drop the floor to z=0
+    if len(xyz) > max_points:                              # deterministic subsample
         step = len(xyz) // max_points
         xyz, rgb = xyz[::step], rgb[::step]
-    print("  room: loaded %d splat points from %s" % (len(xyz), os.path.basename(path)))
+    ext = xyz.max(0) - xyz.min(0)
+    print("  room: %d pts | extent X=%.1f Y=%.1f Z=%.1f m (Z should be the vertical ~2-3m)"
+          % (len(xyz), ext[0], ext[1], ext[2]))
     return xyz, rgb
+
+
+def load_room(path, up_axis="y", scale=1.0, max_points=300_000):
+    """Load a room backdrop from .spz (Marble/Niantic) or .ply -> (xyz, rgb), floor at z=0."""
+    if not path or not os.path.exists(path):
+        return None
+    with open(path, "rb") as fh:
+        if fh.read(48).startswith(b"version https://git-lfs"):
+            print("  room: Git LFS pointer (run `git lfs pull`) -> synthetic")
+            return None
+    ext = os.path.splitext(path)[1].lower()
+    raw = _read_spz(path) if ext == ".spz" else _read_ply(path)
+    return _finalize_room(raw, up_axis, scale, max_points)
 
 
 def synthetic_room(extent=3.2):
@@ -351,7 +390,7 @@ def main():
 
     rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
     send_blueprint()
-    room = load_room_ply(args.room, args.up_axis, args.room_scale) or synthetic_room()
+    room = load_room(args.room, args.up_axis, args.room_scale) or synthetic_room()
     log_room(room)
 
     if args.live:
