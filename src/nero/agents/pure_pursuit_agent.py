@@ -62,6 +62,9 @@ class PursuitStatus:
     detections: list[ObjectDetection] = field(default_factory=list)
     safety_status: SafetyStatus | None = None
     target: str | None = None
+    stand_off_distance: float | None = None
+    stand_off_tolerance: float = 0.0
+    target_position_camera: list[float] | None = None
 
 
 class DirectPursuitPolicy:
@@ -199,6 +202,7 @@ class DirectPursuitPolicy:
                 f"Invalid target depth: {exc}",
                 detections=detections,
                 safety_status=safety,
+                target_position=target.position_3d,
             )
 
         if arrived:
@@ -208,6 +212,7 @@ class DirectPursuitPolicy:
                 f"Holding stand-off from '{self.target}'",
                 detections=detections,
                 safety_status=safety,
+                target_position=target.position_3d,
             )
 
         # Never translate into a blocked center corridor. Turning remains
@@ -223,6 +228,7 @@ class DirectPursuitPolicy:
             command=command,
             detections=detections,
             safety_status=safety,
+            target_position=target.position_3d,
         )
 
     def _search(self, detections, safety, obstacles) -> PursuitStatus:
@@ -302,6 +308,7 @@ class DirectPursuitPolicy:
         command: VelocityCommand | None = None,
         detections: list[ObjectDetection] | None = None,
         safety_status: SafetyStatus | None = None,
+        target_position=None,
     ) -> PursuitStatus:
         return PursuitStatus(
             state=self.state,
@@ -310,6 +317,13 @@ class DirectPursuitPolicy:
             detections=detections or [],
             safety_status=safety_status,
             target=self.target,
+            stand_off_distance=self.stand_off if self.target is not None else None,
+            stand_off_tolerance=self.controller.config.position_tolerance,
+            target_position_camera=(
+                None
+                if target_position is None
+                else [float(value) for value in target_position]
+            ),
         )
 
 

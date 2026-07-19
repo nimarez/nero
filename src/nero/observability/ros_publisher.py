@@ -39,6 +39,60 @@ def _point_cloud_xyz(message: Any, points: np.ndarray) -> None:
     message.data = np.ascontiguousarray(values).tobytes()
 
 
+def navigation_geometry_payload(status: Any) -> dict[str, Any] | None:
+    """Normalize SLAM-world or direct-camera stand-off geometry for Rerun."""
+    state = getattr(getattr(status, "state", None), "value", "unknown")
+    goal = getattr(status, "current_goal", None)
+    object_world = getattr(goal, "object_position_world", None)
+    radius = getattr(goal, "stand_off_distance", None)
+    if object_world is not None and radius is not None:
+        center = np.asarray(object_world, dtype=float).reshape(-1)
+        approach = getattr(goal, "approach_pose", None)
+        pose = getattr(status, "current_pose", None)
+        robot_position = getattr(pose, "position", None)
+        if center.size >= 3 and np.all(np.isfinite(center[:3])):
+            payload: dict[str, Any] = {
+                "frame": "map",
+                "center": center[:3].tolist(),
+                "radius": float(radius),
+                "tolerance": 0.12,
+                "state": state,
+            }
+            if approach is not None:
+                values = np.asarray(approach, dtype=float).reshape(-1)
+                if values.size >= 2 and np.all(np.isfinite(values[:2])):
+                    payload["approach"] = [
+                        float(values[0]),
+                        float(values[1]),
+                        float(center[2]),
+                    ]
+            if robot_position is not None:
+                values = np.asarray(robot_position, dtype=float).reshape(-1)
+                if values.size >= 2 and np.all(np.isfinite(values[:2])):
+                    payload["robot"] = [
+                        float(values[0]),
+                        float(values[1]),
+                        float(values[2]) if values.size >= 3 else 0.0,
+                    ]
+            return payload
+
+    center_camera = getattr(status, "target_position_camera", None)
+    radius = getattr(status, "stand_off_distance", None)
+    if center_camera is None or radius is None:
+        return None
+    center = np.asarray(center_camera, dtype=float).reshape(-1)
+    if center.size < 3 or not np.all(np.isfinite(center[:3])):
+        return None
+    return {
+        "frame": "camera",
+        "center": center[:3].tolist(),
+        "radius": float(radius),
+        "tolerance": float(getattr(status, "stand_off_tolerance", 0.12)),
+        "state": state,
+        "robot": [0.0, 0.0, 0.0],
+    }
+
+
 class RosObservabilityPublisher:
     """Best-effort publisher for live sensors, policy state, and references."""
 
@@ -259,6 +313,7 @@ class RosObservabilityPublisher:
                 "tracking_confidence": getattr(
                     getattr(status, "current_pose", None), "confidence", None
                 ),
+                "navigation_geometry": navigation_geometry_payload(status),
             },
             separators=(",", ":"),
         )

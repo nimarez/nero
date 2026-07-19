@@ -92,6 +92,85 @@ def _timestamp_ns(message: Any) -> int:
     return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
 
 
+def navigation_geometry_primitives(
+    payload: Any, *, segments: int = 64
+) -> dict[str, Any] | None:
+    """Build frame-correct circle, bearing, and stand-off waypoint geometry."""
+    if not isinstance(payload, dict) or segments < 8:
+        return None
+    try:
+        frame = str(payload["frame"])
+        center = np.asarray(payload["center"], dtype=float).reshape(3)
+        radius = float(payload["radius"])
+        tolerance = max(0.0, float(payload.get("tolerance", 0.12)))
+        robot = np.asarray(payload.get("robot", [0.0, 0.0, 0.0]), dtype=float).reshape(3)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if (
+        frame not in {"map", "camera"}
+        or not np.all(np.isfinite(center))
+        or not np.all(np.isfinite(robot))
+        or not np.isfinite(radius)
+        or radius <= 0
+    ):
+        return None
+
+    angles = np.linspace(0.0, 2.0 * np.pi, segments + 1)
+    if frame == "map":
+        ground_z = float(payload.get("ground_z", robot[2] + 0.03))
+        circle = np.column_stack(
+            (
+                center[0] + radius * np.cos(angles),
+                center[1] + radius * np.sin(angles),
+                np.full_like(angles, ground_z),
+            )
+        )
+        distance = float(np.linalg.norm((center - robot)[:2]))
+        approach = payload.get("approach")
+        try:
+            approach = (
+                None
+                if approach is None
+                else np.asarray(approach, dtype=float).reshape(3)
+            )
+        except (TypeError, ValueError):
+            approach = None
+        if approach is not None:
+            approach[2] = ground_z
+        root = "world/navigation/safety_geometry"
+    else:
+        circle = np.column_stack(
+            (
+                center[0] + radius * np.cos(angles),
+                np.full_like(angles, center[1]),
+                center[2] + radius * np.sin(angles),
+            )
+        )
+        distance = float(np.linalg.norm(center[[0, 2]]))
+        scale = max(0.0, (distance - radius) / distance) if distance else 0.0
+        approach = center * scale
+        root = "world/robot/camera/navigation/safety_geometry"
+
+    if distance < radius - tolerance:
+        condition, color = "inside radius", [255, 60, 60]
+    elif distance <= radius + tolerance:
+        condition, color = "holding radius", [80, 255, 80]
+    else:
+        condition, color = "approaching", [0, 200, 255]
+    if approach is not None and not np.all(np.isfinite(approach)):
+        approach = None
+    return {
+        "root": root,
+        "circle": circle,
+        "bearing": np.asarray([robot, center]),
+        "approach": approach,
+        "color": color,
+        "condition": condition,
+        "distance": distance,
+        "radius": radius,
+    }
+
+
 class RerunRosBridge:
     def __init__(
         self,
@@ -349,12 +428,57 @@ class RerunRosBridge:
 
     def _on_status(self, message: Any) -> None:
         self._receipt_time()
+        data = None
         try:
             data = json.loads(message.data)
             text = f"{data.get('state', 'unknown')}: {data.get('message', '')}"
-        except json.JSONDecodeError:
-            text = message.data
+        except (AttributeError, json.JSONDecodeError, TypeError):
+            text = str(getattr(message, "data", message))
         self._recording.log("status/navigation", self._rr.TextLog(text))
+        self._log_navigation_geometry(
+            data.get("navigation_geometry") if isinstance(data, dict) else None
+        )
+
+    def _log_navigation_geometry(self, payload: Any) -> None:
+        world_root = "world/navigation/safety_geometry"
+        camera_root = "world/robot/camera/navigation/safety_geometry"
+        geometry = navigation_geometry_primitives(payload)
+        for root in (world_root, camera_root):
+            self._recording.log(root, self._rr.Clear(recursive=True))
+        if geometry is None:
+            return
+        root = geometry["root"]
+        color = geometry["color"]
+        self._recording.log(
+            f"{root}/radius",
+            self._rr.LineStrips3D(
+                [geometry["circle"]], colors=color, radii=0.015
+            ),
+        )
+        self._recording.log(
+            f"{root}/target_bearing",
+            self._rr.LineStrips3D(
+                [geometry["bearing"]], colors=[255, 210, 40], radii=0.01
+            ),
+        )
+        if geometry["approach"] is not None:
+            self._recording.log(
+                f"{root}/stand_off_waypoint",
+                self._rr.Points3D(
+                    [geometry["approach"]],
+                    colors=color,
+                    radii=0.07,
+                    labels=[geometry["condition"]],
+                ),
+            )
+        self._recording.log(
+            "metrics/navigation/target_range",
+            self._rr.Scalar(geometry["distance"]),
+        )
+        self._recording.log(
+            "metrics/navigation/stand_off_radius",
+            self._rr.Scalar(geometry["radius"]),
+        )
 
     def _on_tracking(self, message: Any) -> None:
         self._receipt_time()
@@ -377,6 +501,38 @@ class RerunRosBridge:
         }
         for name, value in values.items():
             self._recording.log(f"metrics/command/{name}", self._rr.Scalar(float(value)))
+        root = "world/robot/command_preview"
+        self._recording.log(root, self._rr.Clear(recursive=True))
+        linear = np.asarray([message.linear.x, message.linear.y, 0.0], dtype=float)
+        speed = float(np.linalg.norm(linear[:2]))
+        if speed > 1e-4:
+            self._recording.log(
+                f"{root}/linear_2s",
+                self._rr.Arrows3D(
+                    origins=[[0.0, 0.0, 0.08]],
+                    vectors=[linear * 2.0],
+                    colors=[80, 255, 80],
+                    radii=0.015,
+                    labels=[f"{speed:.2f} m/s"],
+                ),
+            )
+        yaw_rate = float(message.angular.z)
+        if abs(yaw_rate) > 1e-4:
+            angles = np.linspace(0.0, yaw_rate * 2.0, 24)
+            radius = 0.3
+            arc = np.column_stack(
+                (
+                    radius * np.cos(angles),
+                    radius * np.sin(angles),
+                    np.full_like(angles, 0.08),
+                )
+            )
+            self._recording.log(
+                f"{root}/yaw_2s",
+                self._rr.LineStrips3D(
+                    [arc], colors=[255, 170, 40], radii=0.012
+                ),
+            )
 
 
 def parse_args() -> argparse.Namespace:

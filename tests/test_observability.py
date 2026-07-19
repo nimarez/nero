@@ -8,12 +8,14 @@ from nero.observability.rerun_bridge import (
     RerunRosBridge,
     image_message_to_array,
     main as rerun_main,
+    navigation_geometry_primitives,
     pointcloud2_to_xyz,
 )
 from nero.observability.ros_publisher import (
     RosObservabilityPublisher,
     _point_cloud_xyz,
     _seconds_to_stamp,
+    navigation_geometry_payload,
 )
 from nero.observability.topics import ObservabilityTopics
 
@@ -41,6 +43,74 @@ def test_rerun_topic_contract_is_printable_without_ros_or_rerun(monkeypatch, cap
     assert "rgb: /nero/sensors/rgb" in output
     assert "odometry: /nero/sensors/odometry" in output
     assert "joint_states: /nero/sensors/joint_states" in output
+
+
+def test_pure_pursuit_safety_geometry_is_camera_frame_and_color_coded():
+    status = SimpleNamespace(
+        state=SimpleNamespace(value="navigating"),
+        target_position_camera=[0.2, 0.1, 2.0],
+        stand_off_distance=0.8,
+        stand_off_tolerance=0.12,
+    )
+
+    payload = navigation_geometry_payload(status)
+    geometry = navigation_geometry_primitives(payload)
+
+    assert payload["frame"] == "camera"
+    assert geometry["root"].startswith("world/robot/camera/")
+    assert geometry["condition"] == "approaching"
+    assert geometry["color"] == [0, 200, 255]
+    assert geometry["circle"].shape == (65, 3)
+    radii = np.linalg.norm(
+        geometry["circle"][:, [0, 2]] - np.asarray(payload["center"])[[0, 2]],
+        axis=1,
+    )
+    np.testing.assert_allclose(radii, 0.8)
+
+
+def test_slam_safety_geometry_uses_world_object_and_approach_pose():
+    goal = SimpleNamespace(
+        object_name="chair",
+        object_position_world=np.array([2.0, 3.0, 0.7]),
+        stand_off_distance=1.0,
+        approach_pose=np.array([1.0, 3.0, 0.0]),
+    )
+    status = SimpleNamespace(
+        state=SimpleNamespace(value="navigating"),
+        current_goal=goal,
+        current_pose=SimpleNamespace(position=np.array([0.0, 3.0, 0.0])),
+    )
+
+    payload = navigation_geometry_payload(status)
+    geometry = navigation_geometry_primitives(payload)
+
+    assert payload["frame"] == "map"
+    assert geometry["root"] == "world/navigation/safety_geometry"
+    np.testing.assert_allclose(geometry["approach"], [1.0, 3.0, 0.03])
+    assert np.allclose(geometry["circle"][:, 2], 0.03)
+    assert geometry["condition"] == "approaching"
+
+
+@pytest.mark.parametrize(
+    ("distance", "condition", "color"),
+    [
+        (0.5, "inside radius", [255, 60, 60]),
+        (0.8, "holding radius", [80, 255, 80]),
+        (1.5, "approaching", [0, 200, 255]),
+    ],
+)
+def test_safety_radius_state_colors(distance, condition, color):
+    geometry = navigation_geometry_primitives(
+        {
+            "frame": "camera",
+            "center": [0.0, 0.0, distance],
+            "radius": 0.8,
+            "tolerance": 0.12,
+        }
+    )
+
+    assert geometry["condition"] == condition
+    assert geometry["color"] == color
 
 
 def test_odometry_and_joint_callbacks_log_sensor_metrics():
@@ -359,7 +429,15 @@ def test_rerun_callbacks_create_a_real_recording():
             )
         )
     )
-    bridge._on_status(SimpleNamespace(data='{"state":"navigating","message":"ok"}'))
+    bridge._on_status(
+        SimpleNamespace(
+            data=(
+                '{"state":"navigating","message":"ok","navigation_geometry":'
+                '{"frame":"camera","center":[0.0,0.0,1.5],'
+                '"radius":0.8,"tolerance":0.12,"robot":[0.0,0.0,0.0]}}'
+            )
+        )
+    )
     bridge._on_tracking(SimpleNamespace(data='{"status":"OK","map_points":1}'))
     bridge._on_command(SimpleNamespace(linear=vector, angular=SimpleNamespace(z=0.1)))
 

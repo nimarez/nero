@@ -97,6 +97,9 @@ def test_direct_policy_pursues_live_detection_without_slam():
     assert status.state == PursuitState.NAVIGATING
     assert status.velocity_command.linear_x > 0
     assert velocities[-1][0] > 0
+    assert status.stand_off_distance == 1.0
+    assert status.stand_off_tolerance == 0.12
+    assert status.target_position_camera == [0.0, 0.0, 2.0]
 
 
 def test_direct_policy_expires_replayed_async_detection(monkeypatch):

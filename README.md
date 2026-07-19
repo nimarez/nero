@@ -490,7 +490,11 @@ uv run --extra viz nero-rerun
 The bridge plots RGB, metric depth, camera calibration, IMU orientation/rates,
 odometry, every available joint position/velocity/effort, SLAM pose/path/map,
 detection boxes/labels/confidence/depth centroids, goals, the green controller
-plan, commands, and simulator or calibrated Vive reference data. Print the exact
+plan, commands, and simulator or calibrated Vive reference data. Navigation
+geometry includes the class-aware stand-off circle, target-bearing ray, labeled
+stand-off waypoint, and a two-second linear/yaw command preview. The radius is
+cyan while approaching, green while holding, and red when inside the protected
+distance. Print the exact
 subscription contract without requiring ROS or Rerun to be installed:
 
 ```bash
