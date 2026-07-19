@@ -6,9 +6,14 @@ import pytest
 
 from nero.projector.calibration import CalibrationState, ProjectorCalibration
 from nero.projector.camera import annotate_aruco
-from nero.projector.motion import MotionTracker, map_floor_position
+from nero.projector.motion import MotionPose, MotionTracker, map_floor_position
+from nero.projector.navigation import ProjectorNavigationState
 from nero.projector.operator_display import OPERATOR_HTML, RERUN_URL
-from nero.projector.render import render_motion_circle, render_projector_grid
+from nero.projector.render import (
+    render_motion_circle,
+    render_navigation_overlay,
+    render_projector_grid,
+)
 
 
 def test_calibration_round_trip_and_atomic_save(tmp_path):
@@ -87,6 +92,66 @@ def test_floor_calibration_recaptures_center_instead_of_reusing_saved_origin(tmp
 
     assert status["captured"] == 0
     assert status["target_uv"] == [0.5, 0.5]
+
+
+def test_floor_mapping_defines_metric_room_frame_and_ignores_height():
+    mapping = ((0.25, 0.0, 0.0), (0.0, -0.5, 2.0))
+    origin = (2.0, 3.0, 0.1)
+    floor_pose = MotionPose(1, "WW0", (4.0, 2.0, 0.1), (0.0, 0.0, 0.0, 1.0), 10.0, True)
+    raised_pose = MotionPose(2, "WW0", (4.0, 2.0, 1.8), (0.0, 0.0, 0.0, 1.0), 10.0, True)
+
+    floor = MotionTracker._room_pose(floor_pose, origin, mapping, None)
+    raised = MotionTracker._room_pose(raised_pose, origin, mapping, None)
+
+    assert floor["x"] == pytest.approx(2.0)
+    assert floor["y"] == pytest.approx(-1.0)
+    assert raised["x"] == floor["x"]
+    assert raised["y"] == floor["y"]
+    assert MotionTracker._room_points_to_floor_uv([[2.0, -1.0]], origin, mapping)[0] == pytest.approx(
+        [1.0, 1.0]
+    )
+
+
+def test_navigation_contract_falls_back_to_direct_preview_and_accepts_nima_path(tmp_path):
+    state = ProjectorNavigationState(tmp_path / "goal.json")
+    state.set_goal({"x": 2.0, "y": -1.0, "yaw": 1.57, "source": "operator"})
+    robot = {"x": 0.25, "y": 0.5, "yaw": 0.0, "valid": True}
+
+    preview = state.snapshot(robot)
+    assert preview["frame_id"] == "room_floor"
+    assert preview["control_authority"] == "none"
+    assert preview["trajectory"]["source"] == "direct-preview"
+    assert preview["trajectory"]["waypoints"] == [[0.25, 0.5], [2.0, -1.0]]
+
+    state.set_trajectory(
+        {"waypoints": [[0.25, 0.5], [1.0, 0.2], [2.0, -1.0]], "source": "nima-a-star"}
+    )
+    planned = state.snapshot(robot)
+    assert planned["trajectory"]["source"] == "nima-a-star"
+    assert len(planned["trajectory"]["waypoints"]) == 3
+
+
+def test_navigation_overlay_draws_robot_axes_path_and_goal():
+    calibration = ProjectorCalibration()
+    base = np.zeros((calibration.height, calibration.width, 3), dtype=np.uint8)
+    robot_frame = {
+        "grid_lines": [[[0.4, 0.4], [0.6, 0.4]], [[0.5, 0.3], [0.5, 0.6]]],
+        "footprint": [[0.46, 0.46], [0.54, 0.46], [0.54, 0.54], [0.46, 0.54]],
+        "x_axis": [[0.5, 0.5], [0.65, 0.5]],
+        "y_axis": [[0.5, 0.5], [0.5, 0.35]],
+    }
+
+    frame = render_navigation_overlay(
+        base,
+        calibration,
+        robot_frame_uv=robot_frame,
+        trajectory_uv=[[0.5, 0.5], [0.75, 0.35]],
+        goal_uv=[0.75, 0.35],
+        goal_heading_uv=[0.82, 0.35],
+        animation_phase=0.5,
+    )
+
+    assert np.count_nonzero(frame) > 1000
 
 
 def test_operator_display_combines_camera_rerun_and_floor_telemetry():

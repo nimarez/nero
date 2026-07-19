@@ -160,6 +160,110 @@ def render_motion_circle(
     return canvas
 
 
+def render_navigation_overlay(
+    base_frame: np.ndarray,
+    calibration: ProjectorCalibration,
+    *,
+    robot_frame_uv: dict | None,
+    trajectory_uv: list[list[float]] | None,
+    goal_uv: list[float] | None,
+    goal_heading_uv: list[float] | None,
+    animation_phase: float = 0.0,
+) -> np.ndarray:
+    """Render robot-local axes and a Waymo-style floor trajectory preview."""
+
+    canvas = base_frame.copy()
+    if trajectory_uv and len(trajectory_uv) >= 2:
+        floor_path = np.asarray(trajectory_uv, dtype=np.float32)
+        path = np.rint(calibration.transform(floor_path)).astype(np.int32).reshape(-1, 1, 2)
+        overlay = canvas.copy()
+        cv2.polylines(overlay, [path], False, (120, 54, 0), 54, cv2.LINE_AA)
+        cv2.addWeighted(overlay, 0.42, canvas, 0.58, 0.0, canvas)
+        cv2.polylines(canvas, [path], False, (255, 205, 82), 13, cv2.LINE_AA)
+        cv2.polylines(canvas, [path], False, (255, 255, 255), 3, cv2.LINE_AA)
+
+        pixels = path[:, 0, :].astype(np.float64)
+        for start, end in zip(pixels, pixels[1:]):
+            delta = end - start
+            length = float(np.linalg.norm(delta))
+            if length < 1.0:
+                continue
+            direction = delta / length
+            normal = np.asarray((-direction[1], direction[0]))
+            spacing = 92.0
+            distance = (animation_phase % 1.0) * spacing
+            while distance < length:
+                tip = start + direction * distance
+                back = tip - direction * 26.0
+                chevron = np.rint(
+                    np.asarray((back + normal * 15.0, tip, back - normal * 15.0))
+                ).astype(np.int32)
+                cv2.polylines(
+                    canvas, [chevron.reshape(-1, 1, 2)], False, (255, 255, 255), 5, cv2.LINE_AA
+                )
+                distance += spacing
+
+    if goal_uv:
+        center = tuple(np.rint(calibration.transform((goal_uv,))[0]).astype(int))
+        cv2.circle(canvas, center, 42, (255, 205, 82), 8, cv2.LINE_AA)
+        cv2.circle(canvas, center, 15, (255, 255, 255), -1, cv2.LINE_AA)
+        if goal_heading_uv:
+            tip = tuple(np.rint(calibration.transform((goal_heading_uv,))[0]).astype(int))
+            cv2.arrowedLine(canvas, center, tip, (255, 205, 82), 9, cv2.LINE_AA, tipLength=0.28)
+        cv2.putText(
+            canvas,
+            "GOAL",
+            (center[0] + 52, center[1] - 28),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.85,
+            (255, 255, 255),
+            3,
+            cv2.LINE_AA,
+        )
+
+    if robot_frame_uv:
+        for line in robot_frame_uv.get("grid_lines", []):
+            points = np.rint(calibration.transform(line)).astype(np.int32).reshape(-1, 1, 2)
+            cv2.polylines(canvas, [points], False, (72, 116, 84), 3, cv2.LINE_AA)
+        footprint = robot_frame_uv.get("footprint")
+        if footprint:
+            points = np.rint(calibration.transform(footprint)).astype(np.int32).reshape(-1, 1, 2)
+            cv2.polylines(canvas, [points], True, (255, 255, 255), 6, cv2.LINE_AA)
+        x_axis = robot_frame_uv.get("x_axis")
+        if x_axis:
+            start, end = np.rint(calibration.transform(x_axis)).astype(np.int32)
+            cv2.arrowedLine(
+                canvas, tuple(start), tuple(end), (0, 142, 255), 11, cv2.LINE_AA, tipLength=0.24
+            )
+            cv2.putText(
+                canvas,
+                "+X / FORWARD",
+                tuple(end + np.asarray((18, -14))),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+        y_axis = robot_frame_uv.get("y_axis")
+        if y_axis:
+            start, end = np.rint(calibration.transform(y_axis)).astype(np.int32)
+            cv2.arrowedLine(
+                canvas, tuple(start), tuple(end), (255, 220, 90), 8, cv2.LINE_AA, tipLength=0.24
+            )
+            cv2.putText(
+                canvas,
+                "+Y",
+                tuple(end + np.asarray((14, -10))),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+    return canvas
+
+
 def render_floor_calibration_target(
     base_frame: np.ndarray,
     calibration: ProjectorCalibration,

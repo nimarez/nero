@@ -15,6 +15,7 @@ from aiohttp import WSMsgType, web
 from .calibration import CalibrationState
 from .camera import RealSenseArucoCamera
 from .motion import MotionTracker
+from .navigation import ProjectorNavigationState
 from .operator_display import OPERATOR_HTML
 
 logger = logging.getLogger(__name__)
@@ -33,7 +34,7 @@ main{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:14px}.panel{bac
 .stage{position:relative;aspect-ratio:16/9;background:#000;overflow:hidden}.stage img,.stage canvas{display:block;width:100%;height:100%;object-fit:contain}
 #preview{touch-action:none;cursor:crosshair}.controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:12px;border-top:1px solid var(--line)}
 button{border:1px solid #31533b;border-radius:8px;background:#122019;color:var(--ink);padding:8px 12px;font:inherit;cursor:pointer}button.primary{background:#1d6a35;border-color:#47c36d}button:hover{filter:brightness(1.2)}
-label{color:var(--muted)}input[type=range]{vertical-align:middle}.help{padding:0 12px 12px;color:var(--muted);line-height:1.55}
+label{color:var(--muted)}input[type=range]{vertical-align:middle}input[type=number],select{width:76px;border:1px solid #31533b;border-radius:6px;background:#0b130e;color:var(--ink);padding:7px;font:inherit}.help{padding:0 12px 12px;color:var(--muted);line-height:1.55}
 .markers{display:flex;gap:6px}.marker{width:28px;height:28px;display:grid;place-items:center;border:1px solid #513b1d;color:#ffad46;border-radius:7px}.marker.seen{color:var(--green);border-color:#347646;background:#102619}
 @media(max-width:1000px){main{grid-template-columns:1fr}header{height:auto;min-height:58px;flex-wrap:wrap;padding:10px 14px}}
 </style></head>
@@ -41,12 +42,12 @@ label{color:var(--muted)}input[type=range]{vertical-align:middle}.help{padding:0
 <main>
 <section class=panel><div class=bar><strong>RealSense D435i</strong><span>POS screen + browser · annotated 30 fps</span></div><div class=stage><img id=cam src="/stream.mjpg"></div><div class=help>Physical markers expected: IDs 1, 2, 3, 4. Green outlines are detections; orange dots are measured centers.</div></section>
 <section class=panel><div class=bar><strong>Physical projector surface</strong><span>drag ID handles · updates live</span></div><div class=stage><canvas id=preview width=960 height=540></canvas></div>
-<div class=controls><button id=reset>Reset</button><button id=recenter>Center controller</button><button id=startmotion>Start 5-point</button><button id=capturemotion class=primary>Capture target</button><span id=motionstep></span><button id=save>Save grid</button><label>grid <input id=density type=range min=6 max=24 value=12></label><label>weight <input id=weight type=range min=1 max=6 value=2></label><span id=saved></span></div>
-<div class=help>Assumed floor order: ID 1 top-left → ID 2 top-right → ID 3 bottom-right → ID 4 bottom-left. Controller height is ignored: hold it anywhere directly above each cyan floor target and capture.</div></section>
+<div class=controls><button id=reset>Reset</button><button id=recenter>Center controller</button><button id=startmotion>Start 5-point</button><button id=capturemotion class=primary>Capture target</button><span id=motionstep></span><button id=save>Save grid</button><button id=setforward>Set robot +X</button><label>goal X <input id=goalx type=number step=.1 value=0></label><label>Y <input id=goaly type=number step=.1 value=0></label><label>box faces <select id=goalyaw><option value=0>+X</option><option value=1.5707963268>+Y</option><option value=3.1415926536>-X</option><option value=-1.5707963268>-Y</option></select></label><button id=setgoal>Set goal</button><label>grid <input id=density type=range min=6 max=24 value=12></label><label>weight <input id=weight type=range min=1 max=6 value=2></label><span id=saved></span></div>
+<div class=help>The saved floor mapping defines room_floor: center is (0,0), grid-right is +X, grid-up is +Y, and units are metres. With the taped controller on the robot, point the robot along projected +X and choose Set robot +X once. Goal direction is grid-aligned for now.</div></section>
 </main>
 <script>
 const cv=document.querySelector('#preview'),x=cv.getContext('2d'),WS=960,HS=540,S=2;
-const markers=document.querySelector('#markers'),density=document.querySelector('#density'),weight=document.querySelector('#weight'),ws=document.querySelector('#ws'),lat=document.querySelector('#lat'),motion=document.querySelector('#motion'),motionstep=document.querySelector('#motionstep'),saved=document.querySelector('#saved'),reset=document.querySelector('#reset'),recenter=document.querySelector('#recenter'),startmotion=document.querySelector('#startmotion'),capturemotion=document.querySelector('#capturemotion'),save=document.querySelector('#save');
+const markers=document.querySelector('#markers'),density=document.querySelector('#density'),weight=document.querySelector('#weight'),ws=document.querySelector('#ws'),lat=document.querySelector('#lat'),motion=document.querySelector('#motion'),motionstep=document.querySelector('#motionstep'),saved=document.querySelector('#saved'),reset=document.querySelector('#reset'),recenter=document.querySelector('#recenter'),startmotion=document.querySelector('#startmotion'),capturemotion=document.querySelector('#capturemotion'),save=document.querySelector('#save'),setforward=document.querySelector('#setforward'),goalx=document.querySelector('#goalx'),goaly=document.querySelector('#goaly'),goalyaw=document.querySelector('#goalyaw'),setgoal=document.querySelector('#setgoal');
 let handles=[[360,220],[1560,220],[1560,860],[360,860]],drag=-1,queued=false,seq=0,sock;
 for(let i=1;i<=4;i++){let e=document.createElement('span');e.className='marker';e.id='m'+i;e.textContent=i;markers.appendChild(e)}
 function homography(p){let [p0,p1,p2,p3]=p,dx1=p1[0]-p2[0],dy1=p1[1]-p2[1],dx2=p3[0]-p2[0],dy2=p3[1]-p2[1],sx=p0[0]-p1[0]+p2[0]-p3[0],sy=p0[1]-p1[1]+p2[1]-p3[1],den=dx1*dy2-dx2*dy1,g=(sx*dy2-dx2*sy)/den,h=(dx1*sy-sx*dy1)/den;return[p1[0]-p0[0]+g*p1[0],p3[0]-p0[0]+h*p3[0],p0[0],p1[1]-p0[1]+g*p1[1],p3[1]-p0[1]+h*p3[1],p0[1],g,h,1]}
@@ -64,6 +65,8 @@ reset.onclick=()=>{handles=[[360,220],[1560,220],[1560,860],[360,860]];density.v
 recenter.onclick=()=>send('recenter')
 startmotion.onclick=async()=>{await fetch('/api/motion/calibration/start',{method:'POST'});saved.textContent='move controller to cyan target'}
 capturemotion.onclick=async()=>{let r=await fetch('/api/motion/calibration/capture',{method:'POST'}),d=await r.json();saved.textContent=r.ok?(d.active?'captured · move to next target':'controller mapping saved'):(d.error||'capture failed')}
+setforward.onclick=async()=>{let r=await fetch('/api/navigation/calibrate-forward',{method:'POST'}),d=await r.json();saved.textContent=r.ok?'robot heading aligned to +X':(d.error||'heading capture failed')}
+setgoal.onclick=async()=>{let r=await fetch('/api/navigation/goal',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({x:+goalx.value,y:+goaly.value,yaw:+goalyaw.value,source:'operator-ui'})}),d=await r.json();saved.textContent=r.ok?'goal pose saved':(d.error||'goal save failed')}
 function connect(){sock=new WebSocket(`ws://${location.host}/ws`);sock.onopen=()=>{ws.textContent='live';ws.className='badge ok'};sock.onclose=()=>{ws.textContent='reconnecting';ws.className='badge';setTimeout(connect,600)};sock.onmessage=e=>{let d=JSON.parse(e.data);if(d.type==='state'){handles=d.calibration.handles;density.value=d.calibration.style.grid_divisions;weight.value=d.calibration.style.line_thickness;draw()}if(d.type==='applied'){let t=pending[d.client_seq];if(t){lat.textContent=Math.round(performance.now()-t)+' ms';delete pending[d.client_seq]}}if(d.type==='saved'){saved.textContent='saved · '+new Date().toLocaleTimeString()}}}
 async function poll(){try{let d=await(await fetch('/api/state')).json(),seen=new Set(d.detections.map(v=>v.id));for(let i=1;i<=4;i++)document.querySelector('#m'+i).classList.toggle('seen',seen.has(i));motion.textContent=d.motion.valid?`${d.motion.controller_id} live · ${Math.round(d.motion.age_ms)} ms`:'controller waiting';motion.className=d.motion.valid?'badge ok':'badge';let c=d.motion.calibration;motionstep.textContent=c.active?`target ${c.captured+1}/${c.total}`:(c.mapping_ready?'5-point mapped':'not mapped')}catch(e){}setTimeout(poll,200)}
 draw();connect();poll();
@@ -77,6 +80,7 @@ class CalibrationWebServer:
         state: CalibrationState,
         camera: RealSenseArucoCamera,
         motion: MotionTracker,
+        navigation: ProjectorNavigationState,
         calibration_path: str | Path,
         host: str = "0.0.0.0",
         port: int = 8765,
@@ -84,6 +88,7 @@ class CalibrationWebServer:
         self.state = state
         self.camera = camera
         self.motion = motion
+        self.navigation = navigation
         self.calibration_path = Path(calibration_path).expanduser()
         self.host = host
         self.port = port
@@ -111,6 +116,11 @@ class CalibrationWebServer:
         app.router.add_get("/stream.mjpg", self._stream)
         app.router.add_get("/api/state", self._api_state)
         app.router.add_get("/api/rerun-health", self._rerun_health)
+        app.router.add_get("/api/navigation/state", self._navigation_state)
+        app.router.add_post("/api/navigation/goal", self._navigation_goal)
+        app.router.add_post("/api/navigation/trajectory", self._navigation_trajectory)
+        app.router.add_post("/api/navigation/calibrate-forward", self._navigation_forward)
+        app.router.add_get("/ws/navigation", self._navigation_websocket)
         app.router.add_post("/api/motion/calibration/start", self._motion_calibration_start)
         app.router.add_post("/api/motion/calibration/capture", self._motion_calibration_capture)
         app.router.add_get("/ws", self._websocket)
@@ -141,6 +151,7 @@ class CalibrationWebServer:
     async def _api_state(self, _request: web.Request) -> web.Response:
         calibration, version, render_ms = self.state.snapshot()
         frame = self.camera.latest()
+        motion = self.motion.snapshot()
         return web.json_response(
             {
                 "calibration": calibration.to_dict(),
@@ -149,9 +160,45 @@ class CalibrationWebServer:
                 "camera_error": self.camera.error,
                 "detections": [item.to_dict() for item in frame.detections] if frame else [],
                 "camera_age_ms": (time.time() - frame.captured_at) * 1000 if frame else None,
-                "motion": self.motion.snapshot(),
+                "motion": motion,
+                "navigation": self.navigation.snapshot(motion.get("robot_pose")),
             }
         )
+
+    async def _navigation_state(self, _request: web.Request) -> web.Response:
+        motion = self.motion.snapshot()
+        return web.json_response(self.navigation.snapshot(motion.get("robot_pose")))
+
+    async def _navigation_goal(self, request: web.Request) -> web.Response:
+        try:
+            return web.json_response(self.navigation.set_goal(await request.json()))
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            return web.json_response({"error": str(error)}, status=400)
+
+    async def _navigation_trajectory(self, request: web.Request) -> web.Response:
+        try:
+            return web.json_response(self.navigation.set_trajectory(await request.json()))
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            return web.json_response({"error": str(error)}, status=400)
+
+    async def _navigation_forward(self, _request: web.Request) -> web.Response:
+        try:
+            motion = self.motion.calibrate_robot_forward()
+            return web.json_response(self.navigation.snapshot(motion.get("robot_pose")))
+        except ValueError as error:
+            return web.json_response({"error": str(error)}, status=409)
+
+    async def _navigation_websocket(self, request: web.Request) -> web.WebSocketResponse:
+        socket = web.WebSocketResponse(heartbeat=15)
+        await socket.prepare(request)
+        try:
+            while not socket.closed:
+                motion = self.motion.snapshot()
+                await socket.send_json(self.navigation.snapshot(motion.get("robot_pose")))
+                await asyncio.sleep(1.0 / 30.0)
+        except (ConnectionResetError, asyncio.CancelledError):
+            pass
+        return socket
 
     async def _motion_calibration_start(self, _request: web.Request) -> web.Response:
         return web.json_response(self.motion.begin_floor_calibration())

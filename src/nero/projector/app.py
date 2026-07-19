@@ -15,7 +15,13 @@ import numpy as np
 from .calibration import CalibrationState, ProjectorCalibration
 from .camera import RealSenseArucoCamera
 from .motion import MotionTracker
-from .render import render_floor_calibration_target, render_motion_circle, render_projector_grid
+from .navigation import ProjectorNavigationState
+from .render import (
+    render_floor_calibration_target,
+    render_motion_circle,
+    render_navigation_overlay,
+    render_projector_grid,
+)
 from .server import CalibrationWebServer
 
 logger = logging.getLogger(__name__)
@@ -70,10 +76,12 @@ def run(args: argparse.Namespace) -> None:
     state = CalibrationState(_load_or_default(calibration_path))
     camera = RealSenseArucoCamera(marker_ids=(1, 2, 3, 4), marker_size_m=0.130).start()
     motion = MotionTracker().start()
+    navigation = ProjectorNavigationState()
     server = CalibrationWebServer(
         state=state,
         camera=camera,
         motion=motion,
+        navigation=navigation,
         calibration_path=calibration_path,
         host=args.host,
         port=args.port,
@@ -98,6 +106,7 @@ def run(args: argparse.Namespace) -> None:
     last_motion_sequence = -1
     last_motion_valid = False
     last_motion_draw = 0.0
+    last_navigation_version = -1
     base_projector_frame: np.ndarray | None = None
     logger.info("calibration UI ready on port %d", args.port)
 
@@ -111,11 +120,16 @@ def run(args: argparse.Namespace) -> None:
                 last_calibration_version = version
                 logger.debug("projector update %.2f ms", (time.perf_counter() - started) * 1000)
             motion_state = motion.snapshot()
+            navigation_state = navigation.snapshot(motion_state.get("robot_pose"))
             motion_sequence = motion_state["sequence"] or -1
             now = time.monotonic()
             should_draw_motion = (
                 base_projector_frame is not None
-                and (motion_sequence != last_motion_sequence or motion_state["valid"] != last_motion_valid)
+                and (
+                    motion_sequence != last_motion_sequence
+                    or motion_state["valid"] != last_motion_valid
+                    or navigation_state["state_version"] != last_navigation_version
+                )
                 and now - last_motion_draw >= 1.0 / 60.0
             )
             if should_draw_motion:
@@ -129,17 +143,44 @@ def run(args: argparse.Namespace) -> None:
                         index=floor_calibration["captured"] + 1,
                         total=floor_calibration["total"],
                     )
+                trajectory = navigation_state.get("trajectory") or {}
+                trajectory_uv = motion.room_points_to_floor_uv(trajectory.get("waypoints") or [])
+                goal = navigation_state.get("goal_pose")
+                goal_uv = None
+                goal_heading_uv = None
+                if goal:
+                    points = motion.room_points_to_floor_uv(
+                        [
+                            [goal["x"], goal["y"]],
+                            [
+                                goal["x"] + 0.55 * np.cos(goal["yaw"]),
+                                goal["y"] + 0.55 * np.sin(goal["yaw"]),
+                            ],
+                        ]
+                    )
+                    if len(points) == 2:
+                        goal_uv, goal_heading_uv = points
+                projector_frame = render_navigation_overlay(
+                    projector_frame,
+                    calibration,
+                    robot_frame_uv=motion_state.get("robot_frame_uv"),
+                    trajectory_uv=trajectory_uv,
+                    goal_uv=goal_uv,
+                    goal_heading_uv=goal_heading_uv,
+                    animation_phase=now * 0.8,
+                )
                 if motion_state["valid"] and motion_state["uv"]:
                     projector_frame = render_motion_circle(
                         projector_frame,
                         calibration,
                         motion_state["uv"],
                         ring_uv=motion_state["ring_uv"],
-                        label=str(motion_state["controller_id"] or "CONTROLLER"),
+                        label="ROBOT",
                     )
                 cv2.imshow("Nero Projector", projector_frame)
                 last_motion_sequence = motion_sequence
                 last_motion_valid = bool(motion_state["valid"])
+                last_navigation_version = navigation_state["state_version"]
                 last_motion_draw = now
             frame = camera.latest()
             if frame is not None and frame.sequence != last_camera_sequence:
