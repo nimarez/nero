@@ -16,6 +16,10 @@ dependencies = [
 
 [project.optional-dependencies]
 viz = ["rerun-sdk==0.22.1"]
+projector = [
+    "aiohttp>=3.9,<4",
+    "pyrealsense2>=2.55; sys_platform == 'linux'",
+]
 
 [dependency-groups]
 dev = [
@@ -44,6 +48,7 @@ nero-k1-calibration = "nero.slam.k1_calibration:main"
 nero-setup-orbslam = "nero.slam.setup_orbslam:main"
 nero-setup-booster-room = "nero.simulation.booster_studio_room:main"
 nero-rerun = "nero.observability.rerun_bridge:main"
+nero-projector-calibrate = "nero.projector.app:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
