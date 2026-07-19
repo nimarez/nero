@@ -1,7 +1,16 @@
-"""FIRST RUNNABLE - open-loop velocity ID. Uses K1Gate directly (no bus). De-risks the two
-scariest unknowns: commanded->actual velocity + latency. Runs mock (no robot) or real."""
+"""FIRST RUNNABLE - open-loop velocity ID. Drives via the repo Booster interface
+(nero.robot.RobotInterface.set_velocity) through K1Gate. De-risks the two scariest unknowns:
+commanded->actual velocity + latency. Runs mock (no robot) or real.
+
+The K1 must ALREADY be in walking mode (2) for the real path - K1Gate/RobotInterface never change mode.
+"""
 from __future__ import annotations
-import argparse, json, logging, os, time
+import argparse
+import json
+import logging
+import os
+import time
+
 from .. import config
 from ..contracts import VelCmd
 from .state_machine import K1Gate
@@ -9,12 +18,14 @@ from .state_machine import K1Gate
 log = logging.getLogger("velocity_id")
 
 
-def build_client(ip, mock):
+def build_robot(ip, mock):
     if mock:
-        from .mock_robot import MockClient
-        return MockClient(ip)
-    from .state_machine import make_client
-    return make_client(ip)
+        from .mock_robot import MockRobot
+
+        return MockRobot(ip)
+    from .state_machine import make_robot
+
+    return make_robot()   # real nero.robot.RobotInterface (needs the robot's ROS 2 env + SDK)
 
 
 def _hold(gate, f, vx, wz, dur, phase):
@@ -34,26 +45,24 @@ def run(ip, matrix, out_path, mock=False, settle_s=None, cmd_s=None):
     settle_s = config.VELID_SETTLE_S if settle_s is None else settle_s
     cmd_s = config.VELID_CMD_S if cmd_s is None else cmd_s
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-    client = build_client(ip, mock)
-    gate = K1Gate(client)
+    robot = build_robot(ip, mock)
     ticks = 0
-    with gate, open(out_path, "w") as f:
-        gate.start()
-        for (vx, wz) in matrix:
-            log.info("=== test point vx=%.2f wz=%.2f ===", vx, wz)
+    with K1Gate(robot) as gate:          # __enter__ -> start() -> robot.initialize(), arms at zero
+        with open(out_path, "w") as f:
+            for (vx, wz) in matrix:
+                log.info("=== test point vx=%.2f wz=%.2f ===", vx, wz)
+                _hold(gate, f, 0.0, 0.0, settle_s, "settle")
+                ticks += _hold(gate, f, vx, wz, cmd_s, "cmd")
             _hold(gate, f, 0.0, 0.0, settle_s, "settle")
-            ticks += _hold(gate, f, vx, wz, cmd_s, "cmd")
-        _hold(gate, f, 0.0, 0.0, settle_s, "settle")
     log.info("velocity-ID done: %d command ticks -> %s", ticks, out_path)
-    if hasattr(client, "mode_sequence"):
-        modes = client.mode_sequence()
-        walks = client.walk_calls()
-        log.info("MOCK SUMMARY: modes = %s", " -> ".join(modes))
-        log.info("MOCK SUMMARY: walk() calls = %d ; last = %s", len(walks), walks[-1] if walks else None)
-        assert modes[:2] == ["PREP", "WALK"], f"bad start ordering: {modes}"
-        assert modes[-1] == "DAMP", f"did not end DAMP: {modes}"
-        assert walks and walks[-1] == (0.0, 0.0, 0.0), f"did not zero before shutdown: {walks[-1]}"
-        log.info("MOCK CHECKS PASSED: DAMP->PREP->WALK ... zero -> DAMP, clamps applied.")
+    if hasattr(robot, "velocity_calls"):
+        vels = robot.velocity_calls()
+        log.info("MOCK SUMMARY: %d set_velocity calls; last = %s", len(vels), vels[-1] if vels else None)
+        assert robot.initialized, "robot.initialize() was not called"
+        assert robot.stopped, "robot was not stopped on shutdown"
+        assert vels and vels[-1] == (0.0, 0.0, 0.0), f"did not zero on shutdown: {vels[-1] if vels else None}"
+        assert all(abs(vx) <= config.LIMITS.vx_max + 1e-9 for (vx, _, _) in vels), "vx exceeded clamp"
+        log.info("MOCK CHECKS PASSED: initialized, clamped, zeroed + stopped on exit.")
     return out_path
 
 

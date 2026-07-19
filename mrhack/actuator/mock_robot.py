@@ -1,35 +1,33 @@
-"""MockClient - duck-typed stand-in for the robot SDK client. Prints/records instead of moving.
-The REAL SDK surface (boosteros set_mode/set_velocity vs booster_robotics_sdk change_mode/walk)
-is VERIFY-ON-ROBOT; MockClient is a plausible twin so all control code runs with no hardware."""
+"""MockRobot - duck-typed stand-in for nero.robot.RobotAdapter (initialize / set_velocity / stop).
+Records set_velocity calls so all control code runs with no hardware and no nero package.
+Mirrors the REAL Booster surface: RobotInterface.set_velocity(vx, vy, vyaw) -> B1LocoClient.Move."""
 from __future__ import annotations
-import logging, time
+import logging
+import time
 
 log = logging.getLogger("mock_robot")
 
 
-class MockClient:
+class MockRobot:
+    """Matches nero.robot.RobotAdapter: initialize / set_velocity / stop. No mode changing."""
+
     def __init__(self, ip="mock"):
         self.ip = ip
-        self.mode = "DAMP"
-        self.calls = []
+        self.initialized = False
+        self.stopped = False
+        self.calls: list[tuple[float, float, float, float]] = []   # (t, vx, vy, vyaw)
 
-    def _rec(self, method, *args):
-        self.calls.append((time.time(), method, args))
+    def initialize(self) -> None:
+        self.initialized = True
+        log.debug("[mock] initialize (assumes robot already in walking mode)")
 
-    def change_mode(self, mode):
-        self._rec("change_mode", mode)
-        self.mode = mode
-        log.debug("[mock] mode -> %s", mode)
+    def set_velocity(self, vx: float, vy: float, vyaw: float) -> None:
+        self.calls.append((time.time(), vx, vy, vyaw))
+        log.debug("[mock] set_velocity %.3f %.3f %.3f", vx, vy, vyaw)
 
-    def walk(self, vx, vy, wz):
-        self._rec("walk", vx, vy, wz)
-        log.debug("[mock] walk %.3f %.3f %.3f (%s)", vx, vy, wz, self.mode)
+    def stop(self) -> None:
+        self.stopped = True
+        self.set_velocity(0.0, 0.0, 0.0)
 
-    def get_mode(self):
-        return self.mode
-
-    def mode_sequence(self):
-        return [a[0] for (_, m, a) in self.calls if m == "change_mode"]
-
-    def walk_calls(self):
-        return [a for (_, m, a) in self.calls if m == "walk"]
+    def velocity_calls(self) -> list[tuple[float, float, float]]:
+        return [(vx, vy, vyaw) for (_, vx, vy, vyaw) in self.calls]
