@@ -1,27 +1,22 @@
 #!/usr/bin/env python3
-"""Closed loop: the projected safety circle FOLLOWS the K1, driven by the Vive tracker.
+"""Closed loop: the projected floor SCENE follows the K1 — safety barrier + safety circle + where it's
+about to go (the bearing ray in the far/YOLO phase, the planned path in the close/SLAM phase).
 
 Transform chain (fixed once at calibration, then each tick is cheap):
-    Vive pose (libsurvive, on the Pi)  --SE(2) vive->floor-->  floor metres
+    Vive tracker (libsurvive, on the Pi, ~0.76 m up) --project to ground--> --SE(2) vive->floor-->
     floor metres  --H_floor2proj (ArUco tags + dragged handles)-->  projector pixels
-Each tick: read the Vive pose -> floor -> draw the ANSI safety circle (+ heading) at the K1's floor
-position -> warp to the projector -> project. The circle tracks the robot.
 
-Vive input is the team's UDP transport (PR #6): `nero-vive-udp-send` on the Pi ->
-`nero-vive-udp-receive` on jscore writes /run/nero/vive_pose.json (atomic latest pose, 150 ms fresh).
-We just poll that file.
+Inputs:
+  - Vive pose: the team's UDP transport (PR #6) -> /run/nero/vive_pose.json (position+quaternion, 150ms fresh).
+    We project the tracker down to the robot's ground point (mount height + lean).
+  - Nav telemetry (goal / bearing / planned path / phase): /run/nero/nav.json, bridged from the onboard
+    controller's grid-space object position + planner (nav_bridge, not yet wired -> mock in the meantime).
 
-Run on the box (jscore), once the rig is up:
+Run on the box (jscore), rig up:
     PYTHONPATH=<nero>/src ~/Prismos-x/venv/bin/python follow_circle.py            # real
-    ... --mock                                                                   # synthetic motion, real projector
-Verify the transform math + the pose parser with NO hardware:
+    ... --mock                                                                   # synthetic pose+nav, real projector
+Verify all the math with NO hardware:
     uv run --with numpy --with opencv-python-headless python follow_circle.py --selftest
-
-Box inputs it expects:
-  - /tmp/procam_calib.json  : the 4 dragged projector handles (mapper GUI)
-  - /tmp/vive_floor.json    : SE(2) vive->floor from vive_floor_cal.py -> {"R":2x2,"t":2}
-  - 4 ArUco tags (DICT_4X4_50, ids 0-3) visible to the RealSense (IR)
-  - /run/nero/vive_pose.json : the Vive pose, written by nero-vive-udp-receive (PR #6)
 """
 from __future__ import annotations
 import argparse
@@ -36,13 +31,20 @@ import numpy as np
 PROJ_W, PROJ_H = 1920, 1080
 TAG_SIZE_M = 0.15               # physical ArUco side in metres (MEASURE it) -> sets the metric scale
 VIVE_POSE_FILE = "/run/nero/vive_pose.json"
+NAV_STATE_FILE = "/run/nero/nav.json"
 VIVE_MAX_AGE = 0.15             # PR #6 freshness deadline (s)
-# Tracker->robot-ground offset in the TRACKER body frame (metres). The tracker rides ~30 in (0.762 m)
-# up on the K1's back strap, so its x,y is NOT the foot: it swings out when the robot leans and sits
-# behind centre on the strap. We project it to the ground THROUGH the tracker orientation, so the
-# point stays under the robot as it tilts. Default assumes the tracker's body -z points down; set the
-# horizontal back-strap component here (or calibrate with the robot upright on a known tag).
+BARRIER_RADIUS_M = 1.20         # projected keep-out BARRIER radius (m) — the "stay back" zone around the robot
+# Tracker->robot-ground offset in the TRACKER body frame (m). Tracker rides ~30 in (0.762 m) up on the
+# back strap; project it to the ground THROUGH the tracker orientation so it stays under the robot when
+# it leans. Default assumes body -z points down; set the horizontal back-strap term or calibrate.
 MOUNT_OFFSET_BODY = (0.0, 0.0, -0.762)
+
+# colours (BGR)
+C_BARRIER = (0, 140, 255)   # orange keep-out barrier
+C_SAFETY = (255, 255, 255)  # white ANSI safety circle
+C_BEARING = (0, 255, 255)   # yellow bearing ray (far / YOLO phase)
+C_PATH = (0, 255, 0)        # green planned path (close / SLAM phase)
+C_GOAL = (0, 0, 255)        # red goal marker
 
 
 def transform_points(pts, H):
@@ -61,7 +63,6 @@ def yaw_from_quat_xyzw(q):
 
 
 def quat_to_R(q):
-    """3x3 rotation matrix from a quaternion (x, y, z, w)."""
     x, y, z, w = q
     return np.array([
         [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
@@ -71,15 +72,13 @@ def quat_to_R(q):
 
 
 def tracker_to_ground_xy(position, quat_xyzw, mount_offset=MOUNT_OFFSET_BODY):
-    """Project the tracker's 3D pose to the robot's ground point (x, y): foot = tracker + R @ offset.
-    Because the offset rides in the tracker frame, the projection stays under the robot as it leans."""
+    """Tracker 3D pose -> robot ground (x, y): foot = tracker + R @ offset (stays under the robot on lean)."""
     foot = np.asarray(position, float) + quat_to_R(quat_xyzw) @ np.asarray(mount_offset, float)
     return float(foot[0]), float(foot[1])
 
 
 def parse_vive_pose(d, max_age=VIVE_MAX_AGE, now=None, mount_offset=None):
-    """Parse a /run/nero/vive_pose.json dict (PR #6) -> (x, y, yaw) if valid+fresh, else None.
-    Projects the tracker DOWN to the robot's ground point (mount height) + yaw from quaternion_xyzw."""
+    """/run/nero/vive_pose.json dict -> (x, y, yaw) at the robot's ground point if valid+fresh, else None."""
     if not d.get("tracking_valid", False):
         return None
     if now is not None:
@@ -91,17 +90,42 @@ def parse_vive_pose(d, max_age=VIVE_MAX_AGE, now=None, mount_offset=None):
     return gx, gy, yaw_from_quat_xyzw(d["quaternion_xyzw"])
 
 
-def render_circle(H_floor2proj, cx, cy, radius_m, heading=None, thick=30, color=(255, 255, 255)):
-    """Metric circle (radius_m, centre (cx,cy) in floor metres) drawn as it should appear on the floor."""
-    out = np.zeros((PROJ_H, PROJ_W, 3), np.uint8)
+# --------------------------------------------------------------------- floor drawing primitives
+def _ring(out, H, cx, cy, radius_m, color, thick):
     ang = np.linspace(0, 2 * math.pi, 160, endpoint=False)
-    ring = np.column_stack((cx + radius_m * np.cos(ang), cy + radius_m * np.sin(ang)))
-    proj = transform_points(ring, H_floor2proj)
-    cv2.polylines(out, [np.rint(proj).astype(np.int32)], True, color, thick, cv2.LINE_AA)
-    if heading is not None:
-        ctr = transform_points([[cx, cy]], H_floor2proj)[0]
-        tip = transform_points([[cx + radius_m * math.cos(heading), cy + radius_m * math.sin(heading)]], H_floor2proj)[0]
-        cv2.arrowedLine(out, tuple(np.int32(ctr)), tuple(np.int32(tip)), color, thick, cv2.LINE_AA, tipLength=0.25)
+    pts = transform_points(np.column_stack((cx + radius_m * np.cos(ang), cy + radius_m * np.sin(ang))), H)
+    cv2.polylines(out, [np.rint(pts).astype(np.int32)], True, color, thick, cv2.LINE_AA)
+
+
+def _arrow(out, H, x0, y0, x1, y1, color, thick):
+    p = transform_points([[x0, y0], [x1, y1]], H)
+    cv2.arrowedLine(out, tuple(np.int32(p[0])), tuple(np.int32(p[1])), color, thick, cv2.LINE_AA, tipLength=0.22)
+
+
+def render_scene(H, pose, safety_r, barrier_r=BARRIER_RADIUS_M, nav=None, thick=24):
+    """Compose the floor overlay at the robot: keep-out barrier + ANSI safety circle + heading, plus
+    where it's about to go — the bearing ray (far/YOLO) or the planned path (close/SLAM) + goal marker."""
+    cx, cy, yaw = pose
+    out = np.zeros((PROJ_H, PROJ_W, 3), np.uint8)
+    _ring(out, H, cx, cy, barrier_r, C_BARRIER, thick)                                   # outer keep-out barrier
+    _ring(out, H, cx, cy, safety_r, C_SAFETY, thick)                                     # inner ANSI circle
+    _arrow(out, H, cx, cy, cx + safety_r * math.cos(yaw), cy + safety_r * math.sin(yaw), C_SAFETY, thick)
+    if nav:
+        phase = nav.get("phase", "far")
+        goal = nav.get("goal")
+        if phase == "far":                                                               # heading toward the target
+            b = nav.get("bearing")
+            if b is None and goal is not None:
+                b = math.atan2(goal[1] - cy, goal[0] - cx)
+            if b is not None:
+                reach = math.hypot(goal[0] - cx, goal[1] - cy) if goal is not None else 2.5
+                _arrow(out, H, cx, cy, cx + reach * math.cos(b), cy + reach * math.sin(b), C_BEARING, thick)
+        elif phase == "close" and nav.get("path"):                                       # the planned path
+            pts = transform_points(np.asarray(nav["path"], float), H)
+            cv2.polylines(out, [np.rint(pts).astype(np.int32)], False, C_PATH, thick, cv2.LINE_AA)
+        if goal is not None:
+            g = transform_points([goal], H)[0]
+            cv2.drawMarker(out, tuple(np.int32(g)), C_GOAL, cv2.MARKER_TILTED_CROSS, 70, thick)
     return out
 
 
@@ -133,6 +157,15 @@ def load_vive_floor():
         return np.eye(2), np.zeros(2)
 
 
+def load_nav_state(path=NAV_STATE_FILE):
+    """Onboard nav telemetry bridged to a file: {phase, goal:[x,y], bearing, path:[[x,y]...]} in floor
+    metres. Returns None if absent (scene falls back to just the safety rings)."""
+    try:
+        return json.load(open(path))
+    except (OSError, ValueError):
+        return None
+
+
 # --------------------------------------------------------------------- pose sources
 def vive_file_source(path=VIVE_POSE_FILE, max_age=VIVE_MAX_AGE, hz=30.0):
     """Poll nero-vive-udp-receive's latest-state file (PR #6). Yields (x, y, yaw) only when fresh + valid."""
@@ -156,7 +189,7 @@ def mock_source():
 
 
 # --------------------------------------------------------------------- the loop
-def run(mock=False, tag_size_m=TAG_SIZE_M):
+def run(mock=False, tag_size_m=TAG_SIZE_M, barrier_r=BARRIER_RADIUS_M):
     from context_snippets import project_png                                        # lazy: box only
     from mrhack.safety.safety_circle import safety_radius                           # ANSI radius (metres)
     H = calibrate(tag_size_m)
@@ -168,7 +201,8 @@ def run(mock=False, tag_size_m=TAG_SIZE_M):
         now = time.time()
         speed = math.hypot(fx - last[0], fy - last[1]) / (now - last_t) if last and now > last_t else 0.0
         last, last_t = (fx, fy), now
-        project_png(render_circle(H, fx, fy, safety_radius(speed), heading=vyaw))
+        nav = {"phase": "far", "goal": [fx + 2.0, fy], "bearing": vyaw} if mock else load_nav_state()
+        project_png(render_scene(H, (fx, fy, vyaw), safety_radius(speed), barrier_r, nav))
 
 
 # --------------------------------------------------------------------- selftest (no hardware)
@@ -190,33 +224,34 @@ def _selftest():
     chk("vive_to_floor SE(2): (1,0)->(1,3)", abs(fx - 1.0) < 1e-9 and abs(fy - 3.0) < 1e-9)
 
     H = np.array([[200.0, 0, 300.0], [0, 200.0, 400.0], [0, 0, 1.0]])   # 200 px/m, offset
-    img = render_circle(H, 1.0, 1.0, 0.4)
+    base = render_scene(H, (1.0, 1.0, 0.0), 0.4, barrier_r=0.9)
     ctr = transform_points([[1.0, 1.0]], H)[0]
-    chk("circle centre maps to (500,600) px", abs(ctr[0] - 500) < 1e-6 and abs(ctr[1] - 600) < 1e-6)
-    ys, xs = np.where(img[:, :, 0] > 0)
-    span = max(int(xs.max() - xs.min()), int(ys.max() - ys.min()))
-    chk(f"circle span ~160px (+thick) got {span}", 140 <= span <= 215)
-    fpose = render_circle(H, 1.0, 1.0, 0.4, heading=0.0)
-    chk("heading arrow adds pixels", int((fpose[:, :, 0] > 0).sum()) > int((img[:, :, 0] > 0).sum()))
+    chk("scene centre maps to (500,600) px", abs(ctr[0] - 500) < 1e-6 and abs(ctr[1] - 600) < 1e-6)
 
-    # PR #6 vive_pose.json parsing
+    def _cnt(im, bgr):   # count pixels near a BGR colour (the line cores past anti-aliasing)
+        return int(np.all(np.abs(im.astype(int) - np.array(bgr)) < 60, axis=2).sum())
+    chk("barrier ring drawn (orange)", _cnt(base, C_BARRIER) > 0)
+
+    far = render_scene(H, (1.0, 1.0, 0.0), 0.4, 0.9, nav={"phase": "far", "goal": [3.0, 1.0]})
+    chk("far: yellow bearing ray drawn", _cnt(far, C_BEARING) > _cnt(base, C_BEARING))
+    chk("far: red goal marker drawn", _cnt(far, C_GOAL) > _cnt(base, C_GOAL))
+    close = render_scene(H, (1.0, 1.0, 0.0), 0.4, 0.9, nav={"phase": "close", "path": [[1.0, 1.0], [1.5, 1.2], [2.0, 1.0]]})
+    chk("close: green path drawn", _cnt(close, C_PATH) > _cnt(base, C_PATH))
+
+    # PR #6 vive_pose.json parsing + mount-height projection
     now = 1_000_000.0
     d = {"tracking_valid": True, "position": [1.5, 2.5, 0.1],
-         "quaternion_xyzw": [0.0, 0.0, math.sin(math.pi / 4), math.cos(math.pi / 4)],
-         "transport": {"received_at": now}}
+         "quaternion_xyzw": [0.0, 0.0, math.sin(math.pi / 4), math.cos(math.pi / 4)], "transport": {"received_at": now}}
     p = parse_vive_pose(d, 0.15, now)
     chk("parse vive_pose.json -> (1.5,2.5,yaw=90deg)",
         p is not None and abs(p[0] - 1.5) < 1e-9 and abs(p[1] - 2.5) < 1e-9 and abs(_wrap(p[2] - math.pi / 2)) < 1e-6)
-    chk("stale pose (age>150ms) rejected", parse_vive_pose(d, 0.15, now + 1.0) is None)
-    chk("tracking_valid=False rejected", parse_vive_pose({**d, "tracking_valid": False}, 0.15, now) is None)
-
-    # mount-height projection (tracker ~0.762 m up on the robot's back)
+    chk("stale rejected", parse_vive_pose(d, 0.15, now + 1.0) is None)
+    chk("invalid rejected", parse_vive_pose({**d, "tracking_valid": False}, 0.15, now) is None)
     up = {"tracking_valid": True, "position": [1.0, 2.0, 0.762], "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0], "transport": {"received_at": now}}
-    pu = parse_vive_pose(up, 0.15, now)
-    chk("mount: upright tracker -> ground (1,2)", pu is not None and abs(pu[0] - 1.0) < 1e-9 and abs(pu[1] - 2.0) < 1e-9)
-    pit = {**up, "quaternion_xyzw": [0.0, math.sin(math.pi / 4), 0.0, math.cos(math.pi / 4)]}   # 90deg pitch
+    chk("mount: upright -> ground (1,2)", parse_vive_pose(up, 0.15, now)[:2] == (1.0, 2.0))
+    pit = {**up, "quaternion_xyzw": [0.0, math.sin(math.pi / 4), 0.0, math.cos(math.pi / 4)]}
     pp = parse_vive_pose(pit, 0.15, now)
-    chk("mount: 90deg lean shifts ground by ~mount height", pp is not None and abs(pp[0] - (1.0 - 0.762)) < 1e-6 and abs(pp[1] - 2.0) < 1e-6)
+    chk("mount: 90deg lean shifts ground by ~mount height", abs(pp[0] - (1.0 - 0.762)) < 1e-6 and abs(pp[1] - 2.0) < 1e-6)
 
     print("SELFTEST:", "PASS" if ok else "FAIL")
     return ok
@@ -227,13 +262,14 @@ def main():
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--mock", action="store_true")
     ap.add_argument("--tag-size-m", type=float, default=TAG_SIZE_M)
+    ap.add_argument("--barrier-radius", type=float, default=BARRIER_RADIUS_M, help="keep-out barrier radius (m)")
     ap.add_argument("--mount-height", type=float, default=0.762, help="tracker height above the ground (m); 30 in = 0.762")
     a = ap.parse_args()
     global MOUNT_OFFSET_BODY
     MOUNT_OFFSET_BODY = (MOUNT_OFFSET_BODY[0], MOUNT_OFFSET_BODY[1], -a.mount_height)
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
-    run(mock=a.mock, tag_size_m=a.tag_size_m)
+    run(mock=a.mock, tag_size_m=a.tag_size_m, barrier_r=a.barrier_radius)
 
 
 if __name__ == "__main__":
